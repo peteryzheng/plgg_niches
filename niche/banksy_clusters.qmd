@@ -1,0 +1,427 @@
+---
+title: ""
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+In this doc, we will be looking at the banksy clusters and try to interpret them based on their identity, and other characteristics.
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+
+# Load the data
+
+The objects are here:
+
+1.  RDS object with Leiden Clusters: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240711_135041.rds`
+
+    -   `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_embeddings/total_spatial_banksy_clusters_subset_20240711_135041.rds`
+
+2.  RDS object with cell type cluster markers: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_markers_20240711_135041.rds`
+
+Metadata is here:
+
+1.  `/Users/youyun/Documents/HMS/PhD/beroukhimlab/broad_mount/coja/Spatial_PLGG/data/metadata/Xenium_PS.xlsx`
+
+```{r}
+# banksy_embeddings = readRDS(paste0(
+#     workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240711_135041.rds'
+# ))
+# colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+
+# # generate some leiden clusters at varying resolution
+# lambda = c(0.2, 0.8)
+# SEED = 55555
+# banksy_embeddings <- Banksy::clusterBanksy(
+#     banksy_embeddings, dimred = "Harmony_BANKSY_lam0.2", resolution = c(1,0.5), 
+#     algo = 'leiden',seed = SEED
+# )
+# banksy_embeddings <- Banksy::clusterBanksy(
+#     banksy_embeddings, dimred = "Harmony_BANKSY_lam0.8", resolution = c(1,0.5), 
+#     algo = 'leiden',seed = SEED
+# )
+
+# # getting rid of the previously generated clusters because their resolution is too high
+# colData(banksy_embeddings)[,c(
+#     'clust_Harmony_BANKSY_lam0.2_k50_res1.2','clust_Harmony_BANKSY_lam0.8_k50_res1.2'
+# )] = NULL
+
+# # Different clustering runs can be relabeled to minimise their differences with connectClusters:
+# banksy_embeddings <- Banksy::connectClusters(banksy_embeddings, map_to = clusterNames(banksy_embeddings)[1])
+
+# # save the clusters
+# saveRDS(banksy_embeddings, paste0(
+#     workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240711_135041_reclustered.rds'
+# ))
+
+banksy_embeddings = readRDS(paste0(
+    workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240711_135041_reclustered.rds'
+))
+
+cell_type_markers = fread(paste0(
+    workdir,'coja/Spatial_PLGG/data/markers/final_manual_markers.csv'
+))
+xenium_markers = fread(paste0(
+    workdir, 'youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv'
+))
+```
+
+# Looking at the harmony corrected embeddings
+
+We will first look at the extent of batch effect in the cohort by looking at the embeddings before and after harmony correction. 
+
+```{r}
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP Before/After Harmony (Cell Identity)", fontface='bold'),
+    plot_grid(
+        plotReducedDim(
+            banksy_embeddings, "UMAP_M1_lam0.2", point_size = 0.1,
+            point_alpha = 0.5, color_by = "sample_id"
+        ) +
+            theme(legend.position = "none"),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1,point_alpha = 0.5, color_by = "sample_id"
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
+        nrow = 1,
+        rel_widths = c(1, 1.2)
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP Before/After Harmony (Neighborhood)", fontface='bold'),
+    plot_grid(
+        plotReducedDim(
+            banksy_embeddings, "UMAP_M1_lam0.8", point_size = 0.1,
+            point_alpha = 0.5, color_by = "sample_id"
+        ) +
+            theme(legend.position = "none"),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.1,point_alpha = 0.5, color_by = "sample_id"
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
+        nrow = 1,
+        rel_widths = c(1, 1.2)
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+# Generate the clusters at different resolution and look at them
+
+It seems like resolution = 1 for leiden clustering is the sweet spot. So we will use that
+
+```{r}
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP Before/After Harmony (Cell Identity)", fontface='bold'),
+    plot_grid(
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1, point_alpha = 0.5, 
+            color_by = "clust_Harmony_BANKSY_lam0.2_k50_res1"
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
+            labs(title = 'Leiden Resolution 1'),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1, point_alpha = 0.5, 
+            color_by = "clust_Harmony_BANKSY_lam0.2_k50_res0.5"
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
+            labs(title = 'Leiden Resolution 0.5'),
+        # plotReducedDim(
+        #     banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+        #     point_size = 0.1,point_alpha = 0.5, 
+        #     color_by = "histology"
+        # ) +
+        #     theme(legend.title = element_blank()) +
+        #     guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
+        nrow = 1,
+        rel_widths = c(1, 1, 1)
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP Before/After Harmony (Neighborhood)", fontface='bold'),
+    plot_grid(
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.1,point_alpha = 0.5, 
+            color_by = "clust_Harmony_BANKSY_lam0.8_k50_res1"
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
+            labs(title = 'Leiden Resolution 1'),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.1,point_alpha = 0.5, 
+            color_by = "clust_Harmony_BANKSY_lam0.8_k50_res0.5"
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
+            labs(title = 'Leiden Resolution 0.5'),
+        # plotReducedDim(
+        #     banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+        #     point_size = 0.1,point_alpha = 0.5, 
+        #     color_by = "histology"
+        # ) +
+        #     theme(legend.title = element_blank()) +
+        #     guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
+        nrow = 1,
+        rel_widths = c(1, 1, 1)
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+
+# What are the cell types in the clusters?
+
+## Manually- and Xenium- annotated cell type markers
+
+```{r}
+kable(rbind(cell_type_markers[
+    category == 'Cell Type' & xenium == TRUE,
+    .(markers = paste0(marker, collapse = ', '), source = 'manual'),.(annotation)
+],xenium_markers[
+    ,.(markers = paste0(Genes, collapse = ', '), source = 'xenium'),.(annotation = Annotation)
+]))
+
+markers_to_score = rbind(cell_type_markers[
+    category == 'Cell Type' & xenium == TRUE,
+    .(markers = marker),.(annotation = paste0(annotation, '_manual'))
+],xenium_markers[
+    ,.(markers = Genes),.(annotation = paste0(Annotation, '_xenium'))
+])[
+    ,annotation := gsub(' ','_',annotation)
+]
+
+# Scoring the cells by cell type markers
+cell_types = unique(markers_to_score$annotation)
+marker_score = do.call('cbind',lapply(cell_types, function(x){
+    genes_of_interest = markers_to_score[annotation == x]$markers
+    cell_scores = log10(colSums(
+        assay(banksy_embeddings[genes_of_interest,], 'normcounts')
+    )/length(genes_of_interest) + 1)
+    cell_scores_df = data.frame(cell_scores)
+    rownames(cell_scores_df) = names(cell_scores)
+    colnames(cell_scores_df) = x
+    cell_scores_df
+}))
+colData(banksy_embeddings)[,cell_types] = NULL
+colData(banksy_embeddings) = cbind(colData(banksy_embeddings),marker_score)
+
+# make the plots
+a = lapply(cell_types, function(x){
+    assign(
+        paste0('plot_',x),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1, point_alpha = 0.5, 
+            color_by = x
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
+            labs(title = x),
+        envir = .GlobalEnv
+    )
+})
+```
+
+We are going to annotate `{r} length(cell_types)` cell types. and we will now visualize the marker scores. 
+
+We can start to appreciate that certain markers are specific to certain clusters:
+
+-   Cluster 1 is Pax6+ cells
+-   Cluster 2 is Pax6+ cells with strong GBM Cancer Cell markers (xenium)
+-   Cluster 3 is astrocytes
+-   Cluster 5 is microglia/GBM TME (xenium)
+-   Cluster 6 is OPC/oligodendrocytes/RGC
+-   Cluster 8 is also Pax6+ cells
+-   Cluster 9 is VLMC, stromal and endothelial cell types
+-   Cluster 11 has a minor progenitor glia population also high in proliferation gene markers (xenium)
+-   Cluster 13 is also microglia
+-   Cluster 14 is oligodendrocytes
+
+```{r}
+#| fig-width: 18
+#| fig-height: 18
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP by Manually Curated Markers", fontface='bold'),
+    plot_grid(
+        plotlist = mget(paste0('plot_',grep('_manual',cell_types, value = TRUE))),
+        nrow = 3,
+        rel_widths = rep(1,sum(grepl('_manual',cell_types)))
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+```{r}
+#| fig-width: 36
+#| fig-height: 30
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP by Xenium Markers", fontface='bold'),
+    plot_grid(
+        plotlist = mget(paste0('plot_',grep('_xenium',cell_types, value = TRUE))),
+        nrow = 5,
+        rel_widths = rep(1,sum(grepl('_xenium',cell_types)))
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+Looking at the other clusters without definition or clear trends:
+-   Cluster 4 might be astrocytes/RGC (manual markers)
+-   Cluster 7 might also be astrocytes/RGC (manual markers)
+-   Cluster 10 are pax6+ cells (don't have other marker sets that is better)
+-   Cluster 12 are pax6+ cells (don't have other marker sets that is better)
+
+
+```{r}
+cell_score_dt = colData(banksy_embeddings)[,c(
+    cell_types, 'clust_Harmony_BANKSY_lam0.2_k50_res1'
+)]
+cell_score_dt$cell_sample_id = rownames(cell_score_dt)
+cell_score_dt = melt(as.data.table(cell_score_dt), id.vars = c('cell_sample_id','clust_Harmony_BANKSY_lam0.2_k50_res1'))
+
+cell_types_to_exclude = c('Glioblastoma_.Cancer_cells._xenium','Broad_xenium','Astrocyte_xenium')
+cell_type_pal = as.character(pals::polychrome(length(
+    unique(cell_score_dt[!variable %in% cell_types_to_exclude]$variable)
+)))
+ggplot(
+    cell_score_dt[!variable %in% cell_types_to_exclude],
+    aes(x = value, fill = variable)
+) + geom_density(alpha = 0.2) +
+    facet_wrap(~clust_Harmony_BANKSY_lam0.2_k50_res1, scales = 'free') + 
+    theme_minimal() + xlim(0,0.75) + ylim(0,5) +
+    scale_fill_manual(values = cell_type_pal)
+
+cluster_pal = as.character(pals::alphabet(length(unique(cell_score_dt$clust_Harmony_BANKSY_lam0.2_k50_res1))))
+ggplot(
+    cell_score_dt[!variable %in% c('Glioblastoma_.Cancer_cells._xenium','Broad_xenium')],
+    aes(x = value, fill = clust_Harmony_BANKSY_lam0.2_k50_res1)
+) + geom_density(alpha = 0.5) + 
+    facet_wrap(~variable, scales = 'free') + 
+    theme_minimal() + ylim(0,6) +
+    scale_fill_manual(values = cluster_pal) +
+    labs(fill = 'Cluster ID')
+```
+
+## Finding Statistical Markers
+
+```{r}
+cluster_annotation_table = data.table(
+    cluster = 1:length(unique(colData(banksy_embeddings)$clust_Harmony_BANKSY_lam0.2_k50_res1)),
+    annotation = c(
+        'Pax6+ cells 1','Pax6+ cells - GBM Cancer Cell',
+        'Astrocytes','Astrocytes/RGC 1','Microglia 1',
+        'OPC/Oligodendrocytes/RGC','Astrocytes/RGC 2','Pax6+ cells 2',
+        'VLMC/Stromal/Endothelial','Pax6+ cells 3','Progenitor glia - Proliferation',
+        'Pax6+ cells 4','Microglia 2','Oligodendrocytes'
+    )
+)
+
+scran_cell_markers = findMarkers(
+    assay(banksy_embeddings, "counts"),
+    groups = banksy_embeddings$clust_Harmony_BANKSY_lam0.2_k50_res1,
+    test.type="wilcox", direction="up", lfc = 0.5, pval.type="all"
+)
+
+cluster_annotation_table$markers = unlist(lapply(
+    scran_cell_markers, function(x){
+        paste0(rownames(x[x$FDR <= 0.25,]), collapse = ', ')
+    }
+))
+
+View(cluster_annotation_table)
+
+
+```
+
+
+
+# Looking at the cell types + niches in space
+
+```{r}
+graph_dt = melt(
+    as.data.table(cbind(
+        spatialCoords(banksy_embeddings),
+        colData(banksy_embeddings)[c(
+            'sample_id','cell_id',
+            grep('Harmony.*.res1$',clusterNames(banksy_embeddings), value = TRUE)
+        )]
+    )),id.vars = c('sample_id','cell_id','sdimx','sdimy'),
+    variable.name = 'Cluster Type',value.name = 'Cluster ID'
+)[,sample_id := gsub('output-XETG00078__','',sample_id)]
+graph_dt
+
+cluster_classes = sort(unique(graph_dt$`Cluster ID`))
+color_manual = structure(
+    pals::polychrome()[c(1:length(cluster_classes))],
+    names = cluster_classes
+)
+
+graph_dt[,.(min_x = min(sdimx)), by = c('sample_id')][order(min_x)]
+
+ggplot(graph_dt, aes(x=sdimy, y=sdimx, color=`Cluster ID`)) +
+    facet_wrap(`Cluster Type`~sample_id, nrow = 2, scale = 'free_x') +
+    geom_point(size = 0.3) + 
+    scale_color_manual(values = color_manual) +
+    theme_classic() + 
+    theme(
+        legend.position = "bottom",
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank()
+    ) + guides(
+        color = guide_legend(nrow = 3, byrow = TRUE)
+    ) +
+    coord_flip()
+```
+
