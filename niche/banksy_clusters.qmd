@@ -40,6 +40,9 @@ library(cowplot)
 library(ggplot2)
 library(harmony)
 library(scran)
+library(Seurat)
+library(ComplexHeatmap)
+library(circlize)
 
 # local vs UGER
 if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
@@ -98,8 +101,9 @@ Metadata is here:
 # ))
 
 banksy_embeddings = readRDS(paste0(
-    workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240711_135041_reclustered.rds'
+    workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240711_135041.rds'
 ))
+colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
 
 cell_type_markers = fread(paste0(
     workdir,'coja/Spatial_PLGG/data/markers/final_manual_markers.csv'
@@ -155,70 +159,75 @@ plot_grid(
 
 # Generate the clusters at different resolution and look at them
 
-It seems like resolution = 1 for leiden clustering is the sweet spot. So we will use that
+It seems like resolution = 1 is still too coarse for leiden clusteringsp we are going back to 1.2
 
 ```{r}
 plot_grid(
-    ggdraw() + draw_label("BANKSY Embedding UMAP Before/After Harmony (Cell Identity)", fontface='bold'),
+    ggdraw() + draw_label("BANKSY Embedding UMAP for Cell Identity(L) and Niche(R)", fontface='bold'),
     plot_grid(
         plotReducedDim(
             banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
             point_size = 0.1, point_alpha = 0.5, 
-            color_by = "clust_Harmony_BANKSY_lam0.2_k50_res1"
+            color_by = "clust_Harmony_BANKSY_lam0.2_k50_res1.2"
         ) +
             theme(legend.title = element_blank()) +
-            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
-            labs(title = 'Leiden Resolution 1'),
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.1, point_alpha = 0.5, 
+            color_by = "clust_Harmony_BANKSY_lam0.8_k50_res1.2"
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
+        nrow = 1,
+        rel_widths = c(1, 1)
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+Just to get an idea of where each cluster is, we can look at the UMAPs colored individually by the clusters.
+
+```{r}
+num_cell_cluster = max(as.numeric(colData(banksy_embeddings)$clust_Harmony_BANKSY_lam0.2_k50_res1.2))
+# one hot encoded columns
+one_hot_encoded_clusters = data.frame(dcast(data.table(
+    cell_sample_id = rownames(colData(banksy_embeddings)),
+    clusters = paste0('cell_in_',colData(banksy_embeddings)$clust_Harmony_BANKSY_lam0.2_k50_res1.2)
+), cell_sample_id ~ clusters, length)[order(match(cell_sample_id,rownames(colData(banksy_embeddings))))])
+# cbind into the colData
+colData(banksy_embeddings) = cbind(
+    colData(banksy_embeddings),
+    one_hot_encoded_clusters
+)
+all(rownames(colData(banksy_embeddings)) == colData(banksy_embeddings)$cell_sample_id)
+
+# make the plots
+a = lapply(1:num_cell_cluster, function(x){
+    assign(
+        paste0('cell_type_plot_',x),
         plotReducedDim(
             banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
             point_size = 0.1, point_alpha = 0.5, 
-            color_by = "clust_Harmony_BANKSY_lam0.2_k50_res0.5"
-        ) +
-            theme(legend.title = element_blank()) +
-            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
-            labs(title = 'Leiden Resolution 0.5'),
-        # plotReducedDim(
-        #     banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
-        #     point_size = 0.1,point_alpha = 0.5, 
-        #     color_by = "histology"
-        # ) +
-        #     theme(legend.title = element_blank()) +
-        #     guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
-        nrow = 1,
-        rel_widths = c(1, 1, 1)
+            color_by = paste0('cell_in_',x)
+        )  + theme(
+            legend.position = "none",
+            axis.text=element_blank(),
+            axis.ticks=element_blank(),
+            axis.title=element_blank()
+        ) + labs(title = paste0('Cluster ',x)),
+        envir = .GlobalEnv
+    )
+})
+
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP by Cluster", fontface='bold'),
+    plot_grid(
+        plotlist = mget(paste0('cell_type_plot_',1:num_cell_cluster)),
+        nrow = 4,
+        rel_widths = rep(1,num_cell_cluster)
     ), ncol = 1,rel_heights = c(0.1, 5)
 )
 
-plot_grid(
-    ggdraw() + draw_label("BANKSY Embedding UMAP Before/After Harmony (Neighborhood)", fontface='bold'),
-    plot_grid(
-        plotReducedDim(
-            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
-            point_size = 0.1,point_alpha = 0.5, 
-            color_by = "clust_Harmony_BANKSY_lam0.8_k50_res1"
-        ) +
-            theme(legend.title = element_blank()) +
-            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
-            labs(title = 'Leiden Resolution 1'),
-        plotReducedDim(
-            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
-            point_size = 0.1,point_alpha = 0.5, 
-            color_by = "clust_Harmony_BANKSY_lam0.8_k50_res0.5"
-        ) +
-            theme(legend.title = element_blank()) +
-            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
-            labs(title = 'Leiden Resolution 0.5'),
-        # plotReducedDim(
-        #     banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
-        #     point_size = 0.1,point_alpha = 0.5, 
-        #     color_by = "histology"
-        # ) +
-        #     theme(legend.title = element_blank()) +
-        #     guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
-        nrow = 1,
-        rel_widths = c(1, 1, 1)
-    ), ncol = 1,rel_heights = c(0.1, 5)
-)
 ```
 
 
@@ -256,7 +265,11 @@ marker_score = do.call('cbind',lapply(cell_types, function(x){
     cell_scores_df
 }))
 colData(banksy_embeddings)[,cell_types] = NULL
-colData(banksy_embeddings) = cbind(colData(banksy_embeddings),marker_score)
+if(all(rownames(colData(banksy_embeddings)) == rownames(colData(banksy_embeddings)))){
+    colData(banksy_embeddings) = cbind(colData(banksy_embeddings),marker_score)
+}else{
+    stop('Cell IDs do not match')
+}
 
 # make the plots
 a = lapply(cell_types, function(x){
@@ -267,8 +280,8 @@ a = lapply(cell_types, function(x){
             point_size = 0.1, point_alpha = 0.5, 
             color_by = x
         ) +
-            theme(legend.title = element_blank()) +
-            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))) +
+            theme(legend.title = element_blank(), legend.position = 'bottom') +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1), nrow = 1)) +
             labs(title = x),
         envir = .GlobalEnv
     )
@@ -276,19 +289,6 @@ a = lapply(cell_types, function(x){
 ```
 
 We are going to annotate `{r} length(cell_types)` cell types. and we will now visualize the marker scores. 
-
-We can start to appreciate that certain markers are specific to certain clusters:
-
--   Cluster 1 is Pax6+ cells
--   Cluster 2 is Pax6+ cells with strong GBM Cancer Cell markers (xenium)
--   Cluster 3 is astrocytes
--   Cluster 5 is microglia/GBM TME (xenium)
--   Cluster 6 is OPC/oligodendrocytes/RGC
--   Cluster 8 is also Pax6+ cells
--   Cluster 9 is VLMC, stromal and endothelial cell types
--   Cluster 11 has a minor progenitor glia population also high in proliferation gene markers (xenium)
--   Cluster 13 is also microglia
--   Cluster 14 is oligodendrocytes
 
 ```{r}
 #| fig-width: 18
@@ -316,73 +316,89 @@ plot_grid(
 )
 ```
 
-Looking at the other clusters without definition or clear trends:
--   Cluster 4 might be astrocytes/RGC (manual markers)
--   Cluster 7 might also be astrocytes/RGC (manual markers)
--   Cluster 10 are pax6+ cells (don't have other marker sets that is better)
--   Cluster 12 are pax6+ cells (don't have other marker sets that is better)
-
-
-```{r}
-cell_score_dt = colData(banksy_embeddings)[,c(
-    cell_types, 'clust_Harmony_BANKSY_lam0.2_k50_res1'
-)]
-cell_score_dt$cell_sample_id = rownames(cell_score_dt)
-cell_score_dt = melt(as.data.table(cell_score_dt), id.vars = c('cell_sample_id','clust_Harmony_BANKSY_lam0.2_k50_res1'))
-
-cell_types_to_exclude = c('Glioblastoma_.Cancer_cells._xenium','Broad_xenium','Astrocyte_xenium')
-cell_type_pal = as.character(pals::polychrome(length(
-    unique(cell_score_dt[!variable %in% cell_types_to_exclude]$variable)
-)))
-ggplot(
-    cell_score_dt[!variable %in% cell_types_to_exclude],
-    aes(x = value, fill = variable)
-) + geom_density(alpha = 0.2) +
-    facet_wrap(~clust_Harmony_BANKSY_lam0.2_k50_res1, scales = 'free') + 
-    theme_minimal() + xlim(0,0.75) + ylim(0,5) +
-    scale_fill_manual(values = cell_type_pal)
-
-cluster_pal = as.character(pals::alphabet(length(unique(cell_score_dt$clust_Harmony_BANKSY_lam0.2_k50_res1))))
-ggplot(
-    cell_score_dt[!variable %in% c('Glioblastoma_.Cancer_cells._xenium','Broad_xenium')],
-    aes(x = value, fill = clust_Harmony_BANKSY_lam0.2_k50_res1)
-) + geom_density(alpha = 0.5) + 
-    facet_wrap(~variable, scales = 'free') + 
-    theme_minimal() + ylim(0,6) +
-    scale_fill_manual(values = cluster_pal) +
-    labs(fill = 'Cluster ID')
-```
+We should complement the manual approach with more statistics
 
 ## Finding Statistical Markers
 
+A better way to do this is to test statistically, which clusters are enriched for which signature. We will do that here
+
 ```{r}
-cluster_annotation_table = data.table(
-    cluster = 1:length(unique(colData(banksy_embeddings)$clust_Harmony_BANKSY_lam0.2_k50_res1)),
-    annotation = c(
-        'Pax6+ cells 1','Pax6+ cells - GBM Cancer Cell',
-        'Astrocytes','Astrocytes/RGC 1','Microglia 1',
-        'OPC/Oligodendrocytes/RGC','Astrocytes/RGC 2','Pax6+ cells 2',
-        'VLMC/Stromal/Endothelial','Pax6+ cells 3','Progenitor glia - Proliferation',
-        'Pax6+ cells 4','Microglia 2','Oligodendrocytes'
+cell_type_cluster_sig = do.call('rbind',lapply(paste0('cell_in_',1:num_cell_cluster), function(x){
+    scran_cell_markers = findMarkers(
+        as.matrix(t(colData(banksy_embeddings)[,cell_types])),
+        groups = colData(banksy_embeddings)[,x],
+        test.type="wilcox", direction="up"
+    )    
+    delta_dt = melt(setDT(
+        as.data.frame(colData(banksy_embeddings)[,c(cell_types,x)]),
+        keep.rownames = 'cell_sample_id'
+    ), id.vars = c('cell_sample_id',x), variable.name = 'cell_type', value.name = 'score')[
+        ,.(delta_score = mean(score[get(x) == 1]) - mean(score[get(x) == 0])),.(cell_type)
+    ]
+    cluster_cell_type = setDT(
+        data.frame(scran_cell_markers[[2]]),
+        keep.rownames = 'cell_type'
+    )[,.(cell_type = make.names(cell_type), Top, p.value, FDR, cluster = x)]
+    merge(
+        cluster_cell_type, delta_dt, by = 'cell_type'
     )
+}))
+
+# make a hierarchically clustered heatmap
+cell_type_cluster_sig_matrix = dcast(
+    cell_type_cluster_sig[,.(cell_type, cluster, FDR = ifelse(FDR<0.05,'*',''))],
+    cluster ~ cell_type, value.var = 'FDR'
 )
-
-scran_cell_markers = findMarkers(
-    assay(banksy_embeddings, "counts"),
-    groups = banksy_embeddings$clust_Harmony_BANKSY_lam0.2_k50_res1,
-    test.type="wilcox", direction="up", lfc = 0.5, pval.type="all"
+cell_type_cluster_delta_matrix = dcast(
+    cell_type_cluster_sig[,.(cell_type, cluster, delta_score)],
+    cluster ~ cell_type, value.var = 'delta_score'
 )
-
-cluster_annotation_table$markers = unlist(lapply(
-    scran_cell_markers, function(x){
-        paste0(rownames(x[x$FDR <= 0.25,]), collapse = ', ')
-    }
-))
-
-View(cluster_annotation_table)
-
+plot_sig_mt = as.matrix(cell_type_cluster_sig_matrix[,c(2:ncol(cell_type_cluster_sig_matrix)), with = FALSE])
+plot_delta_mt = as.matrix(cell_type_cluster_delta_matrix[,c(2:ncol(cell_type_cluster_delta_matrix)), with = FALSE])
+rownames(plot_sig_mt) = cell_type_cluster_sig_matrix$cluster
+rownames(plot_delta_mt) = cell_type_cluster_delta_matrix$cluster
+col_fun = colorRamp2(c(-0.3,0,0.3), c("green", "white", "red"))
+Heatmap(
+    plot_delta_mt, name = "Delta Mean Norm Counts", col = col_fun,
+    cell_fun = function(j, i, x, y, width, height, fill) {
+        grid.text(sprintf("%s", plot_sig_mt[i, j]), x, y, gp = gpar(fontsize = 10))
+})
 
 ```
+
+Another way is to do DE of one vs all and find marker genes 
+
+```{r}
+library(Seurat)
+banksy_embeddings_seurat = as.Seurat(banksy_embeddings, counts = 'counts', data = NULL)
+Idents(banksy_embeddings_seurat) = 'clust_Harmony_BANKSY_lam0.2_k50_res1.2'
+DE_genes_nb = FindAllMarkers(
+    banksy_embeddings_seurat,
+    slot = 'counts',
+    test.use = 'negbinom',
+    verbose = FALSE
+)
+DE_genes_wilcox = FindAllMarkers(
+    banksy_embeddings_seurat,
+    slot = 'counts',
+    test.use = 'wilcox',
+    verbose = FALSE
+)
+head(DE_genes)
+
+```
+
+With the information above, we can begin to piece together some preliminary definition for each cluster. 
+
+```{r}
+prelim_annotation = data.table(
+    cluster = 1:num_cell_cluster,
+    annotation = c(
+
+    )
+)
+```
+
 
 
 
@@ -394,7 +410,7 @@ graph_dt = melt(
         spatialCoords(banksy_embeddings),
         colData(banksy_embeddings)[c(
             'sample_id','cell_id',
-            grep('Harmony.*.res1$',clusterNames(banksy_embeddings), value = TRUE)
+            grep('Harmony.*.res1.2$',clusterNames(banksy_embeddings), value = TRUE)
         )]
     )),id.vars = c('sample_id','cell_id','sdimx','sdimy'),
     variable.name = 'Cluster Type',value.name = 'Cluster ID'
@@ -411,7 +427,7 @@ graph_dt[,.(min_x = min(sdimx)), by = c('sample_id')][order(min_x)]
 
 ggplot(graph_dt, aes(x=sdimy, y=sdimx, color=`Cluster ID`)) +
     facet_wrap(`Cluster Type`~sample_id, nrow = 2, scale = 'free_x') +
-    geom_point(size = 0.3) + 
+    geom_point(size = 0.1, alpha = 0.5) + 
     scale_color_manual(values = color_manual) +
     theme_classic() + 
     theme(
