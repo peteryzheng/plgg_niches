@@ -1,5 +1,5 @@
 ---
-title: ""
+title: "Analyzing BANKSY Embedding for Cell Identities"
 author: "Peter Youyun Zheng"
 date: today
 date-format: long
@@ -43,6 +43,8 @@ library(scran)
 library(Seurat)
 library(ComplexHeatmap)
 library(circlize)
+library(Seurat)
+
 
 # local vs UGER
 if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
@@ -70,38 +72,8 @@ Metadata is here:
 1.  `/Users/youyun/Documents/HMS/PhD/beroukhimlab/broad_mount/coja/Spatial_PLGG/data/metadata/Xenium_PS.xlsx`
 
 ```{r}
-# banksy_embeddings = readRDS(paste0(
-#     workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240711_135041.rds'
-# ))
-# colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
-
-# # generate some leiden clusters at varying resolution
-# lambda = c(0.2, 0.8)
-# SEED = 55555
-# banksy_embeddings <- Banksy::clusterBanksy(
-#     banksy_embeddings, dimred = "Harmony_BANKSY_lam0.2", resolution = c(1,0.5), 
-#     algo = 'leiden',seed = SEED
-# )
-# banksy_embeddings <- Banksy::clusterBanksy(
-#     banksy_embeddings, dimred = "Harmony_BANKSY_lam0.8", resolution = c(1,0.5), 
-#     algo = 'leiden',seed = SEED
-# )
-
-# # getting rid of the previously generated clusters because their resolution is too high
-# colData(banksy_embeddings)[,c(
-#     'clust_Harmony_BANKSY_lam0.2_k50_res1.2','clust_Harmony_BANKSY_lam0.8_k50_res1.2'
-# )] = NULL
-
-# # Different clustering runs can be relabeled to minimise their differences with connectClusters:
-# banksy_embeddings <- Banksy::connectClusters(banksy_embeddings, map_to = clusterNames(banksy_embeddings)[1])
-
-# # save the clusters
-# saveRDS(banksy_embeddings, paste0(
-#     workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240711_135041_reclustered.rds'
-# ))
-
 banksy_embeddings = readRDS(paste0(
-    workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240711_135041.rds'
+    workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240719_092550.rds'
 ))
 colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
 
@@ -157,9 +129,14 @@ plot_grid(
 )
 ```
 
-# Generate the clusters at different resolution and look at them
+# What do the cell clusters look like?
 
-It seems like resolution = 1 is still too coarse for leiden clusteringsp we are going back to 1.2
+```{r}
+res = 1
+clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',res))
+```
+
+We will be looking at resolution = `r res` for the clusters using the `r clust_name` column.
 
 ```{r}
 plot_grid(
@@ -168,14 +145,14 @@ plot_grid(
         plotReducedDim(
             banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
             point_size = 0.1, point_alpha = 0.5, 
-            color_by = "clust_Harmony_BANKSY_lam0.2_k50_res1.2"
+            color_by = clust_name
         ) +
             theme(legend.title = element_blank()) +
             guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
         plotReducedDim(
             banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
             point_size = 0.1, point_alpha = 0.5, 
-            color_by = "clust_Harmony_BANKSY_lam0.8_k50_res1.2"
+            color_by = gsub('lam0.2','lam0.8',clust_name)
         ) +
             theme(legend.title = element_blank()) +
             guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
@@ -188,21 +165,24 @@ plot_grid(
 Just to get an idea of where each cluster is, we can look at the UMAPs colored individually by the clusters.
 
 ```{r}
-num_cell_cluster = max(as.numeric(colData(banksy_embeddings)$clust_Harmony_BANKSY_lam0.2_k50_res1.2))
+cell_clusters = sort(unique(as.numeric(colData(banksy_embeddings)[,clust_name])))
 # one hot encoded columns
 one_hot_encoded_clusters = data.frame(dcast(data.table(
     cell_sample_id = rownames(colData(banksy_embeddings)),
-    clusters = paste0('cell_in_',colData(banksy_embeddings)$clust_Harmony_BANKSY_lam0.2_k50_res1.2)
+    clusters = paste0('cell_in_',colData(banksy_embeddings)[,clust_name])
 ), cell_sample_id ~ clusters, length)[order(match(cell_sample_id,rownames(colData(banksy_embeddings))))])
 # cbind into the colData
-colData(banksy_embeddings) = cbind(
-    colData(banksy_embeddings),
-    one_hot_encoded_clusters
-)
-all(rownames(colData(banksy_embeddings)) == colData(banksy_embeddings)$cell_sample_id)
+if(all(rownames(colData(banksy_embeddings)) == colData(banksy_embeddings)$cell_sample_id)){
+    colData(banksy_embeddings) = cbind(
+        colData(banksy_embeddings),
+        one_hot_encoded_clusters
+    )
+}else{
+    stop('Cell IDs do not match')
+}
 
 # make the plots
-a = lapply(1:num_cell_cluster, function(x){
+a = lapply(cell_clusters, function(x){
     assign(
         paste0('cell_type_plot_',x),
         plotReducedDim(
@@ -222,9 +202,9 @@ a = lapply(1:num_cell_cluster, function(x){
 plot_grid(
     ggdraw() + draw_label("BANKSY Embedding UMAP by Cluster", fontface='bold'),
     plot_grid(
-        plotlist = mget(paste0('cell_type_plot_',1:num_cell_cluster)),
-        nrow = 4,
-        rel_widths = rep(1,num_cell_cluster)
+        plotlist = mget(paste0('cell_type_plot_',cell_clusters)),
+        ncol = 6,
+        rel_widths = rep(1,length(cell_clusters))
     ), ncol = 1,rel_heights = c(0.1, 5)
 )
 
@@ -236,21 +216,15 @@ plot_grid(
 ## Manually- and Xenium- annotated cell type markers
 
 ```{r}
-kable(rbind(cell_type_markers[
-    category == 'Cell Type' & xenium == TRUE,
-    .(markers = paste0(marker, collapse = ', '), source = 'manual'),.(annotation)
-],xenium_markers[
-    ,.(markers = paste0(Genes, collapse = ', '), source = 'xenium'),.(annotation = Annotation)
-]))
-
 markers_to_score = rbind(cell_type_markers[
     category == 'Cell Type' & xenium == TRUE,
     .(markers = marker),.(annotation = paste0(annotation, '_manual'))
 ],xenium_markers[
     ,.(markers = Genes),.(annotation = paste0(Annotation, '_xenium'))
 ])[
-    ,annotation := gsub(' ','_',annotation)
+    ,annotation := make.names(annotation)
 ]
+markers_to_score = markers_to_score[annotation %in% markers_to_score[,.N, .(annotation)][N>=2]$annotation]
 
 # Scoring the cells by cell type markers
 cell_types = unique(markers_to_score$annotation)
@@ -291,26 +265,26 @@ a = lapply(cell_types, function(x){
 We are going to annotate `{r} length(cell_types)` cell types. and we will now visualize the marker scores. 
 
 ```{r}
-#| fig-width: 18
-#| fig-height: 18
+#| fig-width: 15
+#| fig-height: 10
 plot_grid(
     ggdraw() + draw_label("BANKSY Embedding UMAP by Manually Curated Markers", fontface='bold'),
     plot_grid(
         plotlist = mget(paste0('plot_',grep('_manual',cell_types, value = TRUE))),
-        nrow = 3,
+        ncol = 4,
         rel_widths = rep(1,sum(grepl('_manual',cell_types)))
     ), ncol = 1,rel_heights = c(0.1, 5)
 )
 ```
 
 ```{r}
-#| fig-width: 36
-#| fig-height: 30
+#| fig-width: 20
+#| fig-height: 20
 plot_grid(
     ggdraw() + draw_label("BANKSY Embedding UMAP by Xenium Markers", fontface='bold'),
     plot_grid(
         plotlist = mget(paste0('plot_',grep('_xenium',cell_types, value = TRUE))),
-        nrow = 5,
+        ncol = 5,
         rel_widths = rep(1,sum(grepl('_xenium',cell_types)))
     ), ncol = 1,rel_heights = c(0.1, 5)
 )
@@ -318,12 +292,12 @@ plot_grid(
 
 We should complement the manual approach with more statistics
 
-## Finding Statistical Markers
+## Looking at these 'metagenes' statistically
 
 A better way to do this is to test statistically, which clusters are enriched for which signature. We will do that here
 
 ```{r}
-cell_type_cluster_sig = do.call('rbind',lapply(paste0('cell_in_',1:num_cell_cluster), function(x){
+cell_type_cluster_sig = do.call('rbind',lapply(paste0('cell_in_',cell_clusters), function(x){
     scran_cell_markers = findMarkers(
         as.matrix(t(colData(banksy_embeddings)[,cell_types])),
         groups = colData(banksy_embeddings)[,x],
@@ -357,87 +331,126 @@ plot_sig_mt = as.matrix(cell_type_cluster_sig_matrix[,c(2:ncol(cell_type_cluster
 plot_delta_mt = as.matrix(cell_type_cluster_delta_matrix[,c(2:ncol(cell_type_cluster_delta_matrix)), with = FALSE])
 rownames(plot_sig_mt) = cell_type_cluster_sig_matrix$cluster
 rownames(plot_delta_mt) = cell_type_cluster_delta_matrix$cluster
-col_fun = colorRamp2(c(-0.3,0,0.3), c("green", "white", "red"))
+col_fun = colorRamp2(c(-0.3,0,0.3), c("red", "white", "green"))
 Heatmap(
     plot_delta_mt, name = "Delta Mean Norm Counts", col = col_fun,
     cell_fun = function(j, i, x, y, width, height, fill) {
         grid.text(sprintf("%s", plot_sig_mt[i, j]), x, y, gp = gpar(fontsize = 10))
 })
+```
+
+## Looking at the DE Genes in each cluster
+
+```{r}
+ggplot(colData(banksy_embeddings)) + 
+    geom_bar(aes(x = get(clust_name), fill = as.numeric(get(clust_name)))) + 
+    facet_wrap(~sample_id, nrow = 3, scale = 'free_y') +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 15)
+    ) + labs(
+        x = 'Cluster ID', y = 'Number of Cells (log10)'
+    ) + scale_fill_viridis_c(option = 'D') +
+    guides(fill = guide_legend(title = 'Cluster ID')) +
+    scale_y_log10()
 
 ```
 
-Another way is to do DE of one vs all and find marker genes 
-
 ```{r}
-library(Seurat)
+#| warning: false
 banksy_embeddings_seurat = as.Seurat(banksy_embeddings, counts = 'counts', data = NULL)
-Idents(banksy_embeddings_seurat) = 'clust_Harmony_BANKSY_lam0.2_k50_res1.2'
-DE_genes_nb = FindAllMarkers(
-    banksy_embeddings_seurat,
-    slot = 'counts',
-    test.use = 'negbinom',
-    verbose = FALSE
+banksy_embeddings_seurat = NormalizeData(
+    banksy_embeddings_seurat, normalization.method = "LogNormalize", 
+    scale.factor = 10000
 )
-DE_genes_wilcox = FindAllMarkers(
+Idents(banksy_embeddings_seurat) = clust_name
+
+DE_genes_wilcox = data.table(FindAllMarkers(
     banksy_embeddings_seurat,
     slot = 'counts',
     test.use = 'wilcox',
+    only.pos = TRUE,
     verbose = FALSE
-)
-head(DE_genes)
+))
 
+DE_genes_wilcox = merge(
+    DE_genes_wilcox,
+    xenium_markers[,.(gene = Genes, Annotation)],
+    by = 'gene'
+)
+
+kable(DE_genes_wilcox[order(p_val_adj)][
+    p_val_adj <= 0.05 & avg_log2FC >= 1, .(
+        N = .N, 
+        `Markers` = paste0(
+            gene[avg_log2FC >= 1], ' (', 
+            round(avg_log2FC[avg_log2FC >= 1], 2),  ', ',
+            Annotation[avg_log2FC >= 1] ,
+            ')', collapse = ', '
+        )
+    ), 
+    .(cluster)
+][order(cluster)])
 ```
+
+# Preliminary annotation
 
 With the information above, we can begin to piece together some preliminary definition for each cluster. 
 
-```{r}
-prelim_annotation = data.table(
-    cluster = 1:num_cell_cluster,
-    annotation = c(
+This [Cell Paper](https://www.sciencedirect.com/science/article/pii/S0092867421005018?via%3Dihub#fig1) and this [Nature Paper](https://www.nature.com/articles/s41586-019-1506-7/figures/1)
 
+```{r}
+prelim_annotation_res1 = data.table(t(setDT(list(
+    `1` = c('Neuron','GABAergic Neuron (lamp5, pax6)'),
+    `2` = c('Neuron','Glutamatergic Neuron (GBM CC Xenium)'),
+    `12` = c('Neuron','GABAergic Neuron (Proliferating)'),
+    `15` = c('Neuron','Glutamatergic Neuron'),
+    `18` = c('Neuron','Unknown Neuron (GABAergic and Glutamatergic)'),
+    `17` = c('Oligodendrocytes','Oligodendrocytes'),
+    `16` = c('Proliferation','Proliferation'),
+    `9` = c('Lymphoid','Lymphoid'),
+    `11` = c('Neuron','Unknown Neuron (GABAergic and Glutamatergic)'),
+    `19` = c('Neuron','GABAergic Neuron (sst, sst/chodl, pvalb, chandelier)'),
+    `3` = c('RGC','RGC'),
+    `8` = c('RGC','RGC'),
+    `14` = c('Neuron','Glutamatergic Neuron (l6b)'),
+    `20` = c('Undetermined','Undetermined'),
+    `4` = c('Myeloid','Myeloid'),
+    `6` = c('Stromal','Endothelial/VLMC'), 
+    `13` = c('Myeloid','Myeloid'),
+    `5` = c('OPC','OPC'),
+    `7` = c('Astrocyte','Astrocyte'),
+    `10` = c('Astrocyte','Astrocyte (VLMC, myeloid)')
+))), keep.rownames = 'cluster')[
+    , c('Coarse Cell Type', 'Fine Cell Type Annotation') := list(V1, V2)
+][,c('V1','V2') := NULL][
+    order(as.numeric(cluster)), 
+    `Coarse Cell Type UMAP` := paste0(
+        `Coarse Cell Type`, ' ', c(1:.N)
+    ),.(`Coarse Cell Type`)
+][,`Fine Cell Type` := gsub(
+        ' \\(.*','', `Fine Cell Type Annotation`
+)][
+    order(as.numeric(cluster)),
+    `Fine Cell Type UMAP` := paste0(
+        `Fine Cell Type`, ' ', c(1:.N)
+    ),.(`Fine Cell Type`)
+]
+setcolorder(
+    prelim_annotation_res1,
+    c(
+        'cluster','Coarse Cell Type','Coarse Cell Type UMAP',
+        'Fine Cell Type','Fine Cell Type UMAP',
+        'Fine Cell Type Annotation'
     )
 )
-```
-
-
-
-
-# Looking at the cell types + niches in space
-
-```{r}
-graph_dt = melt(
-    as.data.table(cbind(
-        spatialCoords(banksy_embeddings),
-        colData(banksy_embeddings)[c(
-            'sample_id','cell_id',
-            grep('Harmony.*.res1.2$',clusterNames(banksy_embeddings), value = TRUE)
-        )]
-    )),id.vars = c('sample_id','cell_id','sdimx','sdimy'),
-    variable.name = 'Cluster Type',value.name = 'Cluster ID'
-)[,sample_id := gsub('output-XETG00078__','',sample_id)]
-graph_dt
-
-cluster_classes = sort(unique(graph_dt$`Cluster ID`))
-color_manual = structure(
-    pals::polychrome()[c(1:length(cluster_classes))],
-    names = cluster_classes
+kable(prelim_annotation_res1)
+write.table(
+    prelim_annotation_res1,
+    file = paste0(
+        workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
+    ),
+    sep = '\t', quote = FALSE, row.names = FALSE
 )
-
-graph_dt[,.(min_x = min(sdimx)), by = c('sample_id')][order(min_x)]
-
-ggplot(graph_dt, aes(x=sdimy, y=sdimx, color=`Cluster ID`)) +
-    facet_wrap(`Cluster Type`~sample_id, nrow = 2, scale = 'free_x') +
-    geom_point(size = 0.1, alpha = 0.5) + 
-    scale_color_manual(values = color_manual) +
-    theme_classic() + 
-    theme(
-        legend.position = "bottom",
-        axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank()
-    ) + guides(
-        color = guide_legend(nrow = 3, byrow = TRUE)
-    ) +
-    coord_flip()
 ```
 

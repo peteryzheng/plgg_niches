@@ -202,6 +202,7 @@ cell_type_markers = findMarkers(
     groups = total_se_staggered$clust_Harmony_BANKSY_lam0.2_k50_res1.2,
     test.type="wilcox"
 )
+
 saveRDS(cell_type_markers, paste0(
     workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_markers_',
     current_time,'.rds'
