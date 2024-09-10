@@ -44,6 +44,7 @@ library(Seurat)
 library(ComplexHeatmap)
 library(circlize)
 library(Seurat)
+library(plotly)
 
 
 # local vs UGER
@@ -452,5 +453,54 @@ write.table(
     ),
     sep = '\t', quote = FALSE, row.names = FALSE
 )
+```
+
+# Cell Type Enrichment Analysis
+
+```{r}
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+histology_cell_type_enrichment = pairwise_categorical_enrichment_test(
+    colData(banksy_embeddings)$`clust_Harmony_BANKSY_lam0.2_k50_res1`,
+    colData(banksy_embeddings)$histology
+)
+histology_cell_type_enrichment = merge(
+    histology_cell_type_enrichment, prelim_annotation_res1[
+        ,cluster := as.character(cluster)
+    ], by.x = 'var1', by.y = 'cluster'
+)
+```
+
+```{r}
+ggplot(histology_cell_type_enrichment) +
+    geom_point(aes(
+        x = `Fine Cell Type UMAP`, y = var2, size = N_var1var2, 
+        # color by odds_ratios column capped at percentile 95
+        fill = pmin(
+            quantile(log(odds_ratios), 0.95, na.rm = TRUE), 
+            log(odds_ratios), na.rm = TRUE
+        ), color = ifelse(
+            q_value < 0.05 & odds_ratios > 1, 
+            'significant','not significant'
+        )
+    ), shape = 21, stroke = 1) +
+    theme(
+        text = element_text(size = 15), 
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = 'right'
+    ) + scale_fill_viridis_c() +
+    scale_size_area(max_size = 10) +
+    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Enrichment of Cell Type Across Histologies',
+        x = 'Cell Type',
+        y = 'Histology',
+        size = 'Number of Cells',
+        fill = 'log OR',
+        color = 'Significance'
+    ) + guides(
+        fill = guide_legend(title = 'log OR'),
+        color = guide_legend(title = 'Significance')
+    )
+
 ```
 

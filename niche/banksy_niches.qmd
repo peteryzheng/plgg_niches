@@ -41,10 +41,12 @@ library(ggplot2)
 library(harmony)
 library(scran)
 library(Seurat)
-library(ComplexHeatmap)
+library(dbscan)
 library(circlize)
 library(Seurat)
-
+library(plotly)
+library(scales)
+library(htmlwidgets)
 
 # local vs UGER
 if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
@@ -73,8 +75,10 @@ Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xeniu
 
 ```{r}
 # load the banksy embeddings
-banksy_embeddings = readRDS(paste0(
-    workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240719_092550.rds'
+banksy_embeddings = readRDS(ifelse(
+    workdir == "/xchip/beroukhimlab/",
+    paste0(workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240719_092550.rds'),
+    '/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/total_spatial_banksy_clusters_subset_20240719_092550.rds'
 ))
 colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
 
@@ -94,7 +98,7 @@ niche_clust_name = gsub('lam0.2','lam0.8',cell_clust_name)
 # banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)[,cell_clust_name] %in% annotated_cell_clusters]
 ```
 
-# What are the niches?
+# Setting up Neighborhood Analysis
 
 Here we will look at the niches in the data and annotate them using the cell types of self and neighbors.
 
@@ -136,7 +140,7 @@ niche_self_dt = unique(niche_self_neighbor_dt[
 ])
 ```
 
-Build the color palette for all niches downstream
+Build the color palette for all niches and cell types downstream
 
 ```{r}
 cluster_classes = sort(unique(niche_self_neighbor_dt$niche_type))
@@ -145,7 +149,58 @@ niche_color_manual = structure(
     names = cluster_classes
 )
 
+cell_type_to_test = 'Coarse Cell Type'
+cell_type_to_test = 'Fine Cell Type'
+cell_type_to_test = 'Fine Cell Type UMAP'
+
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+
 ```
+
+# Looking at the niches in space
+
+```{r}
+graph_dt = melt(
+    as.data.table(cbind(
+        spatialCoords(banksy_embeddings),
+        colData(banksy_embeddings)[c(
+            'sample_id','cell_id', 'histology',
+            grep('Harmony.*.res1$',clusterNames(banksy_embeddings), value = TRUE)
+        )]
+    )),id.vars = c('sample_id','cell_id','histology','sdimx','sdimy'),
+    variable.name = 'Cluster Type',value.name = 'Cluster ID'
+)
+
+g = ggplot(
+    graph_dt[`Cluster Type` == 'clust_Harmony_BANKSY_lam0.8_k50_res1'], 
+    aes(x=sdimy, y=sdimx, color=`Cluster ID`)
+) +
+    facet_wrap(histology ~ sample_id, nrow = 2, scale = 'free_x') +
+    geom_point(size = 0.1, alpha = 0.5) + 
+    scale_color_manual(values = niche_color_manual) +
+    theme_classic() + 
+    theme(
+        legend.position = "bottom",
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        text = element_text(size = 15),
+        strip.text = element_text(size = 10),
+        strip.background = element_blank()
+    ) + guides(
+        color = guide_legend(nrow = 3, byrow = TRUE)
+    ) +
+    coord_flip()
+g
+# p = ggplotly(g)
+# saveWidget(p, paste0(workdir,'/youyun/plgg/code/niche/niche_identity_spatial.html'), selfcontained = TRUE)
+```
+
+# What are the niches?
 
 ## What is the distribution of niches?
 
@@ -183,6 +238,8 @@ ggplot(niche_self_dt) +
         fill = guide_legend(title = 'Niche Type', nrow = 2)
     )
 ```
+
+## Are there niches exclusive or prevalent across samples and histologies?
 
 Some statistical testing
 
@@ -229,42 +286,41 @@ ggplot(histology_niche_enrichment) +
 
 ```{r}
 ggplot(niche_self_dt) + 
-    geom_bar(aes(x = niche_type, fill = as.factor(`Coarse Cell Type`)), position = 'fill') + 
+    geom_bar(aes(x = niche_type, fill = as.factor(get(cell_type_to_test))), position = 'fill') + 
     theme_minimal() + theme(
         axis.text.x = element_text(angle = 45, hjust = 1),
         text = element_text(size = 15), legend.position = 'bottom'
-    ) + scale_fill_brewer(palette = 'Set3') +
+    ) + scale_fill_manual(values = cell_type_color_manual) +
     labs(
         title = 'Distribution of Self Cell Type By Niche',
         x = 'Niche Type',
         y = 'Proportion of Cell Type'
     ) + guides(
-        fill = guide_legend(title = 'Coarse Cell Type', nrow = 2)
+        fill = guide_legend(title = cell_type_to_test, nrow = 3)
     )
 ggplot(
     unique(niche_self_neighbor_dt[
         ,mget(c('cell_id','cell_type','niche_type','sample_id','histology',cell_type_cols))
     ])
-) + geom_bar(aes(x = niche_type, fill = as.factor(`Coarse Cell Type`)), position = 'stack') + 
+) + geom_bar(aes(x = niche_type, fill = as.factor(get(cell_type_to_test))), position = 'stack') + 
     theme_minimal() + theme(
         axis.text.x = element_text(angle = 45, hjust = 1),
         text = element_text(size = 15), legend.position = 'bottom'
-    ) + scale_fill_brewer(palette = 'Set3') +
+    ) + scale_fill_manual(values = cell_type_color_manual) +
     labs(
         title = 'Distribution of Self Cell Type By Niche',
         x = 'Niche Type',
         y = 'Proportion of Cell Type'
     ) + guides(
-        fill = guide_legend(title = 'Coarse Cell Type', nrow = 2)
+        fill = guide_legend(title = cell_type_to_test, nrow = 3)
     )
 ```
 
 Some statistical testing
 
 ```{r}
-source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
 self_cell_type_niche_enrichment = pairwise_categorical_enrichment_test(
-    niche_self_dt$niche_type, niche_self_dt$`Coarse Cell Type`
+    niche_self_dt$niche_type, niche_self_dt[[cell_type_to_test]]
 )
 setnames(
     self_cell_type_niche_enrichment, 1:2,
@@ -308,38 +364,39 @@ ggplot(self_cell_type_niche_enrichment) +
 ggplot(
     niche_self_neighbor_dt[
         ,.(proportion = .N/15), .(
-            cell_id, niche_type, `Coarse Cell Type Neighbors`
+            cell_id, niche_type, 
+            neighbor_cell_type = get(paste0(cell_type_to_test,' Neighbors'))
         )
     ]
 ) + geom_boxplot(aes(
-    x = `Coarse Cell Type Neighbors`, y = proportion, 
-    fill = `Coarse Cell Type Neighbors`
+    x = neighbor_cell_type, y = proportion, 
+    fill = neighbor_cell_type
 )) +
     facet_wrap(~niche_type) +
     theme_minimal() + theme(
         axis.text.x = element_text(angle = 45, hjust = 1),
         text = element_text(size = 15), legend.position = 'bottom'
-    ) + scale_fill_brewer(palette = 'Set3') +
+    ) + scale_fill_manual(values = cell_type_color_manual) +
     labs(
         title = 'Distribution of Neighbor Cell Type By Niche',
         x = 'Neighbor Cell Type',
         y = 'Proportion of Neighbor Cell Type'
     ) + guides(
-        fill = guide_legend(title = 'Coarse Cell Type', nrow = 2)
+        fill = guide_legend(title = cell_type_to_test, nrow = 3)
     )
 ```
 
 Some statistical testing
 
 ```{r}
-source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
 neighbor_cell_type_niche_enrichment = pairwise_categorical_continuous_enrichment_test(dcast(
     niche_self_neighbor_dt[
-        !is.na(`Coarse Cell Type Neighbors`),.(proportion = .N/15), .(
-            cell_id, niche_type, `Coarse Cell Type Neighbors`
+        !is.na(get(paste0(cell_type_to_test,' Neighbors'))),.(proportion = .N/15), .(
+            cell_id, niche_type, 
+            neighbor_cell_type = get(paste0(cell_type_to_test,' Neighbors'))
         )
     ],
-    cell_id + niche_type ~ `Coarse Cell Type Neighbors`, 
+    cell_id + niche_type ~ neighbor_cell_type, 
     value.var = 'proportion', fill = 0
 ))
 ggplot(neighbor_cell_type_niche_enrichment) +
@@ -367,44 +424,115 @@ ggplot(neighbor_cell_type_niche_enrichment) +
     )
 ```
 
-## Are there niches exclusive or prevalent across samples and histologies?
-
-# Looking at the cell types + niches in space
+## Pulling everything together to understand the niches
 
 ```{r}
-# graph_dt = melt(
-#     as.data.table(cbind(
-#         spatialCoords(banksy_embeddings),
-#         colData(banksy_embeddings)[c(
-#             'sample_id','cell_id',
-#             grep('Harmony.*.res1$',clusterNames(banksy_embeddings), value = TRUE)
-#         )]
-#     )),id.vars = c('sample_id','cell_id','sdimx','sdimy'),
-#     variable.name = 'Cluster Type',value.name = 'Cluster ID'
-# )[,sample_id := gsub('output-XETG00078__','',sample_id)]
-# graph_dt
+#| fig-width: 25
+#| fig-height: 18
+library(scales)
+including_niches = intersect(
+    intersect(
+        unique(histology_niche_enrichment$niche_type),
+        unique(self_cell_type_niche_enrichment$niche_type)
+    ),
+    unique(neighbor_cell_type_niche_enrichment$niche_type) 
+)
+enrichment_overview_dt = merge(
+    rbind(
+        self_cell_type_niche_enrichment[
+            niche_type %in% including_niches,
+            .(cell_type, size = N_var1var2/sum(N_var1var2), q_value, test_statistic = odds_ratios),
+            .(niche_type)
+        ][, data_type := 'Self Cell Type'],
+        neighbor_cell_type_niche_enrichment[
+            niche_type %in% including_niches,
+            .(cell_type = continuous_cols, size = N_var2, q_value, test_statistic = delta),
+            .(niche_type)
+        ][, data_type := 'Neighbor Cell Type']
+    ),histology_niche_enrichment[
+        niche_type %in% including_niches
+        ,.(enriched_histologies = paste0(
+            histology[q_value < 0.05 & odds_ratios > 1], collapse = ',\n'
+        )), .(niche_type)
+    ], by = 'niche_type'
+)
 
-# cluster_classes = sort(unique(graph_dt$`Cluster ID`))
-# color_manual = structure(
-#     pals::polychrome()[c(1:length(cluster_classes))],
-#     names = cluster_classes
-# )
+ggplot(enrichment_overview_dt) + geom_point(aes(
+    x = data_type, y = cell_type, size = size, 
+    # fill = q_value, 
+    color = ifelse(
+        # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
+        (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic > 1) |
+        # if it's the continuous test, we use a delta > 0 as positive enrichment
+            (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic > 0), 
+        'significant','not significant'
+    )
+), shape = 21, stroke = 1) + 
+    facet_wrap(as.numeric(niche_type) ~ enriched_histologies, nrow = 3) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 20), 
+        legend.position = 'bottom',
+        strip.text = element_text(size = 15),
+        strip.background = element_blank(),
+        panel.spacing = unit(1, "lines")
+    ) + #scale_fill_viridis_c()  +
+    scale_size_area(max_size = 10) +
+    scale_x_discrete(
+        labels = c('Self','Neighbor'),
+        limits = c('Self Cell Type','Neighbor Cell Type')
+    ) +
+    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Enrichment of Cell Types By Niche',
+        x = 'Niche Type',
+        y = 'Cell Type',
+        size = 'Proportion Cell Type',
+        fill = 'q-value',
+        color = 'Significance'
+    ) + guides(
+        fill = guide_legend(title = 'q-value'),
+        color = guide_legend(title = 'Significance')
+    )
 
-# graph_dt[,.(min_x = min(sdimx)), by = c('sample_id')][order(min_x)]
+ggplot(enrichment_overview_dt) + geom_point(aes(
+    x = data_type, y = cell_type, size = size, 
+    # fill = q_value, 
+    color = ifelse(
+        # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
+        (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic > 1) |
+        # if it's the continuous test, we use a delta > 0 as positive enrichment
+            (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic > 0), 
+        'significant','not significant'
+    )
+), shape = 21, stroke = 1) + 
+    facet_wrap(enriched_histologies ~ as.numeric(niche_type), nrow = 3) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 20), 
+        legend.position = 'bottom',
+        strip.text = element_text(size = 15),
+        strip.background = element_blank(),
+        panel.spacing = unit(1, "lines")
+    ) + #scale_fill_viridis_c()  +
+    scale_size_area(max_size = 10) +
+    scale_x_discrete(
+        labels = c('Self','Neighbor'),
+        limits = c('Self Cell Type','Neighbor Cell Type')
+    ) +
+    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Enrichment of Cell Types By Niche',
+        x = 'Niche Type',
+        y = 'Cell Type',
+        size = 'Proportion Cell Type',
+        fill = 'q-value',
+        color = 'Significance'
+    ) + guides(
+        fill = guide_legend(title = 'q-value'),
+        color = guide_legend(title = 'Significance')
+    )
 
-# ggplot(graph_dt, aes(x=sdimy, y=sdimx, color=`Cluster ID`)) +
-#     facet_wrap(`Cluster Type`~sample_id, nrow = 2, scale = 'free_x') +
-#     geom_point(size = 0.1, alpha = 0.5) + 
-#     scale_color_manual(values = color_manual) +
-#     theme_classic() + 
-#     theme(
-#         legend.position = "bottom",
-#         axis.text.x=element_blank(),
-#         axis.text.y=element_blank(),
-#         axis.ticks=element_blank()
-#     ) + guides(
-#         color = guide_legend(nrow = 3, byrow = TRUE)
-#     ) +
-#     coord_flip()
 ```
+
 
