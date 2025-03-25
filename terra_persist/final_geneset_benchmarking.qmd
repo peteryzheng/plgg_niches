@@ -1,0 +1,89 @@
+---
+title: "Final geneset benchmarking"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 10
+        fig-height: 10
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+---
+
+```{r}
+#| echo: FALSE
+library(data.table)
+library(ggplot2)
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Introduction
+
+Visualization of the results downloaded here: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/markers/PERSIST_benchmark_07102024.csv`
+
+```{r}
+results = fread(paste0(workdir, "coja/Spatial_PLGG/data/markers/PERSIST_benchmark_07102024.csv"))[,V1 := NULL]
+results_melted = melt(
+    results, 
+    id.vars = c('sample','cohort','counts'),
+    variable.name = 'Gene Set',
+    value.name = 'Variance Explained'
+)[
+    ,sample := paste0(sample,'(',round(counts/1000),'k)')
+]
+
+ggplot(results_melted) +
+    geom_bar(aes(x = sample, y = `Variance Explained`, fill = `Gene Set`), stat = 'identity', position = 'dodge') + 
+    facet_wrap(~cohort, nrow = 3, scale = 'free_x') +
+    theme_minimal() +
+    theme(
+        axis.text.x = element_text(angle = 30, hjust = 1,size = 10),
+        text = element_text(size = 15)
+    ) + 
+    labs(
+        title = 'Variance Explained by Gene Set',
+        x = 'Sample',
+        y = 'Variance Explained'
+    ) + 
+    scale_fill_brewer(palette = 'Set1')
+```
+
+
+Do some statistical tests to see if the gene sets are significantly different
+
+```{r}
+wilcox.test(
+    results$xenium,results$xenium_plus_manual,
+    paired = TRUE, alternative = "two.sided"
+)
+wilcox.test(
+    results$xenium,results$xenium_plus_addon,
+    paired = TRUE, alternative = "two.sided"
+)
+
+wilcox.test(
+    results$xenium_plus_manual,results$xenium_plus_manual_rand,
+    paired = TRUE, alternative = "two.sided"
+)
+
+wilcox.test(
+    results$xenium_plus_manual,results$xenium_plus_addon,
+    paired = TRUE, alternative = "two.sided"
+)
+
+wilcox.test(
+    results$xenium_plus_addon,results$xenium_plus_addon_rand,
+    paired = TRUE, alternative = "two.sided"
+)
+```

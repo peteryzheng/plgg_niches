@@ -1,0 +1,366 @@
+---
+title: "CRAWDAD niches analysis"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+
+# Introduction
+
+Testing out crawdad's multiscale niches analysis on our spatial transcriptomics data using previously assigned cell types. 
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+library(Seurat)
+library(dbscan)
+library(circlize)
+library(Seurat)
+library(plotly)
+library(scales)
+library(htmlwidgets)
+library(metap)
+library(crawdad)
+
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+```
+
+# Load data
+
+# Load the data
+
+The objects are here:
+
+RDS object with Leiden Clusters: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds`
+
+    -   `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_embeddings/total_spatial_banksy_clusters_subset_20240719_092550.rds`
+
+
+Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
+
+
+```{r}
+# load the banksy embeddings
+banksy_embeddings = readRDS(ifelse(
+    workdir == '/xchip/beroukhimlab/',
+    paste0(workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds'),
+    '/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/total_spatial_banksy_clusters_20240719_092550.rds'
+))
+colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+
+# Load the cell type clusters annotation
+prelim_annotation_res1 = fread(paste0(
+    workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
+))
+
+# specify the cluster names 
+# this is mainly to keep track of which resolution we are using
+cell_res = 1
+cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
+niche_res = 1
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
+```
+
+Build the color palette for all niches and cell types downstream
+
+```{r}
+set.seed(5555)
+cluster_classes = levels(colData(banksy_embeddings)[[niche_clust_name]])
+niche_color_manual = structure(
+    pals::polychrome()[c(1:length(cluster_classes))],
+    names = sample(cluster_classes)
+)
+# for niche resolution 0.5
+niches_to_show = c(1:11, 13, 14, 16, 17)
+# for niche resolution 1
+# niches_to_show = c(1:20, 22:25)
+
+cell_type_to_test = 'Coarse Cell Type'
+cell_type_to_test = 'Fine Cell Type'
+cell_type_to_test = 'Fine Cell Type UMAP'
+
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+
+```
+
+```{r}
+# get spatial coordinates 
+spat_df = data.frame(spatialCoords(banksy_embeddings))
+# get the cell type labels
+label_df = data.frame(colData(banksy_embeddings)[,c('sample_id',cell_clust_name)])
+remove(banksy_embeddings)
+# explicitly merge by cell barcode
+spat_df$cell_barcode = rownames(spat_df)
+label_df$cell_barcode = rownames(label_df)
+spat_df = data.table(spat_df)
+label_df = data.table(label_df)
+total_df = spat_df[label_df,on = 'cell_barcode']
+
+# convert cell type labels
+cell_type_map_vector = structure(
+    prelim_annotation_res1[[cell_type_to_test]],
+    names = prelim_annotation_res1$cluster
+)
+total_df[
+    , cell_type := ifelse(
+        is.na(cell_type_map_vector[as.character(get(cell_clust_name))]),
+        'NA', cell_type_map_vector[as.character(get(cell_clust_name))]
+    ),.(cell_barcode)
+]
+
+```
+
+
+```{r}
+data(pkhl)
+data(slide)
+data(seq)
+rbind(
+    total_df[,.(
+        .N, span_x = max(sdimx) - min(sdimx), span_y = max(sdimy) - min(sdimy),
+        num_cell_type = length(unique(cell_type))
+    ), .(sample_id)][order(-N),.(
+        sample_id, N, span_x, span_y, num_cell_type, 
+        cell_density = N/ (span_x * span_y)
+    )],
+    data.table(
+        sample_id = c('pkhl','slide','seq'),
+        N = c(nrow(pkhl), nrow(slide), nrow(seq)),
+        span_x = c(max(pkhl$x) - min(pkhl$x), max(slide$x) - min(slide$x), max(seq$x) - min(seq$x)),
+        span_y = c(max(pkhl$y) - min(pkhl$y), max(slide$y) - min(slide$y), max(seq$y) - min(seq$y)),
+        num_cell_type = c(length(unique(pkhl$celltypes)), length(unique(slide$celltypes)), length(unique(seq$celltypes)))
+    )[
+        , cell_density := N / (span_x * span_y)
+    ]
+)
+```
+
+```{r}
+cell_type_dt = rbind(
+    total_df[
+        , .N, .(sample_id, cell_type)
+    ][
+        , .(cell_type_proportion = N / sum(N)), .(sample_id)
+    ],
+    rbind(
+        data.table(pkhl)[,sample_id := 'pkhl'], data.table(slide)[,sample_id := 'slide'], 
+        data.table(seq)[,sample_id := 'seq']
+    )[
+        , .N, .(sample_id, celltypes)
+    ][
+        , .(cell_type_proportion = N / sum(N)), .(sample_id)
+    ]
+)
+ggplot(
+    cell_type_dt, aes(x = cell_type_proportion, fill = sample_id)
+) + geom_histogram() + theme_linedraw() + theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    text = element_text(size = 15)
+) + facet_wrap(~sample_id, nrow = 3) +
+    scale_x_log10() +
+    labs(
+        title = 'Cell type proportion distribution'
+    )
+remove(cell_type_dt, pkhl, slide, seq)
+```
+
+1.  It looks like, compared to the reference dataset used in demo of crawdad, our dataset is in general larger spatially and by cell count. 
+2.  On the other hand, our cell density is on the lower end. This could be technical, but this could also because we have large white spaces on the FOV due to the irregularity of the biopsy shape
+3.  It looks like we have quite a few cell types that are ultra rare. This may cause us to do too many useless tests and get no statistical significance
+
+# CRAWDAD niches analysis 
+
+```{r}
+min_threshold = 0.005
+verbosity = FALSE
+scales <- c(100, 500, 1000)
+ncores = 7
+```
+
+## CLN sample 87352
+
+### Prepare the data
+
+```{r}
+CLN_sample = total_df[sample_id == '87352',.(
+    x = sdimx - min(sdimx), y = sdimy - min(sdimy), cell_type
+), .(sample_id)][x >= 7000 & y <= 2000]
+# get rid of the rare cell types
+cell_type_dt = CLN_sample[, .N, .(sample_id, cell_type)][, .(cell_type_proportion = N/sum(N), cell_type), .(sample_id)]
+rare_cell_types = cell_type_dt[cell_type_proportion < min_threshold, cell_type]
+CLN_cells = crawdad::toSF(
+    pos = data.frame(CLN_sample[,.(x,y)]),
+    cellTypes = as.factor(as.character(
+        ifelse(CLN_sample$cell_type %in% rare_cell_types, 'Rare', CLN_sample$cell_type)
+    ))
+)
+```
+
+```{r}
+#| fig-height: 12
+vizEachCluster(cells = CLN_cells, coms = CLN_cells$celltypes, s = 5)
+```
+
+### Visualize different size reference neighborhoods
+
+```{r}
+#| fig-width: 6
+#| fig-height: 3
+## histogram for neighDist = 10
+vizCelltypeProportions(CLN_cells, neighDist = 10) + 
+    labs(title = 'Cell-type proportions for a neighborhood distance of 10')
+## histogram for neighDist = 25
+vizCelltypeProportions(CLN_cells, neighDist = 25) + 
+    labs(title = 'Cell-type proportions for a neighborhood distance of 25')
+## histogram for neighDist = 50
+vizCelltypeProportions(CLN_cells, neighDist = 50) + 
+    labs(title = 'Cell-type proportions for a neighborhood distance of 50')
+## histogram for neighDist = 100
+vizCelltypeProportions(CLN_cells, neighDist = 100) + 
+    labs(title = 'Cell-type proportions for a neighborhood distance of 100')
+```
+
+### crawdad
+
+```{r}
+## shuffle cells to create null background
+CLN_shuffle_list <- crawdad:::makeShuffledCells(
+    CLN_cells,scales = scales, perms = 3, ncore = ncores,
+    seed = 1,verbose = verbosity
+)
+## calculate the zscore for the cell-type pairs at different scales
+CLN_results <- crawdad::findTrends(
+    CLN_cells, neighDist = 25, shuffleList = CLN_shuffle_list,
+    ncore = ncores, verbose = verbosity,
+    returnMeans = FALSE
+)
+CLN_dat <- crawdad::meltResultsList(CLN_results, withPerms = TRUE)
+## calculate the zscore for the multiple-test correction
+CLN_zsig <- correctZBonferroni(CLN_dat)
+## summary visualization
+vizColocDotplot(
+    CLN_dat, reorder = TRUE,
+    zSigThresh = CLN_zsig, zScoreLimit = 2*CLN_zsig, 
+    dotSizes = c(3,15)
+) + theme(axis.text.x = element_text(angle = 35, h = 0, size = 15))
+saveRDS(
+    CLN_dat,
+    paste0(workdir,'youyun/plgg/code/niche/crawdad/crawdad_niches_CLN_sample_87352.rds')
+)
+```
+
+## PA sample 258482
+
+### Prepare the data
+
+```{r}
+PA_sample = total_df[sample_id == '320784',.(
+    x = sdimx - min(sdimx), y = sdimy - min(sdimy), cell_type
+), .(sample_id)]#[x <= 3000 & x >= 1000 & y <= 5000 & y >= 3000]
+# get rid of the rare cell types
+cell_type_dt = PA_sample[, .N, .(sample_id, cell_type)][, .(cell_type_proportion = N/sum(N), cell_type), .(sample_id)]
+rare_cell_types = cell_type_dt[cell_type_proportion < min_threshold, cell_type]
+PA_cells = crawdad::toSF(
+    pos = data.frame(PA_sample[,.(x,y)]),
+    cellTypes = as.factor(as.character(
+        ifelse(PA_sample$cell_type %in% rare_cell_types, 'Rare', PA_sample$cell_type)
+    ))
+)
+```
+
+```{r}
+#| fig-height: 12
+vizEachCluster(cells = PA_cells, coms = PA_cells$celltypes, s = 2)
+```
+
+### Visualize different size reference neighborhoods
+
+```{r}
+#| fig-width: 6
+#| fig-height: 3
+## histogram for neighDist = 10
+vizCelltypeProportions(PA_cells, neighDist = 10) + 
+    labs(title = 'Cell-type proportions for a neighborhood distance of 10')
+## histogram for neighDist = 25
+vizCelltypeProportions(PA_cells, neighDist = 25) + 
+    labs(title = 'Cell-type proportions for a neighborhood distance of 25')
+## histogram for neighDist = 50
+vizCelltypeProportions(PA_cells, neighDist = 50) + 
+    labs(title = 'Cell-type proportions for a neighborhood distance of 50')
+## histogram for neighDist = 100
+vizCelltypeProportions(PA_cells, neighDist = 100) + 
+    labs(title = 'Cell-type proportions for a neighborhood distance of 100')
+```
+
+### crawdad
+
+```{r}
+## shuffle cells to create null background
+PA_shuffle_list <- crawdad:::makeShuffledCells(
+    PA_cells,scales = scales, perms = 3, ncore = ncores,
+    seed = 1,verbose = verbosity
+)
+## calculate the zscore for the cell-type pairs at different scales
+PA_results <- crawdad::findTrends(
+    PA_cells, neighDist = 25, shuffleList = PA_shuffle_list,
+    ncore = ncores, verbose = verbosity,
+    returnMeans = FALSE
+)
+PA_dat <- crawdad::meltResultsList(PA_results, withPerms = TRUE)
+## calculate the zscore for the multiple-test correction
+PA_zsig <- correctZBonferroni(PA_dat)
+## summary visualization
+vizColocDotplot(
+    PA_dat, reorder = TRUE,
+    zSigThresh = PA_zsig, zScoreLimit = 2*PA_zsig, 
+    dotSizes = c(3,15)
+) + theme(axis.text.x = element_text(angle = 35, h = 0, size = 15))
+saveRDS(
+    PA_dat,
+    paste0(workdir,'youyun/plgg/code/niche/crawdad/crawdad_niches_PA_sample_258482.rds')
+)
+```
+
+

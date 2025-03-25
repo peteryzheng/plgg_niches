@@ -1,0 +1,102 @@
+---
+title: "Pan PLGG PERSIST Genes"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+We have a few gene sets that are related to the PERSIST project. Here we are going to look at the Pan PLGG PERSIST genes.
+
+There is the pan PLGG PERSIST gene set that is trained on the entire dataset of PLGG samples. This is here `/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/PERSIST_results_00092024.csv`.
+
+There is the curated gene list that is used to assign cell types. This is here `/xchip/beroukhimlab/coja/Spatial_PLGG/data/markers/curated_markers.xlsx`.
+
+There is the xenium brain panel gene list. This is here `/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv`.
+
+There is also the old persist gene list trained on the PAs. This is here `/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/persist_100.csv` and here `/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/persist_480.csv`.
+
+# Load Data
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(readxl)
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+```{r}
+# load the pan PLGG PERSIST gene set
+pan_plgg_persist_genes = fread(gsub(
+    '/xchip/beroukhimlab/',workdir,
+    '/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/PERSIST_results_00092024.csv'
+))
+pan_plgg_P50_gene_list = pan_plgg_persist_genes[(persist_set_50)]$name
+pan_plgg_P100_gene_list = pan_plgg_persist_genes[(persist_set_100)]$name
+
+# load the curated gene list
+curated_markers = melt(data.table(read_xlsx(gsub(
+    '/xchip/beroukhimlab/',workdir,
+    '/xchip/beroukhimlab/coja/Spatial_PLGG/data/markers/curated_markers.xlsx'
+)))[, id := 1:.N], id.vars = "id", variable.name = "cell_type", value.name = "gene")[
+    !is.na(gene), .(cell_type, gene)
+]
+curated_markers_gene_list = unique(curated_markers[! cell_type %in% c('MAPK','Senmayo')]$gene)
+mapk_senmayo_markers_gene_list = unique(curated_markers[cell_type %in% c('MAPK','Senmayo')]$gene)
+
+# load the xenium brain panel gene list
+xenium_brain_panel = fread(gsub(
+    '/xchip/beroukhimlab/',workdir,
+    '/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv'
+))
+xenium_brain_panel_gene_list = xenium_brain_panel$Genes
+
+# load the old persist gene list
+persist_100 = fread(gsub(
+    '/xchip/beroukhimlab/',workdir,
+    '/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/persist_100.csv'
+))
+pa_P100_gene_list = persist_100$Genes
+```
+
+# Compare Gene Lists
+
+```{r}
+library(ggVennDiagram)
+
+# compare the gene lists
+gene_lists = list(
+    `Markers` = curated_markers_gene_list,
+    `Pathways` = mapk_senmayo_markers_gene_list,
+    `PanPLGG P100` = pan_plgg_P100_gene_list,
+    `PanPLGG P50` = pan_plgg_P50_gene_list,
+    `PA P100` = pa_P100_gene_list,
+    `Xenium` = xenium_brain_panel_gene_list
+)
+
+# plot the venn diagram
+ggVennDiagram(gene_lists) + coord_cartesian(clip="off")
+```

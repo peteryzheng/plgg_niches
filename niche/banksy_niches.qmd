@@ -47,6 +47,7 @@ library(Seurat)
 library(plotly)
 library(scales)
 library(htmlwidgets)
+library(metap)
 
 # local vs UGER
 if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
@@ -76,8 +77,8 @@ Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xeniu
 ```{r}
 # load the banksy embeddings
 banksy_embeddings = readRDS(ifelse(
-    workdir == "/xchip/beroukhimlab/",
-    paste0(workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_subset_20240719_092550.rds'),
+    workdir == '/xchip/beroukhimlab/',
+    paste0(workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds'),
     '/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/total_spatial_banksy_clusters_subset_20240719_092550.rds'
 ))
 colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
@@ -89,16 +90,202 @@ prelim_annotation_res1 = fread(paste0(
 
 # specify the cluster names 
 # this is mainly to keep track of which resolution we are using
-res = 1
-cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',res))
-niche_clust_name = gsub('lam0.2','lam0.8',cell_clust_name)
+cell_res = 1
+cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
+niche_res = 1
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
 
 # # filter the banksy object to only include the cells with annotated cell types
 # annotated_cell_clusters = sort(unique(prelim_annotation_res1$cluster))
 # banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)[,cell_clust_name] %in% annotated_cell_clusters]
 ```
 
-# Setting up Neighborhood Analysis
+
+Build the color palette for all niches and cell types downstream
+
+```{r}
+set.seed(5555)
+cluster_classes = levels(colData(banksy_embeddings)[[niche_clust_name]])
+niche_color_manual = structure(
+    pals::polychrome()[c(1:length(cluster_classes))],
+    names = sample(cluster_classes)
+)
+# for niche resolution 0.5
+niches_to_show = c(1:11, 13, 14, 16, 17)
+# for niche resolution 1
+# niches_to_show = c(1:20, 22:25)
+
+cell_type_to_test = 'Coarse Cell Type'
+cell_type_to_test = 'Fine Cell Type'
+cell_type_to_test = 'Fine Cell Type UMAP'
+
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+
+```
+
+# Looking at the niche embeddings
+
+```{r}
+#| fig-height: 12
+#| fig-width: 30
+#| warning: false
+plot_grid(
+    ggdraw() + draw_label("BANKSY Niche Embeddings", fontface='bold') +
+        theme(
+            plot.title = element_text(hjust = 0.5),
+            text = element_text(size = 30)
+        ),
+    plot_grid(
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.00001, 
+            color_by = niche_clust_name
+        ) + theme(
+            text = element_text(size = 20),
+            legend.title = element_blank(),
+            legend.position = 'bottom'
+        ) + scale_color_manual(values = niche_color_manual) +
+            guides(colour = guide_legend(
+            override.aes = list(size = 5, alpha = 1),
+            nrow = 4
+        )) + labs(
+            title = 'Niche Type',
+            x = 'UMAP1', y = 'UMAP2'
+        ),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.00001, 
+            color_by = "sample_id"
+        ) + theme(
+            text = element_text(size = 20),
+            legend.title = element_blank(),
+            legend.position = 'bottom',
+            legend.justification = "right"
+        ) + guides(colour = guide_legend(
+            override.aes = list(size = 5, alpha = 1),
+            nrow = 4
+        )) + labs(
+            title = 'Sample IDs',
+            x = 'UMAP1', y = 'UMAP2'
+        ),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.00001, 
+            color_by = "histology"
+        ) + theme(
+            text = element_text(size = 20),
+            legend.title = element_blank(),
+            legend.position = 'bottom'
+        ) + guides(colour = guide_legend(
+            override.aes = list(size = 5, alpha = 1),
+            nrow = 4
+        )) + labs(
+            title = 'Histology',
+            x = 'UMAP1', y = 'UMAP2'
+        ),
+        
+        nrow = 1,
+        rel_widths = c(1, 1, 1)
+    ), ncol = 1,rel_heights = c(0.5, 5)
+)
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 30
+#| warning: false
+niche_umap = lapply(niches_to_show, function(x){
+    new_niche_color_manual = structure(c(
+        rep('gray', length(niche_color_manual) - 1), 
+        niche_color_manual[names(niche_color_manual) == x]
+    ), names = c(setdiff(names(niche_color_manual), x), x))
+    assign(
+        paste0('niche_',x,'_umap'),
+        plotReducedDim(
+            banksy_embeddings, 
+            "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.00001, 
+            color_by = niche_clust_name
+        ) + theme(
+            text = element_text(size = 20),
+            legend.title = element_blank(),
+            legend.position = 'none'
+        ) + theme_void() +
+            scale_color_manual(values = new_niche_color_manual) +
+            guides(colour = 'none') + labs(
+            title = paste0('Niche ',x)
+        ),envir = .GlobalEnv
+    )
+})
+plot_grid(
+    ggdraw() + draw_label("BANKSY Niche Embeddings", fontface='bold') +
+        theme(
+            plot.title = element_text(hjust = 0.5),
+            text = element_text(size = 30)
+        ),
+    plot_grid(
+        plotlist = mget(paste0('niche_',niches_to_show,'_umap')),
+        nrow = round(sqrt(length(niches_to_show)/2))
+    ), ncol = 1,rel_heights = c(0.5, 5)
+)
+```
+
+
+# Looking at the niches in space
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+graph_dt = melt(
+    as.data.table(cbind(
+        spatialCoords(banksy_embeddings),
+        colData(banksy_embeddings)[c(
+            'sample_id','cell_id', 'histology',
+            grep('Harmony.*.res',clusterNames(banksy_embeddings), value = TRUE)
+        )]
+    )),id.vars = c('sample_id','cell_id','histology','sdimx','sdimy'),
+    variable.name = 'Cluster Type',value.name = 'Cluster ID'
+)[,`Cluster ID` := as.factor(as.numeric(`Cluster ID`))]
+
+g = ggplot(
+    graph_dt[`Cluster Type` == niche_clust_name], 
+    aes(x=sdimy, y=sdimx, color=`Cluster ID`)
+) +
+    facet_wrap(histology ~ sample_id, nrow = 2, scale = 'free_x') +
+    # subset cells
+    # geom_point(size = 0.3, alpha = 0.5) + 
+    # all cells
+    geom_point(size = 0.00001) + 
+    scale_color_manual(values = niche_color_manual) +
+    theme_classic() + 
+    theme(
+        legend.position = "bottom",
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        text = element_text(size = 30),
+        strip.text = element_text(size = 20),
+        strip.background = element_blank()
+    ) + guides(
+        color = guide_legend(override.aes = list(size=5, alpha = 1), nrow = 3, byrow = TRUE)
+    ) + labs(
+        title = 'BANKSY Niches in Space',
+        x = '',y = ''
+    ) +
+    coord_flip()
+g
+# p = ggplotly(g)
+# saveWidget(p, paste0(workdir,'/youyun/plgg/code/niche/niche_identity_spatial.html'), selfcontained = TRUE)
+```
+
+
+# What are the niches?
+
+## Setting up Neighborhood Analysis
 
 Here we will look at the niches in the data and annotate them using the cell types of self and neighbors.
 
@@ -116,7 +303,7 @@ knnDT <- data.table(
 cell_cell_type_dt = data.table(
     cell_id = rownames(colData(banksy_embeddings)),
     cell_type = as.numeric(colData(banksy_embeddings)[,cell_clust_name]),
-    niche_type = as.numeric(colData(banksy_embeddings)[,niche_clust_name]),
+    niche_type = as.factor(colData(banksy_embeddings)[,niche_clust_name]),
     sample_id = colData(banksy_embeddings)$sample_id,
     histology = colData(banksy_embeddings)$histology
 )
@@ -140,67 +327,6 @@ niche_self_dt = unique(niche_self_neighbor_dt[
 ])
 ```
 
-Build the color palette for all niches and cell types downstream
-
-```{r}
-cluster_classes = sort(unique(niche_self_neighbor_dt$niche_type))
-niche_color_manual = structure(
-    pals::polychrome()[c(1:length(cluster_classes))],
-    names = cluster_classes
-)
-
-cell_type_to_test = 'Coarse Cell Type'
-cell_type_to_test = 'Fine Cell Type'
-cell_type_to_test = 'Fine Cell Type UMAP'
-
-cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
-cell_type_color_manual = structure(
-    pals::alphabet()[c(1:length(cell_type_class))],
-    names = cell_type_class
-)
-
-```
-
-# Looking at the niches in space
-
-```{r}
-graph_dt = melt(
-    as.data.table(cbind(
-        spatialCoords(banksy_embeddings),
-        colData(banksy_embeddings)[c(
-            'sample_id','cell_id', 'histology',
-            grep('Harmony.*.res1$',clusterNames(banksy_embeddings), value = TRUE)
-        )]
-    )),id.vars = c('sample_id','cell_id','histology','sdimx','sdimy'),
-    variable.name = 'Cluster Type',value.name = 'Cluster ID'
-)
-
-g = ggplot(
-    graph_dt[`Cluster Type` == 'clust_Harmony_BANKSY_lam0.8_k50_res1'], 
-    aes(x=sdimy, y=sdimx, color=`Cluster ID`)
-) +
-    facet_wrap(histology ~ sample_id, nrow = 2, scale = 'free_x') +
-    geom_point(size = 0.1, alpha = 0.5) + 
-    scale_color_manual(values = niche_color_manual) +
-    theme_classic() + 
-    theme(
-        legend.position = "bottom",
-        axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        text = element_text(size = 15),
-        strip.text = element_text(size = 10),
-        strip.background = element_blank()
-    ) + guides(
-        color = guide_legend(nrow = 3, byrow = TRUE)
-    ) +
-    coord_flip()
-g
-# p = ggplotly(g)
-# saveWidget(p, paste0(workdir,'/youyun/plgg/code/niche/niche_identity_spatial.html'), selfcontained = TRUE)
-```
-
-# What are the niches?
 
 ## What is the distribution of niches?
 
@@ -244,40 +370,42 @@ ggplot(niche_self_dt) +
 Some statistical testing
 
 ```{r}
-histology_niche_enrichment = pairwise_categorical_enrichment_test(
-    niche_self_dt$niche_type, niche_self_dt$histology
-)
+histology_niche_enrichment = pairwise_categorical_continuous_enrichment_wilcox_test(dcast(
+    niche_self_dt[
+        !is.na(get(cell_type_to_test)),.(proportion = as.numeric(.N)), .(
+            sample_id, histology, niche_type 
+        )
+    ][,proportion := proportion/sum(proportion), .(sample_id, histology)],
+    sample_id + histology ~ niche_type, 
+    value.var = 'proportion', fill = 0
+))
 setnames(
     histology_niche_enrichment, 1:2,
-    c('niche_type', 'histology')
+    c('histology','niche_type')
 )
-ggplot(histology_niche_enrichment) +
+ggplot(histology_niche_enrichment[niche_type %in% niches_to_show]) +
     geom_point(aes(
-        x = as.numeric(niche_type), y = histology, size = N_var1var2, 
+        x = as.factor(as.numeric(niche_type)), y = histology, size = N_var2, 
         # color by odds_ratios column capped at percentile 95
-        fill = pmin(
-            quantile(log(odds_ratios), 0.95, na.rm = TRUE), 
-            log(odds_ratios), na.rm = TRUE
-        ), color = ifelse(
-            q_value < 0.05 & odds_ratios > 1, 
+        fill = delta, color = ifelse(
+            q_value < 0.05 & as.numeric(delta) > 0, 
             'significant','not significant'
         )
     ), shape = 21, stroke = 1) +
     theme(
         text = element_text(size = 15), legend.position = 'right'
     ) + scale_fill_viridis_c() +
-    scale_x_continuous(breaks = as.numeric(unique(histology_niche_enrichment$niche_type))) +
-    scale_size_area(max_size = 10) +
+    scale_size_area(max_size = 20) +
     scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
     labs(
         title = 'Enrichment of Niches Across Histologies',
         x = 'Niche Type',
         y = 'Histology',
-        size = 'Number of Niches',
-        fill = 'log OR',
+        size = 'Average Proportion',
+        fill = 'Delta Proportions',
         color = 'Significance'
     ) + guides(
-        fill = guide_legend(title = 'log OR'),
+        fill = guide_legend(title = 'Avg Delta'),
         color = guide_legend(title = 'Significance')
     )
 ```
@@ -296,7 +424,7 @@ ggplot(niche_self_dt) +
         x = 'Niche Type',
         y = 'Proportion of Cell Type'
     ) + guides(
-        fill = guide_legend(title = cell_type_to_test, nrow = 3)
+        fill = guide_legend(title = cell_type_to_test, nrow = 4)
     )
 ggplot(
     unique(niche_self_neighbor_dt[
@@ -312,27 +440,127 @@ ggplot(
         x = 'Niche Type',
         y = 'Proportion of Cell Type'
     ) + guides(
-        fill = guide_legend(title = cell_type_to_test, nrow = 3)
+        fill = guide_legend(title = cell_type_to_test, nrow = 4)
+    )
+```
+
+```{r}
+ggplot(niche_self_dt[niche_type %in% niches_to_show]) + 
+    geom_bar(aes(x = niche_type, fill = as.factor(get(cell_type_to_test))), position = 'fill') + 
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 15), legend.position = 'bottom'
+    ) + scale_fill_manual(values = cell_type_color_manual) +
+    labs(
+        title = 'Distribution of Self Cell Type By Niche',
+        x = 'Niche Type',
+        y = 'Proportion of Cell Type'
+    ) + guides(
+        fill = guide_legend(title = cell_type_to_test, nrow = 4)
+    )
+ggplot(
+    unique(niche_self_neighbor_dt[
+        ,mget(c('cell_id','cell_type','niche_type','sample_id','histology',cell_type_cols))
+    ])[niche_type %in% niches_to_show]
+) + geom_bar(aes(x = niche_type, fill = as.factor(get(cell_type_to_test))), position = 'stack') + 
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 15), legend.position = 'bottom'
+    ) + scale_fill_manual(values = cell_type_color_manual) +
+    labs(
+        title = 'Distribution of Self Cell Type By Niche',
+        x = 'Niche Type',
+        y = 'Proportion of Cell Type'
+    ) + guides(
+        fill = guide_legend(title = cell_type_to_test, nrow = 4)
     )
 ```
 
 Some statistical testing
 
+We are using metap here for fisher's method for combining p-values. It is important to note that here, `metap` is throwing out p-values == 0 because this would give -Inf after log transformation required for the fisher's method. There is no real p-value of 0 but this does happen because of the numeric lower bound of R, and so even though they are thrown out, they still contain meaningful information and also very significant asssociation. Therefore, we are likely underestimating the significance of the combined p-values. 
+
 ```{r}
-self_cell_type_niche_enrichment = pairwise_categorical_enrichment_test(
-    niche_self_dt$niche_type, niche_self_dt[[cell_type_to_test]]
-)
+self_cell_type_niche_enrichment_per_sample = do.call('rbind',lapply(unique(niche_self_dt$sample_id), 
+    function(x){pairwise_categorical_enrichment_test(
+        niche_self_dt[sample_id == x]$niche_type, niche_self_dt[sample_id == x][[cell_type_to_test]]
+    )[,sample_id := x]}
+))
+self_cell_type_niche_enrichment = self_cell_type_niche_enrichment_per_sample[
+    ,.(
+        N_var1 = mean(N_var1), N_var2 = mean(N_var2),
+        N_var1var2 = mean(N_var1var2/N_var1), odds_ratios = mean(odds_ratios),
+        p_value = ifelse(
+            sum((p_value > 0) & (p_value <= 1)) >= 2,
+            sumlog(p_value)$p, p_value
+        )
+    ),.(var1, var2)
+][
+    ,q_value := p.adjust(p_value, method = 'BY')
+]
 setnames(
     self_cell_type_niche_enrichment, 1:2,
     c('niche_type', 'cell_type')
 )
-
-ggplot(self_cell_type_niche_enrichment) +
+ggplot(self_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
     geom_point(aes(
-        x = as.numeric(niche_type), y = cell_type, size = N_var1var2, 
+        x = as.factor(as.numeric(niche_type)), y = factor(
+            cell_type, levels = c(
+                'GABAergic Neuron 1','GABAergic Neuron 2','GABAergic Neuron 3',
+                'Glutamatergic Neuron 1','Glutamatergic Neuron 2','Glutamatergic Neuron 3',
+                'Unknown Neuron 1','Unknown Neuron 2' ,'RGC 1','RGC 2','Proliferation 1',
+                'OPC 1','Oligodendrocytes 1','Astrocyte 1','Astrocyte 2','Endothelial/VLMC 1',
+                'Lymphoid 1','Myeloid 1','Myeloid 2', 'Undetermined 1'
+            )
+        ), size = N_var1var2, 
         # color by odds_ratios column capped at percentile 95
         fill = pmin(
-            quantile(log(odds_ratios), 0.95, na.rm = TRUE), 
+            quantile(log(odds_ratios), 0.90, na.rm = TRUE), 
+            log(odds_ratios), na.rm = TRUE
+        ), color = ifelse(
+            q_value < 0.05 & odds_ratios > 1, 
+            'significant','not significant'
+        ), alpha = ifelse(
+            q_value < 0.05 & odds_ratios > 1, 
+            'significant','not significant'
+        )
+    ), shape = 21, stroke = 1) +
+    theme(
+        text = element_text(size = 15), legend.position = 'right'
+    ) + scale_fill_viridis_c() + scale_alpha_manual(
+        values = c('significant' = 1,'not significant' = 0.3)
+    ) + scale_size_area(
+        max_size = 10,
+        breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5),
+        labels = c('0%','10%','20%','30%','40%','50%')
+    ) + scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Enrichment of Self Cell Type By Niche',
+        x = 'Niche Type',
+        y = 'Cell Type',
+        size = '%. Niche\n Identity',
+        fill = 'log OR',
+        color = 'Significance'
+    ) + guides(
+        fill = guide_legend(title = 'log OR'),
+        color = guide_legend(title = 'Significance'),
+        alpha = 'none'
+    )
+
+ggplot(self_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
+    geom_point(aes(
+        x = as.factor(as.numeric(niche_type)), y = factor(
+            cell_type, levels = c(
+                'GABAergic Neuron 1','GABAergic Neuron 2','GABAergic Neuron 3',
+                'Glutamatergic Neuron 1','Glutamatergic Neuron 2','Glutamatergic Neuron 3',
+                'Unknown Neuron 1','Unknown Neuron 2' ,'RGC 1','RGC 2','Proliferation 1',
+                'OPC 1','Oligodendrocytes 1','Astrocyte 1','Astrocyte 2','Endothelial/VLMC 1',
+                'Lymphoid 1','Myeloid 1','Myeloid 2', 'Undetermined 1'
+            )
+        ), size = N_var1var2, 
+        # color by odds_ratios column capped at percentile 95
+        fill = pmin(
+            quantile(log(odds_ratios), 0.90, na.rm = TRUE), 
             log(odds_ratios), na.rm = TRUE
         ), color = ifelse(
             q_value < 0.05 & odds_ratios > 1, 
@@ -342,19 +570,21 @@ ggplot(self_cell_type_niche_enrichment) +
     theme(
         text = element_text(size = 15), legend.position = 'right'
     ) + scale_fill_viridis_c() +
-    scale_x_continuous(breaks = as.numeric(unique(self_cell_type_niche_enrichment$niche_type))) +
-    scale_size_area(max_size = 10) +
-    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    scale_size_area(
+        max_size = 10,
+        breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5),
+        labels = c('0%','10%','20%','30%','40%','50%')
+    ) + scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
     labs(
         title = 'Enrichment of Self Cell Type By Niche',
         x = 'Niche Type',
         y = 'Cell Type',
-        size = 'Number of Niches',
+        size = '%. Niche\n Identity',
         fill = 'log OR',
         color = 'Significance'
     ) + guides(
         fill = guide_legend(title = 'log OR'),
-        color = guide_legend(title = 'Significance')
+        color = guide_legend(title = 'Significance'),
     )
 ```
 
@@ -363,7 +593,7 @@ ggplot(self_cell_type_niche_enrichment) +
 ```{r}
 ggplot(
     niche_self_neighbor_dt[
-        ,.(proportion = .N/15), .(
+        niche_type %in% niches_to_show,.(proportion = .N/15), .(
             cell_id, niche_type, 
             neighbor_cell_type = get(paste0(cell_type_to_test,' Neighbors'))
         )
@@ -371,10 +601,10 @@ ggplot(
 ) + geom_boxplot(aes(
     x = neighbor_cell_type, y = proportion, 
     fill = neighbor_cell_type
-)) +
+), outlier.size = 0.1) +
     facet_wrap(~niche_type) +
     theme_minimal() + theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.x = element_blank(),
         text = element_text(size = 15), legend.position = 'bottom'
     ) + scale_fill_manual(values = cell_type_color_manual) +
     labs(
@@ -382,49 +612,117 @@ ggplot(
         x = 'Neighbor Cell Type',
         y = 'Proportion of Neighbor Cell Type'
     ) + guides(
-        fill = guide_legend(title = cell_type_to_test, nrow = 3)
+        fill = guide_legend(title = cell_type_to_test, nrow = 4)
     )
 ```
 
 Some statistical testing
 
 ```{r}
-neighbor_cell_type_niche_enrichment = pairwise_categorical_continuous_enrichment_test(dcast(
-    niche_self_neighbor_dt[
-        !is.na(get(paste0(cell_type_to_test,' Neighbors'))),.(proportion = .N/15), .(
-            cell_id, niche_type, 
-            neighbor_cell_type = get(paste0(cell_type_to_test,' Neighbors'))
-        )
-    ],
-    cell_id + niche_type ~ neighbor_cell_type, 
-    value.var = 'proportion', fill = 0
+neighbor_cell_type_niche_enrichment_per_sample = do.call('rbind',lapply(unique(niche_self_dt$sample_id), 
+    function(x){pairwise_categorical_continuous_enrichment_t_test(dcast(
+        niche_self_neighbor_dt[
+            !is.na(get(paste0(cell_type_to_test,' Neighbors'))) & sample_id == x,
+            .(proportion = .N/15), .(
+                cell_id, niche_type, 
+                neighbor_cell_type = get(paste0(cell_type_to_test,' Neighbors'))
+            )
+        ],
+        cell_id + niche_type ~ neighbor_cell_type, 
+        value.var = 'proportion', fill = 0
+    ))}
 ))
-ggplot(neighbor_cell_type_niche_enrichment) +
+neighbor_cell_type_niche_enrichment = neighbor_cell_type_niche_enrichment_per_sample[
+    ,.(
+        N_var1 = mean(N_var1), N_var2 = mean(N_var2),
+        N_var1var2 = mean(N_var1var2), delta = mean(delta),
+        p_value = ifelse(
+            sum((p_value > 0) & (p_value <= 1)) >= 2,
+            sumlog(p_value)$p, p_value
+        )
+    ),.(niche_type, continuous_cols)
+][
+    ,q_value := p.adjust(p_value, method = 'BY')
+]
+neighbor_cell_type_niche_enrichment[
+    ,.(sum_prop = sum(N_var2)),.(niche_type)
+]
+ggplot(neighbor_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
     geom_point(aes(
-        x = as.numeric(niche_type), y = continuous_cols, size = N_var2,
-        fill = delta, 
-        color = ifelse(q_value < 0.05 & as.numeric(delta) > 0, 'significant','not significant')
+        x = as.factor(as.numeric(niche_type)), y = factor(
+            continuous_cols, levels = c(
+                'GABAergic Neuron 1','GABAergic Neuron 2','GABAergic Neuron 3',
+                'Glutamatergic Neuron 1','Glutamatergic Neuron 2','Glutamatergic Neuron 3',
+                'Unknown Neuron 1','Unknown Neuron 2' ,'RGC 1','RGC 2','Proliferation 1',
+                'OPC 1','Oligodendrocytes 1','Astrocyte 1','Astrocyte 2','Endothelial/VLMC 1',
+                'Lymphoid 1','Myeloid 1','Myeloid 2', 'Undetermined 1'
+            )
+        ), size = N_var2,fill = delta, color = ifelse(
+            q_value < 0.05 & as.numeric(delta) > 0, 
+            'significant','not significant'
+        ), alpha = ifelse(
+            q_value < 0.05 & as.numeric(delta) > 0, 
+            'significant','not significant'
+        )
     ), shape = 21, stroke = 1) + 
     theme(
         text = element_text(size = 15), legend.position = 'right'
-    ) + scale_fill_viridis_c() +
-    scale_x_continuous(breaks = as.numeric(unique(neighbor_cell_type_niche_enrichment$niche_type))) +
-    scale_size_area(max_size = 10) +
-    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    ) + scale_fill_viridis_c() + scale_alpha_manual(
+        values = c('significant' = 1,'not significant' = 0.3)
+    ) + scale_size_area(
+        max_size = 10,
+        breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5),
+        labels = c('0%','10%','20%','30%','40%','50%')
+    ) + scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
     labs(
         title = 'Enrichment of Neighbor Cell Type By Niche',
         x = 'Niche Type',
         y = 'Neighbor Cell Type',
-        size = '% Neighboring Cells',
+        size = '% Neighboring \nIdentity',
         fill = 'Delta',
-        color = 'Significance'
+        color = 'Significance',
     ) + guides(
         fill = guide_legend(title = 'Delta'),
-        color = guide_legend(title = 'Significance')
+        color = guide_legend(title = 'Significance'),
+        alpha = 'none'
+    )
+
+ggplot(neighbor_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
+    geom_point(aes(
+        x = as.factor(as.numeric(niche_type)), y = factor(
+            continuous_cols, levels = c(
+                'GABAergic Neuron 1','GABAergic Neuron 2','GABAergic Neuron 3',
+                'Glutamatergic Neuron 1','Glutamatergic Neuron 2','Glutamatergic Neuron 3',
+                'Unknown Neuron 1','Unknown Neuron 2' ,'RGC 1','RGC 2','Proliferation 1',
+                'OPC 1','Oligodendrocytes 1','Astrocyte 1','Astrocyte 2','Endothelial/VLMC 1',
+                'Lymphoid 1','Myeloid 1','Myeloid 2', 'Undetermined 1'
+            )
+        ), size = N_var2,fill = delta, color = ifelse(
+            q_value < 0.05 & as.numeric(delta) > 0, 
+            'significant','not significant'
+        )
+    ), shape = 21, stroke = 1) + 
+    theme(
+        text = element_text(size = 15), legend.position = 'right'
+    ) + scale_fill_viridis_c() + scale_size_area(
+        max_size = 10,
+        breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5),
+        labels = c('0%','10%','20%','30%','40%','50%')
+    ) + scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Enrichment of Neighbor Cell Type By Niche',
+        x = 'Niche Type',
+        y = 'Neighbor Cell Type',
+        size = '% Neighboring \nIdentity',
+        fill = 'Delta',
+        color = 'Significance',
+    ) + guides(
+        fill = guide_legend(title = 'Delta'),
+        color = guide_legend(title = 'Significance'),
     )
 ```
 
-## Pulling everything together to understand the niches
+## Pulling everything together to understand the niches components
 
 ```{r}
 #| fig-width: 25
@@ -451,14 +749,21 @@ enrichment_overview_dt = merge(
         ][, data_type := 'Neighbor Cell Type']
     ),histology_niche_enrichment[
         niche_type %in% including_niches
-        ,.(enriched_histologies = paste0(
-            histology[q_value < 0.05 & odds_ratios > 1], collapse = ',\n'
-        )), .(niche_type)
+        ,.(enriched_histologies = histology[which(N_var1var2 == max(N_var1var2))]), 
+        .(niche_type)
     ], by = 'niche_type'
 )
 
 ggplot(enrichment_overview_dt) + geom_point(aes(
-    x = data_type, y = cell_type, size = size, 
+    x = data_type, y = factor(
+            cell_type, levels = c(
+                'GABAergic Neuron 1','GABAergic Neuron 2','GABAergic Neuron 3',
+                'Glutamatergic Neuron 1','Glutamatergic Neuron 2','Glutamatergic Neuron 3',
+                'Unknown Neuron 1','Unknown Neuron 2' ,'RGC 1','RGC 2','Proliferation 1',
+                'OPC 1','Oligodendrocytes 1','Astrocyte 1','Astrocyte 2','Endothelial/VLMC 1',
+                'Lymphoid 1','Myeloid 1','Myeloid 2', 'Undetermined 1'
+            )
+        ), size = size, 
     # fill = q_value, 
     color = ifelse(
         # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
@@ -467,7 +772,7 @@ ggplot(enrichment_overview_dt) + geom_point(aes(
             (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic > 0), 
         'significant','not significant'
     )
-), shape = 21, stroke = 1) + 
+)) + 
     facet_wrap(as.numeric(niche_type) ~ enriched_histologies, nrow = 3) +
     theme(
         axis.text.x = element_text(angle = 45, hjust = 1),
@@ -496,7 +801,15 @@ ggplot(enrichment_overview_dt) + geom_point(aes(
     )
 
 ggplot(enrichment_overview_dt) + geom_point(aes(
-    x = data_type, y = cell_type, size = size, 
+    x = data_type, y = factor(
+            cell_type, levels = c(
+                'GABAergic Neuron 1','GABAergic Neuron 2','GABAergic Neuron 3',
+                'Glutamatergic Neuron 1','Glutamatergic Neuron 2','Glutamatergic Neuron 3',
+                'Unknown Neuron 1','Unknown Neuron 2' ,'RGC 1','RGC 2','Proliferation 1',
+                'OPC 1','Oligodendrocytes 1','Astrocyte 1','Astrocyte 2','Endothelial/VLMC 1',
+                'Lymphoid 1','Myeloid 1','Myeloid 2', 'Undetermined 1'
+            )
+        ), size = size, 
     # fill = q_value, 
     color = ifelse(
         # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
@@ -505,7 +818,7 @@ ggplot(enrichment_overview_dt) + geom_point(aes(
             (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic > 0), 
         'significant','not significant'
     )
-), shape = 21, stroke = 1) + 
+)) + 
     facet_wrap(enriched_histologies ~ as.numeric(niche_type), nrow = 3) +
     theme(
         axis.text.x = element_text(angle = 45, hjust = 1),
@@ -532,7 +845,39 @@ ggplot(enrichment_overview_dt) + geom_point(aes(
         fill = guide_legend(title = 'q-value'),
         color = guide_legend(title = 'Significance')
     )
-
 ```
 
+
+# Radii Analysis
+
+It seems like the average distance to the nearest neighbors is larger in GG and PAs than in CN and CLNs
+
+```{r}
+niche_radii = knnDT[,.(from_id,to_id,distance)][
+    cell_cell_type_dt[,.(cell_id,niche_type_to = niche_type)], on = c('to_id' = 'cell_id'),
+][
+    cell_cell_type_dt[,.(
+        cell_id, niche_type_from = niche_type, sample_id, histology
+    )], on = c('from_id' = 'cell_id')
+]
+
+ggplot(niche_radii[
+    , .(distance = median(distance)), .(
+        from_id, niche_type_from, sample_id, histology
+    )
+]) + 
+    geom_boxplot(aes(x = niche_type_from, y = distance, fill = niche_type_from)) +
+    facet_wrap(histology~sample_id) +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 15), legend.position = 'bottom'
+    ) + scale_fill_manual(values = niche_color_manual) +
+    labs(
+        title = 'Distribution of Radii By Niche',
+        x = 'Niche Type',
+        y = 'Distance to Neighbor'
+    ) + guides(
+        fill = guide_legend(title = 'Niche Type', nrow = 2)
+    ) + scale_y_log10()
+```
 

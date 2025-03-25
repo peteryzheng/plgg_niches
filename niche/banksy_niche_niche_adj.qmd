@@ -1,0 +1,486 @@
+---
+title: "Niche Niche Adjacencies in Banksy Niches"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+In this doc, we will be look at the niche niche adjacencies patterns to potentially identify tissue domains within our cohort
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+library(Seurat)
+library(dbscan)
+library(circlize)
+library(Seurat)
+library(plotly)
+library(scales)
+library(htmlwidgets)
+library(metap)
+
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+```
+
+
+# Preperations
+
+## Loading the data
+
+The objects are here:
+
+RDS object with Leiden Clusters: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds`
+
+    -   `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_embeddings/total_spatial_banksy_clusters_subset_20240719_092550.rds`
+
+
+Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
+
+
+```{r}
+# load the banksy embeddings
+banksy_embeddings = readRDS(ifelse(
+    workdir == '/xchip/beroukhimlab/',
+    paste0(workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds'),
+    '/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/total_spatial_banksy_clusters_subset_20240719_092550.rds'
+))
+colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+
+# Load the cell type clusters annotation
+prelim_annotation_res1 = fread(paste0(
+    workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
+))
+
+# specify the cluster names 
+# this is mainly to keep track of which resolution we are using
+cell_res = 1
+cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
+niche_res = 1
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
+
+# # filter the banksy object to only include the cells with annotated cell types
+# annotated_cell_clusters = sort(unique(prelim_annotation_res1$cluster))
+# banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)[,cell_clust_name] %in% annotated_cell_clusters]
+```
+
+
+## Build the color palette for all niches and cell types downstream
+
+```{r}
+set.seed(5555)
+cluster_classes = levels(colData(banksy_embeddings)[[niche_clust_name]])
+niche_color_manual = structure(
+    pals::polychrome()[c(1:length(cluster_classes))],
+    names = sample(cluster_classes)
+)
+# for niche resolution 0.5
+# niches_to_show = c(1:11, 13, 14, 16, 17)
+# for niche resolution 1
+niches_to_show = c(1:20, 22:25)
+
+cell_type_to_test = 'Coarse Cell Type'
+cell_type_to_test = 'Fine Cell Type'
+cell_type_to_test = 'Fine Cell Type UMAP'
+
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+```
+
+
+## Setting up Neighborhood Analysis
+
+Here we will look at the niches in the data and annotate them using the cell types of self and neighbors.
+
+```{r}
+k_geom = 15
+locs = spatialCoords(banksy_embeddings)
+knn = dbscan::kNN(x = locs, k = k_geom)
+knnDT <- data.table(
+    from = rep(seq_len(nrow(knn$id)), k_geom),
+    from_id = rep(rownames(knn$id), k_geom),
+    to = as.vector(knn$id),
+    to_id = rownames(knn$id)[as.vector(knn$id)],
+    distance = as.vector(knn$dist)
+)
+cell_cell_type_dt = data.table(
+    cell_id = rownames(colData(banksy_embeddings)),
+    cell_type = as.numeric(colData(banksy_embeddings)[,cell_clust_name]),
+    niche_type = as.factor(colData(banksy_embeddings)[,niche_clust_name]),
+    sample_id = colData(banksy_embeddings)$sample_id,
+    histology = colData(banksy_embeddings)$histology
+)
+
+cell_type_cols = setdiff(colnames(prelim_annotation_res1),'cluster')
+niche_self_neighbor_dt = knnDT[,c('from','to') := NULL][
+    cell_cell_type_dt[,.(cell_id,cell_type)], on = c('to_id' = 'cell_id'),
+    cell_type_to := cell_type
+][cell_cell_type_dt, on = c('from_id' = 'cell_id')][
+    ,.(
+    cell_id = from_id, cell_type, niche_type, sample_id, 
+    histology, neighbor_cell_type = cell_type_to
+)][
+    prelim_annotation_res1, on = c('cell_type' = 'cluster')
+][
+    prelim_annotation_res1, on = c('neighbor_cell_type' = 'cluster'),
+    paste0(cell_type_cols,' Neighbors') := mget(paste0('i.',cell_type_cols))
+][order(cell_id)]
+niche_self_dt = unique(niche_self_neighbor_dt[
+    ,mget(c('cell_id','cell_type','niche_type','sample_id','histology',cell_type_cols))
+])
+```
+
+# Niche Niche Adjacency Analysis
+
+This is done on the entire cohort together
+
+```{r}
+observed_adjacency = knnDT[,.(from_id,to_id,distance)][
+    cell_cell_type_dt[,.(cell_id,niche_type_to = niche_type)], on = c('to_id' = 'cell_id'),
+][
+    cell_cell_type_dt[,.(
+        cell_id, niche_type_from = niche_type, sample_id, histology
+    )], on = c('from_id' = 'cell_id')
+][
+    ,.(count = .N), .(niche_type_from, niche_type_to, sample_id)
+][, run := 'observed']
+
+set.seed(55555)
+permutation_num = 200
+permuted_adjacencies = do.call('rbind',lapply(c(1:permutation_num), function(x){
+    # for each round of permutation, we permute the niche type labels within a sample
+    permuted_cell_type_dt = cell_cell_type_dt[,.(
+        cell_id,niche_type = sample(niche_type)
+    ), .(sample_id, histology)]
+    knnDT[,.(from_id,to_id,distance)][
+        permuted_cell_type_dt[,.(cell_id, niche_type_to = niche_type)], 
+        on = c('to_id' = 'cell_id'),
+    ][
+        # for the cells themselves, we do not permute the niche type labels
+        permuted_cell_type_dt[,.(
+            cell_id, niche_type_from = niche_type, sample_id, histology
+        )], on = c('from_id' = 'cell_id')
+    ][
+        ,.(count = .N), .(niche_type_from, niche_type_to, sample_id)
+    ][, run := paste0('perm_',x)]
+}))
+
+adjacencies = rbind(observed_adjacency, permuted_adjacencies)[
+    niche_type_from %in% niches_to_show & niche_type_to %in% niches_to_show
+][
+    # to each sample, we calculate the mean and sd of the count of the permuted adjacencies
+    # and the z score of the observed adjacency
+    ,.(
+        mean_count = mean(count[run != 'observed']),
+        sd_count = sd(count[run != 'observed']),
+        observed_count = count[run == 'observed'],
+        z_score = (
+            count[run == 'observed'] - 
+                mean(count[run != 'observed'])
+        )/sd(count[run != 'observed'])
+    ),
+    .(niche_type_from, niche_type_to, sample_id)
+][
+    ,.(
+        # get the two tailed p values from the z scores
+        p_value = 2*pnorm(-abs(z_score), lower.tail = TRUE),
+        z_score
+    ),.(niche_type_from, niche_type_to, sample_id)
+][
+    !is.na(p_value),.(
+        comb_p_value = ifelse(
+            sum((p_value > 0) & (p_value <= 1)) >= 2,
+            sumlog(p_value)$p, as.numeric(p_value)
+        ), mean_z_score = mean(z_score)
+    ), .(niche_type_from, niche_type_to)
+][, q_val := p.adjust(comb_p_value, method = 'BY')][
+    observed_adjacency[,.(count = sum(count)), .(niche_type_from, niche_type_to)], 
+    on = c('niche_type_from','niche_type_to')
+]
+
+ggplot(adjacencies[
+    niche_type_from %in% niches_to_show & niche_type_to %in% niches_to_show
+]) +
+    geom_point(aes(
+        x = niche_type_from, y = niche_type_to, #size = count, 
+        fill = pmin(
+            quantile(mean_z_score, 0.90, na.rm = TRUE), 
+            mean_z_score, na.rm = TRUE
+        ), color = ifelse(q_val < 0.05, 'significant','not significant'),
+        shape = ifelse(mean_z_score > 0, 'Positive','Negative')
+    ), stroke = 1, size = 10) +
+    theme(
+        text = element_text(size = 15), legend.position = 'right'
+    ) + scale_fill_gradient2(
+        low = 'blue', mid = 'white', high = 'red', midpoint = 0
+    ) + scale_shape_manual(values = c('Positive' = 21,'Negative' = 22)) +
+    # scale_size_area(max_size = 10) +
+    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Adjacency of Niches',
+        x = 'Niche Type From',
+        y = 'Niche Type To',
+        size = 'Count',
+        fill = 'Mean Z Score',
+        color = 'Significance', 
+        shape = 'Direction'
+    ) 
+
+ggplot(adjacencies[
+    niche_type_from %in% niches_to_show & niche_type_to %in% niches_to_show
+]) +
+    geom_point(aes(
+        x = niche_type_from, y = niche_type_to, size = count, 
+        fill = pmin(
+            quantile(mean_z_score, 0.90, na.rm = TRUE), 
+            mean_z_score, na.rm = TRUE
+        ), color = ifelse(q_val < 0.05, 'significant','not significant'),
+        shape = ifelse(mean_z_score > 0, 'Positive','Negative')
+    ), stroke = 1, size = 10) +
+    theme(
+        text = element_text(size = 15), legend.position = 'right'
+    ) + scale_fill_gradient2(
+        low = 'blue', mid = 'white', high = 'red', midpoint = 0
+    ) + scale_shape_manual(values = c('Positive' = 21,'Negative' = 22)) +
+    scale_size_area(max_size = 10) +
+    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Adjacency of Niches',
+        x = 'Niche Type From',
+        y = 'Niche Type To',
+        size = 'Count',
+        fill = 'Mean Z Score',
+        color = 'Significance', 
+        shape = 'Direction'
+    ) 
+```
+
+## Visualizing the adjacency of niches with network graphs
+
+```{r}
+library(igraph)
+
+links = adjacencies[
+    q_val <= 0.05 &  
+        niche_type_from %in% niches_to_show & 
+        niche_type_to %in% niches_to_show &
+        niche_type_from != niche_type_to & 
+        mean_z_score >= 0, .(
+        source = as.character(niche_type_from),
+        target = as.character(niche_type_to),
+        weight = pmin(
+            quantile(-log10(q_val), 0.95, na.rm = TRUE), 
+            -log10(q_val), na.rm = TRUE
+        )
+    )
+]
+g = graph_from_data_frame(links, directed = TRUE)
+# identify community in graph
+communities = cluster_walktrap(g, step = 2)
+data.table(
+    vertex = V(g)$name, 
+    community = communities$membership
+)[order(community)]
+set.seed(55555)
+plot(
+    g, vertex.color = communities$membership,
+    edge.width = E(g)$weight/10, edge.arrow.size = 0.5, vertex.size = 10, vertex.label.cex = 1.5
+)
+
+# recip_links = reciprocity[
+#     , c('source','target') := 
+#         tstrsplit(niche_combo, ' - ')
+# ][
+#     (reciprocal_sig),.(source, target)
+# ]
+# g = graph_from_data_frame(recip_links, directed = FALSE)
+# plot(g, edge.width = 1, edge.arrow.size = 0.5, vertex.size = 10, vertex.label.cex = 1.5)
+```
+
+# Niche Niche Adjacencies within histology
+
+```{r}
+observed_adjacency = knnDT[,.(from_id,to_id,distance)][
+    cell_cell_type_dt[,.(cell_id,niche_type_to = niche_type)], on = c('to_id' = 'cell_id'),
+][
+    cell_cell_type_dt[,.(
+        cell_id, niche_type_from = niche_type, sample_id, histology
+    )], on = c('from_id' = 'cell_id')
+][
+    ,.(count = .N), .(niche_type_from, niche_type_to, sample_id, histology)
+][, run := 'observed']
+
+set.seed(55555)
+permutation_num = 10
+permuted_adjacencies = do.call('rbind',lapply(c(1:permutation_num), function(x){
+    # for each round of permutation, we permute the niche type labels within a sample
+    permuted_cell_type_dt = cell_cell_type_dt[,.(
+        cell_id,niche_type = sample(niche_type)
+    ), .(sample_id, histology)]
+    knnDT[,.(from_id,to_id,distance)][
+        permuted_cell_type_dt[,.(cell_id, niche_type_to = niche_type)], 
+        on = c('to_id' = 'cell_id'),
+    ][
+        # for the cells themselves, we do not permute the niche type labels
+        permuted_cell_type_dt[,.(
+            cell_id, niche_type_from = niche_type, sample_id, histology
+        )], on = c('from_id' = 'cell_id')
+    ][
+        ,.(count = .N), .(niche_type_from, niche_type_to, sample_id, histology)
+    ][, run := paste0('perm_',x)]
+}))
+
+adjacencies = rbind(observed_adjacency, permuted_adjacencies)[
+    niche_type_from %in% niches_to_show & niche_type_to %in% niches_to_show
+][
+    # to each sample, we calculate the mean and sd of the count of the permuted adjacencies
+    # and the z score of the observed adjacency
+    ,.(
+        mean_count = mean(count[run != 'observed']),
+        sd_count = sd(count[run != 'observed']),
+        observed_count = count[run == 'observed'],
+        z_score = (
+            count[run == 'observed'] - 
+                mean(count[run != 'observed'])
+        )/sd(count[run != 'observed'])
+    ),
+    .(niche_type_from, niche_type_to, sample_id, histology)
+][
+    ,.(
+        # get the two tailed p values from the z scores
+        p_value = 2*pnorm(-abs(z_score), lower.tail = TRUE),
+        z_score
+    ),.(niche_type_from, niche_type_to, sample_id, histology)
+][
+    !is.na(p_value),.(
+        comb_p_value = ifelse(
+            sum((p_value > 0) & (p_value <= 1)) >= 2,
+            sumlog(p_value)$p, as.numeric(p_value)
+        ), mean_z_score = mean(z_score)
+    ), .(niche_type_from, niche_type_to, histology)
+][, q_val := p.adjust(comb_p_value, method = 'BY')][
+    observed_adjacency[,.(count = sum(count)), .(niche_type_from, niche_type_to, histology)], 
+    on = c('niche_type_from','niche_type_to','histology')
+]
+
+ggplot(adjacencies[
+    niche_type_from %in% niches_to_show & niche_type_to %in% niches_to_show
+]) +
+    geom_point(aes(
+        x = niche_type_from, y = niche_type_to, #size = count, 
+        fill = pmin(
+            quantile(mean_z_score, 0.90, na.rm = TRUE), 
+            mean_z_score, na.rm = TRUE
+        ), color = ifelse(q_val < 0.05, 'significant','not significant'),
+        shape = ifelse(mean_z_score > 0, 'Positive','Negative')
+    ), stroke = 1, size = 5) +
+    facet_wrap(~histology, nrow = 2) +
+    theme(
+        text = element_text(size = 15), legend.position = 'right'
+    ) + scale_fill_gradient2(
+        low = 'blue', mid = 'white', high = 'red', midpoint = 0
+    ) + scale_shape_manual(values = c('Positive' = 21,'Negative' = 22)) +
+    # scale_size_area(max_size = 10) +
+    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Adjacency of Niches',
+        x = 'Niche Type From',
+        y = 'Niche Type To',
+        size = 'Count',
+        fill = 'Mean Z Score',
+        color = 'Significance', 
+        shape = 'Direction'
+    ) 
+```
+
+## Visualizing the adjacency of niches with network graphs
+
+```{r}
+library(igraph)
+
+x = 'central neurocytoma'
+lapply(unique(adjacencies$histology), function(x){
+    print(x)
+    links = adjacencies[
+        q_val <= 0.05 &  
+            histology == x &
+            niche_type_from %in% niches_to_show & 
+            niche_type_to %in% niches_to_show &
+            niche_type_from != niche_type_to & 
+            mean_z_score >= 0, .(
+            source = as.character(niche_type_from),
+            target = as.character(niche_type_to),
+            weight = ifelse(
+                q_val == 0, -log10(min(q_val[q_val > 0])),
+                -log10(q_val)
+            )
+        )
+    ]
+    g = graph_from_data_frame(links, directed = TRUE)
+    # identify community in graph
+    communities = cluster_walktrap(g, step = 2)
+    data.table(
+        vertex = V(g)$name, 
+        community = communities$membership
+    )[order(community)]
+    set.seed(55555)
+    plot(
+        g, vertex.color = communities$membership,
+        edge.width = E(g)$weight/10, edge.arrow.size = 0.5, 
+        vertex.size = 10, vertex.label.cex = 1.5,
+        vertex.label.font=3,
+        layout = layout_with_fr(g),
+        main = paste0('Niche Org. In  ',x)
+    )
+})
+
+# recip_links = reciprocity[
+#     , c('source','target') := 
+#         tstrsplit(niche_combo, ' - ')
+# ][
+#     (reciprocal_sig),.(source, target)
+# ]
+# g = graph_from_data_frame(recip_links, directed = FALSE)
+# plot(g, edge.width = 1, edge.arrow.size = 0.5, vertex.size = 10, vertex.label.cex = 1.5)
+```

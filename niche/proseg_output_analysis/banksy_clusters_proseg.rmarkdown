@@ -1,0 +1,742 @@
+---
+title: "Analyzing BANKSY Embedding for Cell Identities"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+
+# Introduction
+
+In this doc, we will be looking at the banksy clusters and try to interpret them based on their identity, and other characteristics.
+
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+library(Seurat)
+library(ComplexHeatmap)
+library(circlize)
+
+
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+
+
+# Load the data
+
+The objects are here:
+
+1.  RDS object with Leiden Clusters: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240711_135041.rds`
+
+    -   `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_embeddings/total_spatial_banksy_clusters_subset_20240711_135041.rds`
+
+2.  RDS object with cell type cluster markers: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_markers_20240711_135041.rds`
+
+Metadata is here:
+
+1.  `/Users/youyun/Documents/HMS/PhD/beroukhimlab/broad_mount/coja/Spatial_PLGG/data/metadata/Xenium_PS.xlsx`
+
+
+```{r}
+banksy_embeddings <- readRDS(ifelse(
+    workdir == "/xchip/beroukhimlab/", paste0(
+        workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+))
+colData(banksy_embeddings)$sample_id <- factor(colData(banksy_embeddings)$sample_id)
+
+cell_type_markers <- fread(paste0(
+    workdir, "coja/Spatial_PLGG/data/markers/final_manual_markers.csv"
+))
+xenium_markers <- fread(paste0(
+    workdir, "youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv"
+))
+```
+
+
+# Looking at the harmony corrected embeddings
+
+We will first look at the extent of batch effect in the cohort by looking at the embeddings before and after harmony correction. 
+
+
+```{r}
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP Cell Identity and Niches", fontface='bold'),
+    plot_grid(
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1,point_alpha = 0.5, color_by = "sample_id"
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = 'none'),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.1,point_alpha = 0.5, color_by = "sample_id"
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
+        nrow = 1,
+        rel_widths = c(1, 1.2)
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+
+# What do the cell clusters look like?
+
+
+```{r}
+res = 1
+kc = 50
+clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k%.1i_res%.1f',kc, res))
+```
+
+
+We will be looking at resolution = `r res` for the clusters using the `r clust_name` column.
+
+
+```{r}
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP for Cell Identity(L) and Niche(R)", fontface='bold'),
+    plot_grid(
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1, point_alpha = 0.5, 
+            color_by = clust_name
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.8", 
+            point_size = 0.1, point_alpha = 0.5, 
+            color_by = gsub('lam0.2','lam0.8',clust_name)
+        ) +
+            theme(legend.title = element_blank()) +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1))),
+        nrow = 1,
+        rel_widths = c(1, 1)
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+
+Just to get an idea of where each cluster is, we can look at the UMAPs colored individually by the clusters.
+
+
+```{r}
+cell_cluster_count = as.data.table(colData(banksy_embeddings))[
+    ,.(N = .N),.(cell_clusters = get(clust_name))
+][order(N, decreasing = TRUE)]
+kable(t(cell_cluster_count))
+cell_clusters = cell_cluster_count[N/ncol(banksy_embeddings) > 0.001]$cell_clusters
+# one hot encoded columns
+one_hot_encoded_clusters = data.frame(dcast(data.table(
+    cell_sample_id = rownames(colData(banksy_embeddings)),
+    clusters = paste0('cell_in_',colData(banksy_embeddings)[,clust_name])
+), cell_sample_id ~ clusters, length)[order(match(cell_sample_id,rownames(colData(banksy_embeddings))))])
+# cbind into the colData
+if(all(rownames(colData(banksy_embeddings)) == colData(banksy_embeddings)$cell_sample_id)){
+    colData(banksy_embeddings) = cbind(
+        colData(banksy_embeddings),
+        one_hot_encoded_clusters
+    )
+}else{
+    stop('Cell IDs do not match')
+}
+
+# make the plots
+a = lapply(cell_clusters, function(x){
+    assign(
+        paste0('cell_type_plot_',x),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1, point_alpha = 0.5, 
+            color_by = paste0('cell_in_',x)
+        )  + theme(
+            legend.position = "none",
+            axis.text=element_blank(),
+            axis.ticks=element_blank(),
+            axis.title=element_blank()
+        ) + labs(title = paste0('Cluster ',x)),
+        envir = .GlobalEnv
+    )
+})
+
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP by Cluster", fontface='bold'),
+    plot_grid(
+        plotlist = mget(paste0('cell_type_plot_',cell_clusters)),
+        ncol = 6,
+        rel_widths = rep(1,length(cell_clusters))
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+
+```
+
+
+
+# What are the cell types in the clusters?
+
+## Manually- and Xenium- annotated cell type markers
+
+
+```{r}
+markers_to_score = rbind(cell_type_markers[
+    category == 'Cell Type' & xenium == TRUE,
+    .(markers = marker),.(annotation = paste0(annotation, '_manual'))
+],xenium_markers[
+    ,.(markers = Genes),.(annotation = paste0(Annotation, '_xenium'))
+])[
+    ,annotation := make.names(annotation)
+]
+markers_to_score = markers_to_score[annotation %in% markers_to_score[,.N, .(annotation)][N>=2]$annotation]
+
+# Scoring the cells by cell type markers
+cell_types = unique(markers_to_score$annotation)
+marker_score = do.call('cbind',lapply(cell_types, function(x){
+    genes_of_interest = markers_to_score[annotation == x]$markers
+    cell_scores = log10(colSums(
+        assay(banksy_embeddings[genes_of_interest,], 'normcounts')
+    )/length(genes_of_interest) + 1)
+    cell_scores_df = data.frame(cell_scores)
+    rownames(cell_scores_df) = names(cell_scores)
+    colnames(cell_scores_df) = x
+    cell_scores_df
+}))
+colData(banksy_embeddings)[,cell_types] = NULL
+if(all(rownames(colData(banksy_embeddings)) == rownames(colData(banksy_embeddings)))){
+    colData(banksy_embeddings) = cbind(colData(banksy_embeddings),marker_score)
+}else{
+    stop('Cell IDs do not match')
+}
+
+# make the plots
+a = lapply(cell_types, function(x){
+    assign(
+        paste0('plot_',x),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1, point_alpha = 0.5, 
+            color_by = x
+        ) +
+            theme(legend.title = element_blank(), legend.position = 'bottom') +
+            guides(colour = guide_legend(override.aes = list(size = 5, alpha = 1), nrow = 1)) +
+            labs(title = x),
+        envir = .GlobalEnv
+    )
+})
+```
+
+
+We are going to annotate `r .QuartoInlineRender(length(cell_types))` cell types. and we will now visualize the marker scores. 
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 10
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP by Manually Curated Markers", fontface='bold'),
+    plot_grid(
+        plotlist = mget(paste0('plot_',grep('_manual',cell_types, value = TRUE))),
+        ncol = 4,
+        rel_widths = rep(1,sum(grepl('_manual',cell_types)))
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+```{r}
+#| fig-width: 20
+#| fig-height: 20
+plot_grid(
+    ggdraw() + draw_label("BANKSY Embedding UMAP by Xenium Markers", fontface='bold'),
+    plot_grid(
+        plotlist = mget(paste0('plot_',grep('_xenium',cell_types, value = TRUE))),
+        ncol = 5,
+        rel_widths = rep(1,sum(grepl('_xenium',cell_types)))
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+
+We should complement the manual approach with more statistics
+
+## Looking at these 'metagenes' statistically
+
+A better way to do this is to test statistically, which clusters are enriched for which signature. We will do that here
+
+
+```{r}
+cell_type_cluster_sig = do.call('rbind',lapply(paste0('cell_in_',cell_clusters), function(x){
+    scran_cell_markers = findMarkers(
+        as.matrix(t(colData(banksy_embeddings)[,cell_types])),
+        groups = colData(banksy_embeddings)[,x],
+        test.type="wilcox", direction="up"
+    )    
+    delta_dt = melt(setDT(
+        as.data.frame(colData(banksy_embeddings)[,c(cell_types,x)]),
+        keep.rownames = 'cell_sample_id'
+    ), id.vars = c('cell_sample_id',x), variable.name = 'cell_type', value.name = 'score')[
+        ,.(delta_score = mean(score[get(x) == 1]) - mean(score[get(x) == 0])),.(cell_type)
+    ]
+    cluster_cell_type = setDT(
+        data.frame(scran_cell_markers[[2]]),
+        keep.rownames = 'cell_type'
+    )[,.(cell_type = make.names(cell_type), Top, p.value, FDR, cluster = x)]
+    merge(
+        cluster_cell_type, delta_dt, by = 'cell_type'
+    )
+}))
+
+# make a hierarchically clustered heatmap
+cell_type_cluster_sig_matrix = dcast(
+    cell_type_cluster_sig[,.(cell_type, cluster, FDR = ifelse(FDR<0.05,'*',''))],
+    cluster ~ cell_type, value.var = 'FDR'
+)
+cell_type_cluster_delta_matrix = dcast(
+    cell_type_cluster_sig[,.(cell_type, cluster, delta_score)],
+    cluster ~ cell_type, value.var = 'delta_score'
+)
+plot_sig_mt = as.matrix(cell_type_cluster_sig_matrix[,c(2:ncol(cell_type_cluster_sig_matrix)), with = FALSE])
+plot_delta_mt = as.matrix(cell_type_cluster_delta_matrix[,c(2:ncol(cell_type_cluster_delta_matrix)), with = FALSE])
+rownames(plot_sig_mt) = cell_type_cluster_sig_matrix$cluster
+rownames(plot_delta_mt) = cell_type_cluster_delta_matrix$cluster
+col_fun = colorRamp2(c(-0.3,0,0.3), c("red", "white", "green"))
+Heatmap(
+    plot_delta_mt, name = "Delta Mean Norm Counts", col = col_fun,
+    cell_fun = function(j, i, x, y, width, height, fill) {
+        grid.text(sprintf("%s", plot_sig_mt[i, j]), x, y, gp = gpar(fontsize = 10))
+})
+```
+
+
+## Looking at the DE Genes in each cluster
+
+
+```{r}
+ggplot(colData(banksy_embeddings)) + 
+    geom_bar(aes(x = get(clust_name), fill = as.numeric(get(clust_name)))) + 
+    facet_wrap(~sample_id, nrow = 3, scale = 'free_y') +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 15)
+    ) + labs(
+        x = 'Cluster ID', y = 'Number of Cells (log10)'
+    ) + scale_fill_viridis_c(option = 'D') +
+    guides(fill = guide_legend(title = 'Cluster ID')) +
+    scale_y_log10()
+
+```
+
+```{r}
+#| warning: false
+banksy_embeddings_seurat = as.Seurat(banksy_embeddings, counts = 'counts', data = NULL)
+banksy_embeddings_seurat = NormalizeData(
+    banksy_embeddings_seurat, normalization.method = "LogNormalize", 
+    scale.factor = 10000
+)
+Idents(banksy_embeddings_seurat) = clust_name
+```
+
+```{r}
+DE_genes_wilcox = data.table(FindAllMarkers(
+    banksy_embeddings_seurat[
+        ,which(colData(banksy_embeddings)[, clust_name] %in% cell_clusters)
+    ], slot = 'counts',
+    test.use = 'wilcox',
+    only.pos = TRUE,
+    verbose = FALSE
+))
+
+DE_genes_wilcox = merge(
+    DE_genes_wilcox,
+    xenium_markers[,.(gene = Genes, Annotation)],
+    by = 'gene'
+)
+
+kable(DE_genes_wilcox[order(p_val_adj)][
+    p_val_adj <= 0.05 & avg_log2FC >= 1, .(
+        N = .N, 
+        `Markers` = paste0(
+            gene[avg_log2FC >= 1], ' (', 
+            round(avg_log2FC[avg_log2FC >= 1], 2),  ', ',
+            Annotation[avg_log2FC >= 1] ,
+            ')', collapse = ', '
+        )
+    ), 
+    .(cluster)
+][order(cluster)])
+```
+
+```{r}
+DE_genes_mast = data.table(FindAllMarkers(
+    banksy_embeddings_seurat[
+        ,which(colData(banksy_embeddings)[, clust_name] %in% cell_clusters)
+    ], slot = 'counts',
+    test.use = 'MAST',
+    only.pos = TRUE,
+    verbose = FALSE
+))
+
+DE_genes_mast = merge(
+    DE_genes_mast,
+    xenium_markers[,.(gene = Genes, Annotation)],
+    by = 'gene'
+)
+
+kable(DE_genes_mast[order(p_val_adj)][
+    p_val_adj <= 0.05 & avg_log2FC >= 1, .(
+        N = .N, 
+        `Markers` = paste0(
+            gene[avg_log2FC >= 1], ' (', 
+            round(avg_log2FC[avg_log2FC >= 1], 2),  ', ',
+            Annotation[avg_log2FC >= 1] ,
+            ')', collapse = ', '
+        )
+    ), 
+    .(cluster)
+][order(cluster)])
+```
+
+```{r}
+de_genes_count = merge(
+    DE_genes_wilcox[
+        p_val_adj <= 0.05 & avg_log2FC >= 1,
+        .N, .(cluster)
+    ][order(cluster)],
+    DE_genes_mast[
+        p_val_adj <= 0.05 & avg_log2FC >= 1,
+        .N, .(cluster)
+    ][order(cluster)],
+    by = 'cluster', all = TRUE,
+    suffixes = c('_wilcox','_mast')
+)
+
+```
+
+```{r}
+library(fgsea)
+library(msigdbr)
+# https://bioconductor.org/packages/release/bioc/vignettes/fgsea/inst/doc/geseca-tutorial.html#analysis-of-single-cell-rna-seq
+
+# prep seurat object
+banksy_embeddings_seurat <- SCTransform(
+    banksy_embeddings_seurat, assay = "originalexp", 
+    verbose = FALSE, variable.features.n = 10000
+)
+banksy_embeddings_seurat <- RunPCA(
+    banksy_embeddings_seurat, assay = "SCT", verbose = FALSE,
+    rev.pca = TRUE, reduction.name = "pca.rev",
+    reduction.key="PCR_", npcs = 50
+)
+E <- banksy_embeddings_seurat@reductions$pca.rev@feature.loadings
+
+# get human gene set
+pathwaysDF <- msigdbr("human")
+pathways <- split(pathwaysDF$gene_symbol, pathwaysDF$gs_name)
+
+set.seed(1)
+gesecaRes <- geseca(pathways, E, minSize = 15, maxSize = 500, center = FALSE)
+kable(gesecaRes[padj < 0.05])
+```
+
+
+# Preliminary annotation
+
+With the information above, we can begin to piece together some preliminary definition for each cluster. 
+
+This [Cell Paper](https://www.sciencedirect.com/science/article/pii/S0092867421005018?via%3Dihub#fig1) and this [Nature Paper](https://www.nature.com/articles/s41586-019-1506-7/figures/1)
+
+
+```{r}
+prelim_annotation_res1 = data.table(t(setDT(list(
+    `1` = c('Neuron','GABAergic Neuron (lamp5, pax6)'),
+    `2` = c('Neuron','Glutamatergic Neuron (GBM CC Xenium)'),
+    `12` = c('Neuron','GABAergic Neuron (Proliferating)'),
+    `15` = c('Neuron','Glutamatergic Neuron'),
+    `18` = c('Neuron','Unknown Neuron (GABAergic and Glutamatergic)'),
+    `17` = c('Oligodendrocytes','Oligodendrocytes'),
+    `16` = c('Proliferation','Proliferation'),
+    `9` = c('Lymphoid','Lymphoid'),
+    `11` = c('Neuron','Unknown Neuron (GABAergic and Glutamatergic)'),
+    `19` = c('Neuron','GABAergic Neuron (sst, sst/chodl, pvalb, chandelier)'),
+    `3` = c('RGC','RGC'),
+    `8` = c('RGC','RGC'),
+    `14` = c('Neuron','Glutamatergic Neuron (l6b)'),
+    `20` = c('Undetermined','Undetermined'),
+    `4` = c('Myeloid','Myeloid'),
+    `6` = c('Stromal','Endothelial/VLMC'), 
+    `13` = c('Myeloid','Myeloid'),
+    `5` = c('OPC','OPC'),
+    `7` = c('Astrocyte','Astrocyte'),
+    `10` = c('Astrocyte','Astrocyte (VLMC, myeloid)')
+))), keep.rownames = 'cluster')[
+    , c('Coarse Cell Type', 'Fine Cell Type Annotation') := list(V1, V2)
+][,c('V1','V2') := NULL][
+    order(as.numeric(cluster)), 
+    `Coarse Cell Type UMAP` := paste0(
+        `Coarse Cell Type`, ' ', c(1:.N)
+    ),.(`Coarse Cell Type`)
+][,`Fine Cell Type` := gsub(
+        ' \\(.*','', `Fine Cell Type Annotation`
+)][
+    order(as.numeric(cluster)),
+    `Fine Cell Type UMAP` := paste0(
+        `Fine Cell Type`, ' ', c(1:.N)
+    ),.(`Fine Cell Type`)
+]
+setcolorder(
+    prelim_annotation_res1,
+    c(
+        'cluster','Coarse Cell Type','Coarse Cell Type UMAP',
+        'Fine Cell Type','Fine Cell Type UMAP',
+        'Fine Cell Type Annotation'
+    )
+)
+kable(prelim_annotation_res1)
+# write.table(
+#     prelim_annotation_res1,
+#     file = paste0(
+#         workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
+#     ),
+#     sep = '\t', quote = FALSE, row.names = FALSE
+# )
+```
+
+
+## Plotting out the preliminary annotation on UMAP
+
+Plotting out some cohort information:
+
+1.  UMAP before and after harmony correction
+2.  UMAP colored by the preliminary annotation
+3.  UMAP colored by the sample ID
+4.  UMAP colored by the histology
+
+we will first merge in the preliminary annotation into the banksy embeddings
+
+
+```{r}
+original_order = rownames(colData(banksy_embeddings))
+merged_coldata = merge(
+    colData(banksy_embeddings),
+    prelim_annotation_res1[,cluster := as.character(cluster)],
+    by.x = clust_name, by.y = 'cluster', all.x = TRUE
+)
+rownames(merged_coldata) = paste0(merged_coldata$cell_id, '__',merged_coldata$sample_id)
+colData(banksy_embeddings) = merged_coldata[original_order,]
+```
+
+```{r}
+cell_type_to_test = 'Fine Cell Type UMAP'
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+
+plot_grid(
+    ggdraw() + draw_label("BANKSY Cell Identity Embedding", fontface='bold'),
+    plot_grid(
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1,point_alpha = 0.5, color_by = cell_type_to_test
+        ) + theme(
+            legend.title = element_blank(),
+            legend.position = 'bottom'
+        ) + scale_color_manual(values = cell_type_color_manual) +
+            guides(colour = guide_legend(
+            override.aes = list(size = 5, alpha = 1),
+            nrow = 4
+        )) + labs(
+            title = 'Cell Type',
+            x = 'UMAP1', y = 'UMAP2'
+        ),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1,point_alpha = 0.5, color_by = "sample_id"
+        ) + theme(
+            legend.title = element_blank(),
+            legend.position = 'bottom',
+            legend.justification = "right"
+        ) + guides(colour = guide_legend(
+            override.aes = list(size = 5, alpha = 1),
+            nrow = 4
+        )) + labs(
+            title = 'Sample IDs',
+            x = 'UMAP1', y = 'UMAP2'
+        ),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1,point_alpha = 0.5, color_by = "histology"
+        ) + theme(
+            legend.title = element_blank(),
+            legend.position = 'bottom'
+        ) + guides(colour = guide_legend(
+            override.aes = list(size = 5, alpha = 1),
+            nrow = 4
+        )) + labs(
+            title = 'Histology',
+            x = 'UMAP1', y = 'UMAP2'
+        ),
+        
+        nrow = 1,
+        rel_widths = c(1, 1, 1)
+    ), ncol = 1,rel_heights = c(0.1, 5)
+)
+```
+
+
+# Cell Type Enrichment Analysis
+
+
+```{r}
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+histology_cell_type_enrichment = pairwise_categorical_continuous_enrichment_wilcox_test(dcast(
+    data.table(
+        sample_id = colData(banksy_embeddings)$sample_id,
+        histology = colData(banksy_embeddings)$histology,
+        cluster = as.character(colData(banksy_embeddings)[,clust_name])
+    )[
+        cluster %in% cell_clusters, 
+        .(proportion = as.numeric(.N)), 
+        .(sample_id, histology, cluster)
+    ][, proportion := proportion/sum(proportion), .(sample_id, histology)],
+    sample_id + histology ~ cluster,
+    value.var = 'proportion', fill = 0
+),padj_method = 'BH')
+setnames(
+    histology_cell_type_enrichment, 1:2,
+    c('histology','cell_type')
+)
+
+```
+
+```{r}
+ggplot(histology_cell_type_enrichment) +
+    geom_point(aes(
+        x = as.factor(as.numeric(cell_type)), 
+        y = histology, size = N_var2, 
+        # color by odds_ratios column capped at percentile 95
+        fill = delta, color = ifelse(
+            q_value < 0.25 & as.numeric(delta) > 0, 
+            'significant','not significant'
+        )
+    ), shape = 21, stroke = 1) +
+    theme(
+        text = element_text(size = 15), legend.position = 'right',
+        axis.text.x = element_text(angle = 45, hjust = 1)
+    ) + scale_fill_viridis_c() +
+    scale_size_area(max_size = 20) +
+    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Enrichment of Cell Types Across Histologies',
+        x = 'Cell Type',
+        y = 'Histology',
+        size = 'Average Proportion',
+        fill = 'Delta Proportions',
+        color = 'Significance'
+    ) + guides(
+        fill = guide_legend(title = 'Avg Delta'),
+        color = guide_legend(title = 'Significance')
+    )
+```
+
+```{r}
+# source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+# histology_cell_type_enrichment = pairwise_categorical_continuous_enrichment_wilcox_test(dcast(
+#     data.table(
+#         sample_id = colData(banksy_embeddings)$sample_id,
+#         histology = colData(banksy_embeddings)$histology,
+#         cluster = as.character(colData(banksy_embeddings)[,clust_name])
+#     )[
+#         prelim_annotation_res1[,.(
+#             cluster = as.character(cluster), 
+#             `Fine Cell Type UMAP`
+#         )],
+#         on = c('cluster' = 'cluster')
+#     ][
+#         , .(proportion = as.numeric(.N)), 
+#         .(sample_id, histology, `Fine Cell Type UMAP`)
+#     ][, proportion := proportion/sum(proportion), .(sample_id, histology)],
+#     sample_id + histology ~ `Fine Cell Type UMAP`,
+#     value.var = 'proportion', fill = 0
+# ),padj_method = 'BH')
+# setnames(
+#     histology_cell_type_enrichment, 1:2,
+#     c('histology','cell_type')
+# )
+
+```
+
+```{r}
+# ggplot(histology_cell_type_enrichment) +
+#     geom_point(aes(
+#         x = factor(cell_type, levels = c(
+#                 'GABAergic Neuron 1','GABAergic Neuron 2','GABAergic Neuron 3',
+#                 'Glutamatergic Neuron 1','Glutamatergic Neuron 2','Glutamatergic Neuron 3',
+#                 'Unknown Neuron 1','Unknown Neuron 2' ,'RGC 1','RGC 2','Proliferation 1',
+#                 'OPC 1','Oligodendrocytes 1','Astrocyte 1','Astrocyte 2','Endothelial/VLMC 1',
+#                 'Lymphoid 1','Myeloid 1','Myeloid 2', 'Undetermined 1'
+#             )), y = histology, size = N_var2, 
+#         # color by odds_ratios column capped at percentile 95
+#         fill = delta, color = ifelse(
+#             q_value < 0.25 & as.numeric(delta) > 0, 
+#             'significant','not significant'
+#         )
+#     ), shape = 21, stroke = 1) +
+#     theme(
+#         text = element_text(size = 15), legend.position = 'right',
+#         axis.text.x = element_text(angle = 45, hjust = 1)
+#     ) + scale_fill_viridis_c() +
+#     scale_size_area(max_size = 20) +
+#     scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+#     labs(
+#         title = 'Enrichment of Cell Types Across Histologies',
+#         x = 'Cell Type',
+#         y = 'Histology',
+#         size = 'Average Proportion',
+#         fill = 'Delta Proportions',
+#         color = 'Significance'
+#     ) + guides(
+#         fill = guide_legend(title = 'Avg Delta'),
+#         color = guide_legend(title = 'Significance')
+#     )
+```
+

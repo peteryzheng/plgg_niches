@@ -1,0 +1,284 @@
+---
+title: "Manual Curation of Markers"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+We are trying to handpick some cell type and pathway markers for the PLGG Spatial Project. The goal is to have a list of markers that are specific to the cell types and pathways that we are interested in based on prior knowledge.
+
+1. Xenium Panel
+    
+    `/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv`
+    
+2. Cell type markers
+    
+    `/xchip/beroukhimlab/coja/Spatial_PLGG/data/markers/curated_markers.xlsx`
+    
+    1. Which of them already ovelap with the Xenium panel already? 
+
+    2. Which of them are good to include? (2-3 per cell type, 10 cell type total)
+
+3. pathway markers
+    
+    `/xchip/beroukhimlab/coja/Spatial_PLGG/data/markers/pathway_markers.csv`
+    
+    1. Which of them already overlap with the Xenium panel already?
+
+    2. Which of them are good to include? (10 per pathway, 2 pathway total)
+
+        Highly variable gene annotated here: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/markers/pathway_markers_vargene.csv`
+
+
+```{r}
+#| echo: FALSE
+library(data.table)
+library(ggplot2)
+library(readxl)
+library(knitr)
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Load Data
+
+```{r}
+# Load Xenium Panel
+xenium_panel <- fread(paste0(workdir, "youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv"))
+# Load Cell Type Markers
+cell_type_markers <- melt(data.table(
+    read_xlsx(paste0(workdir, "coja/Spatial_PLGG/data/markers/curated_markers.xlsx"))
+)[,id := c(1:.N)], id.vars = "id", variable.name = "cell_type", value.name = "marker")[
+    !is.na(marker) & !cell_type %in% c('MAPK','Senmayo')
+]
+cell_type_markers[, id := NULL]
+# Load Pathway Markers
+pathway_markers <- fread(paste0(workdir, "coja/Spatial_PLGG/data/markers/pathway_markers.csv"))
+# Load Highly Variable Genes
+highly_variable_genes <- fread(paste0(workdir, "coja/Spatial_PLGG/data/markers/pathway_markers_vargene.csv"))
+```
+
+# Cell Type Markers
+
+## Overlap with Xenium Panel
+
+```{r}
+#| results: hold
+cell_type_markers[, xenium := marker %in% xenium_panel$Genes]
+ggplot(cell_type_markers) +
+    geom_bar(aes(x = cell_type, fill = xenium), position = "stack") +
+    # add horizontal line at 3
+    geom_hline(yintercept = 3, linetype = "dashed", color = "white") +
+    labs(title = "Overlap of Cell Type Markers with Xenium Panel", x = "Overlap with Xenium Panel", y = "Count") +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 15)
+    ) + scale_fill_brewer(palette = "Set1")
+kable(
+    cell_type_markers[
+        , .(
+            `Markers included` = paste0(marker[xenium], collapse = ", "),
+            `Markers not included` = paste0(marker[!xenium], collapse = ", "),
+            `Need more` = 3 - sum(xenium)
+        ), .(`Cell Type` = cell_type)
+    ]
+)
+```
+
+## Expert Curation of Cell Type Markers
+
+Some were pick based on [Michelle's heatmap](https://www.notion.so/peteryzheng/Pan-PLGG-PERSIST-list-b0cc630a23f2406494fa2d0efdbc3a92?pvs=4#0dbf7f0e497248b79db0c09a45668a1d) showing some top cell type specific markers in the PLGG single cell data. 
+
+1.  Stromal: PCOLCE (Michelle heatmap)
+2.  OPC: no more needed
+3.  Progenitor Glia: hard to pick
+4.  Oligodendrocyte: PLP1 (Michelle heatmap)
+5.  Endothelial: ESAM, VWF (Michelle heatmap)
+6.  Neuron (mature neuronal body): RBFOX3 (Michelle heatmap), ENO2 (putative neuron markers), BDNF (from [Monje Paper](https://www.nature.com/articles/s41586-023-06678-1)), 
+    -   glutamatergic (excitatory) and GABAergic (inhibitory) neurons already included in xenium panel mainly based off of [this paper](https://www.nature.com/articles/s41586-018-0654-5)
+    -   [processes](https://www.biocompare.com/Editorial-Articles/589675-A-Guide-to-Neuronal-Cell-Markers/): TUBB3, NEFL, MAPT  
+    -   [dendrites](https://www.biocompare.com/Editorial-Articles/589675-A-Guide-to-Neuronal-Cell-Markers/): MAP2
+    -   [intermediate progenitor cell](https://www.biocompare.com/Editorial-Articles/592536-A-Guide-to-Neural-Stem-Cell-Markers/): EOMES (Tbr2) CUX2 (already included), EMX2, FEZF2, BCL11B (CTIP2) 
+    -   [neurogenesis markers](https://www.biocompare.com/Editorial-Articles/589675-A-Guide-to-Neuronal-Cell-Markers/): GFAP, Nestin, SOX2 (all already included)
+7.  Microglia: CD74 (Michelle heatmap), TMEM119 (putative microglia marker)
+8.  Astrocyte: 	GFAP, CLU (Michelle heatmap)
+9.  T cell: IL32 (Michelle heatmap), CD3D (putative T cell marker)
+10. RGC: none
+11. Macrophage: CD14 (putative macrophage marker already included in Xenium), other markers are in M1 and M2
+
+```{r}
+added_probes = data.table(
+    marker = c(
+        'PCOLCE', 'PLP1',
+        'ESAM', 'VWF', 'RBFOX3','ENO2', 'BDNF',
+        'TUBB3', 'NEFL', 'MAPT', 'MAP2',
+        'EOMES', 'EMX2', 'FEZF2', 'BCL11B',
+        'CD74', 'TMEM119', 'GFAP', 'CLU',
+        'IL32', 'CD3D'
+    ),
+    annotation = c(
+        'Stromal', 'Oligodendrocyte', 
+        rep('Endothelial', 2), rep('Neuron', 11),
+        rep('Microglia', 2), rep('Astrocyte', 2),
+        rep('T_cell', 2)
+    ),
+    category = 'Cell Type',
+    xenium = FALSE
+)
+if(any(added_probes$marker %in% xenium_panel$Genes)) {
+    print(add_probes[marker %in% xenium_panel$Genes])
+}else{
+    print('All manually added markers are not in Xenium panel')
+}
+final_cell_type_markers = rbind(
+    # markers already in xenium panel
+    cell_type_markers[(xenium), .(marker, annotation = cell_type, category = 'Cell Type', xenium)], 
+    # manually added markers
+    added_probes
+)
+print(paste0('Adding ', nrow(added_probes), ' manually added markers'))
+kable(
+    final_cell_type_markers[
+        ,.(
+            `Markers Included` = paste0(marker[xenium], collapse = ", "),
+            `Markers To Add` = paste0(marker[!xenium], collapse = ", ")
+        ), 
+        .(`Cell Type` = annotation)
+    ],
+    caption = "Final Cell Type Markers"
+)
+```
+
+# Pathway Markers
+
+## Overlap with Xenium Panel
+
+```{r}
+#| results: hold
+highly_variable_genes$cohort_var_gene = ifelse(is.na(highly_variable_genes$cohort_var_gene), 0, highly_variable_genes$cohort_var_gene)
+highly_variable_genes[, xenium := Gene %in% xenium_panel$Genes]
+ggplot(highly_variable_genes) +
+    geom_bar(aes(x = Pathway, fill = xenium), position = "stack") +
+    # add horizontal line at 10
+    geom_hline(yintercept = 10, linetype = "dashed", color = "white") +
+    labs(title = "Overlap of Pathway Markers with Xenium Panel", x = "Overlap with Xenium Panel", y = "Count") +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 15)
+    ) + scale_fill_brewer(palette = "Set1")
+kable(
+    highly_variable_genes[
+        , .(
+            `Markers included` = paste0(Gene[xenium], collapse = ", "),
+            `Need more` = 10 - sum(xenium),
+            `Markers (var in 3)` = paste0(Gene[!xenium & cohort_var_gene == 3], collapse = ", "),
+            `Markers (var in 2)` = paste0(Gene[!xenium & cohort_var_gene == 2], collapse = ", "),
+            `Markers (var in 1)` = paste0(Gene[!xenium & cohort_var_gene == 1], collapse = ", "),
+            `Markers (var in 0)` = paste0(Gene[!xenium & (
+                cohort_var_gene == 0 | is.na(cohort_var_gene)
+            )], collapse = ", ")
+        ), .(Pathway)
+    ]
+)
+```
+
+## Expert Curation of Pathway Markers
+
+1. senescent markers: CDKN1A, CDKN2A, CDKN2B, GLB1, B2M, CGAS, ARG2
+
+2. MAPK [MSS Overlap gene set](https://www.nature.com/articles/s41467-023-40235-8#Fig1): GYPC, GPNMB, ETV5, TRIB2, EPB41L3, ST6GAL1, SPRY2, APOD, ETV4, SERPINA3 , ANKH, TRIB1, FCERIG, C3AR1 
+
+3. M1: IL1B, IL6, TNFalpha, CD11b (ITGAM), CD16 (FCGR3A), CD32 (FCGR2A), CD86
+
+    - ITGAM, FCGR3A, CD86 are already in xenium panel
+
+4. M2: IL4, IL10, MRC1, Arg-1 (ARG1), CHI3L1, STAT6, CCL22, PPARG
+
+```{r}
+added_probes_pathway = data.table(
+    marker = c(
+        'CDKN1A', 'CDKN2A', 'CDKN2B', 'GLB1', 'B2M', 'CGAS', 'ARG2',
+        'GYPC', 'GPNMB', 'ETV5', 'TRIB2', 'EPB41L3', 'ST6GAL1', 'SPRY2', 'APOD', 'ETV4', 'SERPINA3', 'ANKH', 'TRIB1', 'FCERIG', 'C3AR1',
+        'IL1B', 'IL6', 'TNF', 'FCGR2A', 
+        'IL4', 'IL10', 'MRC1', 'ARG1', 'CHI3L1', 'STAT6', 'CCL22', 'PPARG'
+    ),
+    annotation = c(
+        rep('senescence', 7),
+        rep('MAPK', 14),
+        rep('M1', 4),
+        rep('M2', 8)
+    ),
+    category = 'Pathway'
+)[
+    ,xenium := ifelse(marker %in% xenium_panel$Genes, TRUE, FALSE)
+]
+
+if(any(added_probes_pathway$marker %in% xenium_panel$Genes)) {
+    print(added_probes_pathway[marker %in% xenium_panel$Genes])
+}else{
+    print('All manually added markers are not in Xenium panel')
+}
+
+final_pathway_markers = rbind(
+    # markers already in xenium panel
+    highly_variable_genes[(xenium),.(marker = Gene, annotation = Pathway, category = 'Pathway', xenium)], 
+    # manually added markers
+    added_probes_pathway
+)
+print(paste0('Adding ', nrow(added_probes_pathway), ' manually added markers'))
+
+kable(
+    final_pathway_markers[
+        ,.(
+            `Markers Included` = paste0(marker[xenium], collapse = ", "),
+            `Markers To Add` = paste0(marker[!xenium], collapse = ", "),
+            Total = .N
+        ), 
+        .(`Pathway` = annotation)
+    ],
+    caption = "Final Pathway Markers"
+)
+```
+
+# Save Data
+
+```{r}
+final_markers = rbind(final_cell_type_markers, final_pathway_markers)
+write.csv(final_markers, paste0(workdir, "coja/Spatial_PLGG/data/markers/final_manual_markers.csv"), row.names = FALSE)
+print(paste0('Final markers saved to ', paste0(workdir, "coja/Spatial_PLGG/data/markers/final_manual_markers.csv")))
+print(paste0('Adding in ', nrow(final_markers[!(xenium)]),' markers to the xenium panel'))
+kable(
+    final_markers[
+        ,.(
+            Total = .N,
+            `Markers Included` = paste0(marker[xenium], collapse = ", "),
+            `Markers To Add` = paste0(marker[!xenium], collapse = ", ")
+        ), 
+        .(category, annotation)
+    ],
+    caption = "Markers to Add to Xenium Panel"
+)
+```

@@ -1,0 +1,90 @@
+---
+title: "Finalizing the Gene Set"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+
+```{r}
+#| echo: FALSE
+library(data.table)
+library(ggplot2)
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Introduction
+
+We have generated the final manually curated gene set here: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/markers/final_manual_markers.csv`
+
+We have also generated the PERSIST gene set here: `/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/PERSIST_results_00062024.csv`
+
+Finally, the Xenium Brain panel is here: `/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv` and 5K panel is here: `/xchip/beroukhimlab/youyun/plgg/data/xenium_selection/XeniumPrimeHuman5Kpan_tissue_pathways_metadata.csv`
+
+# Load the gene sets
+
+```{r}
+manual_markers <- fread(paste0(workdir, "coja/Spatial_PLGG/data/markers/final_manual_markers.csv"))
+persist_markers <- fread(paste0(workdir, "youyun/plgg/data/xenium_selection/PERSIST_results_00062024.csv"))
+xenium_brain <- fread(paste0(workdir, "youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv"))
+xenium_5k <- fread(paste0(workdir, "youyun/plgg/data/xenium_selection/XeniumPrimeHuman5Kpan_tissue_pathways_metadata.csv"))
+```
+
+# Final Gene Set
+
+```{r}
+manual_marker_genes <- manual_markers$marker
+persist_marker_genes <- persist_markers[(persist_set_46)]$name
+xenium_brain_genes <- xenium_brain$Genes
+final_gene_set <- unique(c(manual_marker_genes, persist_marker_genes, xenium_brain_genes))
+add_on_geneset <- setdiff(final_gene_set, xenium_brain_genes)
+writeLines(add_on_geneset, con = paste0(workdir, "youyun/plgg/data/xenium_selection/add_on_geneset.txt"))
+```
+
+# Overlap w the 5k set
+
+```{r}
+xenium_5k_genes <- xenium_5k$gene_name
+# make a upset plot between xenium 5k, xenium brain, persist markers genes and manual marker genes
+# use upsetr
+library(UpSetR)
+upsetr_set_dt = dcast(
+    data.table(
+        genes = c(xenium_5k_genes, xenium_brain_genes, persist_marker_genes, manual_marker_genes),
+        set = c(
+            rep("Xenium_5K", length(xenium_5k_genes)), 
+            rep("Xenium_Brain", length(xenium_brain_genes)), 
+            rep("PERSIST", length(persist_marker_genes)), 
+            rep("Manual", length(manual_marker_genes))
+        )
+    ), genes ~ set, fun.aggregate = length
+)
+upsetr_set_dt[upsetr_set_dt == 2] <- 1
+upset(
+    upsetr_set_dt[,.(Xenium_5K, Xenium_Brain, PERSIST, Manual)],
+    sets.bar.color = "#56B4E9", empty.intersections = TRUE,
+    nsets = 4
+)
+```

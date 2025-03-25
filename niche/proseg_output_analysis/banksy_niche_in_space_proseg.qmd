@@ -1,0 +1,240 @@
+---
+title: "BANKSY Niches in Space"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+This doc is solely dedicated to visualization of niches in space
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+library(Seurat)
+library(dbscan)
+library(circlize)
+library(Seurat)
+library(plotly)
+library(scales)
+library(htmlwidgets)
+library(metap)
+
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+```
+
+
+# Load the data
+
+The objects are here:
+
+RDS object with Leiden Clusters: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds`
+
+    -   `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_embeddings/total_spatial_banksy_clusters_subset_20240719_092550.rds`
+
+
+Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
+
+
+```{r}
+# load the banksy embeddings
+banksy_embeddings <- readRDS(ifelse(
+    workdir == "/xchip/beroukhimlab/", paste0(
+        workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_20_30_res_0.75_1_20241223_222156.rds"
+))
+colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+
+# Load the cell type clusters annotation
+prelim_annotation_res1 = fread(paste0(
+    workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
+))
+
+# specify the cluster names 
+# this is mainly to keep track of which resolution we are using
+niche_res = 1
+kc = 50
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k%.1i_res%.1f', kc ,niche_res))
+```
+
+
+Build the color palette for all niches and cell types downstream
+
+```{r}
+set.seed(5555)
+
+niches_to_show = as.data.table(colData(banksy_embeddings))[
+    ,.N, .(niches = get(niche_clust_name))
+][order(-N)][
+    N/ncol(banksy_embeddings) > 0.001
+]$niches
+
+niche_color_manual = structure(
+    pals::glasbey()[c(1:length(niches_to_show))],
+    names = as.character(sample(niches_to_show))
+)
+```
+
+
+# Looking at the niches in space all together
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+graph_dt = melt(
+    as.data.table(cbind(
+        spatialCoords(banksy_embeddings),
+        colData(banksy_embeddings)[c(
+            'sample_id','cell_id', 'histology',
+            niche_clust_name
+        )]
+    )),id.vars = c('sample_id','cell_id','histology','sdimx','sdimy'),
+    variable.name = 'Cluster Type',value.name = 'Cluster ID'
+)[`Cluster ID` %in% niches_to_show][
+    ,`Cluster ID` := as.character(`Cluster ID`)
+]
+
+g = ggplot(
+    graph_dt[`Cluster Type` == niche_clust_name], 
+    aes(x=sdimy, y=sdimx, color=`Cluster ID`)
+) +
+    facet_wrap(histology ~ sample_id, nrow = 2, scale = 'free_x') +
+    # subset cells
+    # geom_point(size = 0.3, alpha = 0.5) + 
+    # all cells
+    geom_point(size = 0.00001) + 
+    scale_color_manual(values = niche_color_manual) +
+    theme_classic() + 
+    theme(
+        legend.position = "bottom",
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        text = element_text(size = 30),
+        strip.text = element_text(size = 20),
+        strip.background = element_blank()
+    ) + guides(
+        color = guide_legend(override.aes = list(size=5, alpha = 1), nrow = 3, byrow = TRUE)
+    ) + labs(
+        title = 'BANKSY Niches in Space',
+        x = '',y = ''
+    ) +
+    coord_flip()
+g
+```
+
+
+# Looking at the niches in space separately
+
+```{r}
+#| fig-height: 32
+#| fig-width: 24
+x = unique(graph_dt$sample_id)[1]
+lapply(unique(graph_dt[order(-histology)]$sample_id), function(x){
+    ggplot(
+        graph_dt[`Cluster Type` == niche_clust_name & sample_id == x], 
+        aes(x=sdimy, y=sdimx, color=`Cluster ID`)
+    ) +
+        facet_wrap(
+            histology ~ sample_id + `Cluster ID`, labeller = label_wrap_gen(), 
+            ncol = 6, scale = 'free_x'
+        ) +
+        # subset cells
+        # geom_point(size = 0.3, alpha = 0.5) + 
+        # all cells
+        geom_point(size = 0.00001) + 
+        scale_color_manual(values = niche_color_manual) +
+        theme_classic() + 
+        theme(
+            legend.position = "bottom",
+            axis.text.x=element_blank(),
+            axis.text.y=element_blank(),
+            axis.ticks=element_blank(),
+            text = element_text(size = 30),
+            strip.text = element_text(size = 20),
+            strip.background = element_blank()
+        ) + guides(
+            color = guide_legend(override.aes = list(size=5, alpha = 1), nrow = 3, byrow = TRUE)
+        ) + labs(
+            title = paste0('BANKSY Niches in Space: ',x),
+            x = '',y = ''
+        ) +
+        coord_flip()
+})
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+x = unique(graph_dt[`Cluster Type` == niche_clust_name]$`Cluster ID`)[1]
+lapply(sort(unique(graph_dt[`Cluster Type` == niche_clust_name]$`Cluster ID`)), function(x){
+    ggplot(
+        graph_dt[`Cluster Type` == niche_clust_name & `Cluster ID` == x], 
+        aes(x=sdimy, y=sdimx, color=`Cluster ID`)
+    ) +
+        facet_wrap(
+            histology ~ sample_id, 
+            nrow = 2, scale = 'free_x'
+        ) +
+        # subset cells
+        # geom_point(size = 0.3, alpha = 0.5) + 
+        # all cells
+        geom_point(size = 0.00001) + 
+        scale_color_manual(values = niche_color_manual) +
+        theme_classic() + 
+        theme(
+            legend.position = "bottom",
+            axis.text.x=element_blank(),
+            axis.text.y=element_blank(),
+            axis.ticks=element_blank(),
+            text = element_text(size = 30),
+            strip.text = element_text(size = 20),
+            strip.background = element_blank()
+        ) + guides(
+            color = guide_legend(override.aes = list(size=5, alpha = 1), nrow = 3, byrow = TRUE)
+        ) + labs(
+            title = paste0('BANKSY Niches in Space: ',x),
+            x = '',y = ''
+        ) +
+        coord_flip()
+})
+```
+

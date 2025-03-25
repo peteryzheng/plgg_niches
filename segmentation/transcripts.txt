@@ -1,0 +1,11 @@
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011062__N288_03__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011062__N49_04__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011059__N283_23__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011059__N22_3054_II__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011059__N1803_21_I__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011059__8056B1__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011062__N1133_16__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011062__N0157_14__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011059__16694A13__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011062__N16_886__20230913__152454/transcripts.csv.gz
+/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer_reupload/output-XETG00078__0011059__sample__20230913__152454/transcripts.csv.gz

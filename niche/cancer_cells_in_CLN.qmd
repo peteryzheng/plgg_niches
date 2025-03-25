@@ -1,0 +1,794 @@
+---
+title: "Cancer Cells in CLNs"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+Previously we found that the cell types that correspond to adipocytes in CLNs are actually astrocytes 2/unknown neuron 1. And the niches that correspond to adipocytes are also ones that are enriched for astrocytes and enriched in PAs. So in this doc we will investigate what is going on?
+
+1.  If CLN adipocytes are actually astrocytes 2, then 
+
+    1.  Do they (CLN Astrocytes) look different transcriptionally than astrocytes in other cancers?
+
+    2.  Do they (CLN Astrocytes) also have larger radii than astrocytes in other cancers?
+
+2.  If CLN adipocytes are actually unknown neuron 1, then 
+
+    1.  Do they (CLN Unknown Neuron 1) look different transcriptionally than unknown neuron 1 in other cancers?
+
+    2.  Do they (CLN Unknown Neuron 1) also have larger radii than unknown neuron 1 in other cancers?
+
+More general questions are -- are there cell populations in CLNs that are larger than those in other cancers?
+
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+library(Seurat)
+library(dbscan)
+library(circlize)
+library(Seurat)
+library(plotly)
+library(scales)
+library(htmlwidgets)
+library(metap)
+
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+```
+
+
+# Load the data
+
+The objects are here:
+
+RDS object with Leiden Clusters: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds`
+
+    -   `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_embeddings/total_spatial_banksy_clusters_subset_20240719_092550.rds`
+
+
+Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
+
+
+```{r}
+# load the banksy embeddings
+banksy_embeddings = readRDS(ifelse(
+    workdir == '/xchip/beroukhimlab/',
+    paste0(workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds'),
+    '/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/total_spatial_banksy_clusters_subset_20240719_092550.rds'
+))
+colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+
+# Load the cell type clusters annotation
+prelim_annotation_res1 = fread(paste0(
+    workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
+))
+
+# specify the cluster names 
+# this is mainly to keep track of which resolution we are using
+cell_res = 1
+cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
+niche_res = 1
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
+```
+
+Build the color palette for all niches and cell types downstream
+
+```{r}
+set.seed(5555)
+cluster_classes = levels(colData(banksy_embeddings)[[niche_clust_name]])
+niche_color_manual = structure(
+    pals::polychrome()[c(1:length(cluster_classes))],
+    names = sample(cluster_classes)
+)
+# for niche resolution 0.5
+niches_to_show = c(1:11, 13, 14, 16, 17)
+# for niche resolution 1
+# niches_to_show = c(1:20, 22:25)
+
+cell_type_to_test = 'Coarse Cell Type'
+cell_type_to_test = 'Fine Cell Type'
+cell_type_to_test = 'Fine Cell Type UMAP'
+
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+
+```
+
+
+# Plotting the cell types in space
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+graph_dt = melt(
+    as.data.table(cbind(
+        spatialCoords(banksy_embeddings),
+        colData(banksy_embeddings)[c(
+            'sample_id','cell_id', 'histology','cell_area','nucleus_area',
+            grep('Harmony.*.res',clusterNames(banksy_embeddings), value = TRUE)
+        )]
+    )),id.vars = c(
+        'sample_id','cell_id','histology','cell_area',
+        'nucleus_area','sdimx','sdimy'
+    ),variable.name = 'Cluster Type',value.name = 'Cluster ID'
+)[`Cluster Type` == cell_clust_name][
+    prelim_annotation_res1[, cluster := as.character(cluster)], 
+    on = c('Cluster ID' = 'cluster')
+]
+
+ggplot(
+    graph_dt[
+        `Cluster Type` == cell_clust_name & 
+        histology == 'cerebellar liponeurocytoma'
+    ], aes(x=sdimy, y=sdimx, color=get(cell_type_to_test))
+) +
+    facet_wrap(~sample_id, nrow = 1, scale = 'free_x') +
+    # subset cells
+    # geom_point(size = 0.3, alpha = 0.5) + 
+    # all cells
+    geom_point(size = 0.00001) + 
+    scale_color_manual(values = cell_type_color_manual) +
+    theme_classic() + 
+    theme(
+        legend.position = "bottom",
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        text = element_text(size = 30),
+        strip.text = element_text(size = 20),
+        strip.background = element_blank()
+    ) + guides(
+        color = guide_legend(
+            override.aes = list(size=5, alpha = 1), nrow = 4, byrow = TRUE,
+            title = 'Cell Type'
+        )
+    ) + labs(
+        title = 'BANKSY Cell Types in Space',
+        x = '',y = ''
+    ) +
+    coord_flip()
+```
+
+```{r}
+#| fig-height: 24
+#| fig-width: 24
+cln_samples = unique(graph_dt[histology == 'cerebellar liponeurocytoma']$sample_id)
+lapply(
+    cln_samples, function(x){
+        ggplot(
+            graph_dt[
+                `Cluster Type` == cell_clust_name & 
+                sample_id == x
+            ], aes(x=sdimy, y=sdimx, color=get(cell_type_to_test))
+        ) +
+            facet_wrap( ~ get(cell_type_to_test), nrow = 3, scale = 'free_x') +
+            # subset cells
+            # geom_point(size = 0.3, alpha = 0.5) + 
+            # all cells
+            geom_point(size = 0.00001) + 
+            scale_color_manual(values = cell_type_color_manual) +
+            theme_classic() + 
+            theme(
+                legend.position = "bottom",
+                axis.text.x=element_blank(),
+                axis.text.y=element_blank(),
+                axis.ticks=element_blank(),
+                text = element_text(size = 30),
+                strip.text = element_text(size = 20),
+                strip.background = element_blank()
+            ) + guides(
+                color = guide_legend(
+                    override.aes = list(size=5, alpha = 1), nrow = 4, byrow = TRUE,
+                    title = 'Cell Type'
+                )
+            ) + labs(
+                title = 'BANKSY Cell Types in Space',
+                x = '',y = ''
+            ) +
+            coord_flip()
+    }
+)
+```
+
+# Plotting the niche types in space
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+graph_dt_niche = melt(
+    as.data.table(cbind(
+        spatialCoords(banksy_embeddings),
+        colData(banksy_embeddings)[c(
+            'sample_id','cell_id', 'histology',
+            grep('Harmony.*.res',clusterNames(banksy_embeddings), value = TRUE)
+        )]
+    )),id.vars = c('sample_id','cell_id','histology','sdimx','sdimy'),
+    variable.name = 'Cluster Type',value.name = 'Cluster ID'
+)[`Cluster Type` == niche_clust_name]
+
+ggplot(
+    graph_dt_niche[
+        `Cluster Type` == niche_clust_name & 
+        histology == 'cerebellar liponeurocytoma'
+    ], aes(x=sdimy, y=sdimx, color= `Cluster ID`)
+) +
+    facet_wrap(~sample_id, nrow = 1, scale = 'free_x') +
+    geom_point(size = 0.00001) + 
+    scale_color_manual(values = niche_color_manual) +
+    theme_classic() + 
+    theme(
+        legend.position = "bottom",
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        text = element_text(size = 30),
+        strip.text = element_text(size = 20),
+        strip.background = element_blank()
+    ) + guides(
+        color = guide_legend(
+            override.aes = list(size=5, alpha = 1), nrow = 4, byrow = TRUE,
+            title = 'Niche Type'
+        )
+    ) + labs(
+        title = 'BANKSY Niche Types in Space',
+        x = '',y = ''
+    ) +
+    coord_flip()
+```
+
+```{r}
+#| fig-height: 24
+#| fig-width: 24
+cln_samples_niche = unique(graph_dt_niche[histology == 'cerebellar liponeurocytoma']$sample_id)
+lapply(
+    cln_samples_niche, function(x){
+        ggplot(
+            graph_dt_niche[
+                `Cluster Type` == niche_clust_name & 
+                sample_id == x
+            ], aes(x=sdimy, y=sdimx, color= `Cluster ID`)
+        ) +
+            facet_wrap( ~ `Cluster ID`, nrow = 3, scale = 'free_x') +
+            geom_point(size = 0.00001) + 
+            scale_color_manual(values = niche_color_manual) +
+            theme_classic() + 
+            theme(
+                legend.position = "bottom",
+                axis.text.x=element_blank(),
+                axis.text.y=element_blank(),
+                axis.ticks=element_blank(),
+                text = element_text(size = 30),
+                strip.text = element_text(size = 20),
+                strip.background = element_blank()
+            ) + guides(
+                color = guide_legend(
+                    override.aes = list(size=5, alpha = 1), nrow = 4, byrow = TRUE,
+                    title = 'Niche Type'
+                )
+            ) + labs(
+                title = 'BANKSY Niche Types in Space',
+                x = '',y = ''
+            ) +
+            coord_flip()
+    }
+)
+```
+
+# Looking at the astrocytes separately
+
+## Using UMAP
+
+```{r}
+astrocyte_num = prelim_annotation_res1[`Fine Cell Type UMAP` == 'Astrocyte 2']$cluster
+plotReducedDim(
+    banksy_embeddings[
+        ,colData(banksy_embeddings)[[cell_clust_name]] == astrocyte_num
+    ], dimred = 'UMAP_Harmony_BANKSY_lam0.2',
+    color_by = 'histology',
+    point_size = 0.01
+)
+```
+
+```{r}
+astrocyte_umap = runUMAP(
+    banksy_embeddings[
+        ,colData(banksy_embeddings)[[cell_clust_name]] == astrocyte_num
+    ], dimred = 'Harmony_BANKSY_lam0.2',
+    pca = 20, name = 'Astrocyte UMAP'
+)
+plotReducedDim(
+    astrocyte_umap, dimred = 'Astrocyte UMAP', 
+    color_by = 'histology',
+    point_size = 0.01
+)
+```
+
+They do seem to separate somewhat by histology. 
+
+## Using Radii?
+
+```{r}
+ggplot(colData(banksy_embeddings[
+    ,colData(banksy_embeddings)[[cell_clust_name]] == astrocyte_num
+])) + geom_boxplot(aes(x = sample_id, y = cell_area)) + 
+    facet_wrap(~histology, nrow = 1, scale = 'free_x') + 
+    theme_minimal() + labs(
+        title = 'Cell Area of Astrocytes', 
+        x = 'Sample ID', y = 'Size'
+    ) 
+```
+
+Doesn't look like it from the cell area. In fact, the astrocytes in CLNs seem to be smaller than those in other cancers.
+
+```{r}
+ggplot(colData(banksy_embeddings[
+    ,colData(banksy_embeddings)[[cell_clust_name]] == astrocyte_num
+])) + geom_boxplot(aes(x = sample_id, y = nucleus_area)) + 
+    facet_wrap(~histology, nrow = 1, scale = 'free_x') + 
+    theme_minimal() + labs(
+        title = 'Nucleus Area of Astrocytes', 
+        x = 'Sample ID', y = 'Size'
+    ) 
+```
+
+Nucleus area wise maybe?
+
+
+# Looking at the Unknown Neuron 1
+
+## Using UMAP
+
+```{r}
+neuron_num = prelim_annotation_res1[`Fine Cell Type UMAP` == 'Unknown Neuron 1']$cluster
+plotReducedDim(
+    banksy_embeddings[
+        ,colData(banksy_embeddings)[[cell_clust_name]] == neuron_num
+    ], dimred = 'UMAP_Harmony_BANKSY_lam0.2',
+    color_by = 'histology',
+    point_size = 0.01
+)
+```
+
+```{r}
+neuron_umap = runUMAP(
+    banksy_embeddings[
+        ,colData(banksy_embeddings)[[cell_clust_name]] == neuron_num
+    ], dimred = 'Harmony_BANKSY_lam0.2',
+    pca = 20, name = 'Neuron UMAP'
+)
+plotReducedDim(
+    neuron_umap, dimred = 'Neuron UMAP', 
+    color_by = 'histology',
+    point_size = 0.01
+)
+```
+
+Not super separated by histology.
+
+## Using Radii?
+
+```{r}
+ggplot(colData(banksy_embeddings[
+    ,colData(banksy_embeddings)[[cell_clust_name]] == neuron_num
+])) + geom_boxplot(aes(x = sample_id, y = cell_area)) + 
+    facet_wrap(~histology, nrow = 1, scale = 'free_x') + 
+    theme_minimal() + labs(
+        title = 'Cell Area of Neurons', 
+        x = 'Sample ID', y = 'Size'
+    )
+```
+
+Again, the cell areas are larger in PAs and GGs than in CLNs and CNs. 
+
+```{r}
+ggplot(colData(banksy_embeddings[
+    ,colData(banksy_embeddings)[[cell_clust_name]] == neuron_num
+])) + geom_boxplot(aes(x = sample_id, y = nucleus_area)) + 
+    facet_wrap(~histology, nrow = 1, scale = 'free_x') + 
+    theme_minimal() + labs(
+        title = 'Nucleus Area of Neurons', 
+        x = 'Sample ID', y = 'Size'
+    )
+```
+
+Nucleus area wise, they are larger in CLN and CNs but not by much
+
+# Detailed cell radii analysis
+
+Since the adipocytes in CLNs are the putative cancerous population, and if the segmentation works well, we should see that in the distribution of the cell radii.
+
+## Radii of all cells in CLNs
+
+We will first plot the cells by their sizes in space. We should ideally see that the larger cells in CLNs correspond to where the adipocytes are. 
+
+```{r}
+ggplot(
+    graph_dt[
+        `Cluster Type` == cell_clust_name & 
+        histology == 'cerebellar liponeurocytoma'
+    ], aes(x=sdimy, y=sdimx, color=log10(cell_area))
+) +
+    facet_wrap(~sample_id, nrow = 1, scale = 'free_x') +
+    # subset cells
+    # geom_point(size = 0.3, alpha = 0.5) + 
+    # all cells
+    geom_point(size = 0.0001) + 
+    scale_color_viridis_c(
+        # low = "blue", mid = 'white', high = "red", 
+        name = 'log10(Cell Area)'
+    ) +
+    theme_classic() + 
+    theme(
+        legend.position = "bottom",
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        text = element_text(size = 30),
+        strip.text = element_text(size = 20),
+        strip.background = element_blank()
+    ) + guides(
+        color = guide_legend(
+            override.aes = list(size=5, alpha = 1), nrow = 4, byrow = TRUE,
+            title = 'Cell Type'
+        )
+    ) + labs(
+        title = 'BANKSY Cell Sizes in Space',
+        x = '',y = ''
+    ) +
+    coord_flip()
+
+ggplot(
+    graph_dt[
+        `Cluster Type` == cell_clust_name & 
+        histology == 'cerebellar liponeurocytoma'
+    ], aes(x=sdimy, y=sdimx, color=log10(cell_area-nucleus_area))
+) +
+    facet_wrap(~sample_id, nrow = 1, scale = 'free_x') +
+    # subset cells
+    # geom_point(size = 0.3, alpha = 0.5) + 
+    # all cells
+    geom_point(size = 0.0001) + 
+    scale_color_viridis_c(
+        # low = "blue", mid = 'white', high = "red", 
+        name = 'log10(Cytoplasmic Area)'
+    ) +
+    theme_classic() + 
+    theme(
+        legend.position = "bottom",
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        text = element_text(size = 30),
+        strip.text = element_text(size = 20),
+        strip.background = element_blank()
+    ) + guides(
+        color = guide_legend(
+            override.aes = list(size=5, alpha = 1), nrow = 4, byrow = TRUE,
+            title = 'Cell Type'
+        )
+    ) + labs(
+        title = 'BANKSY Cytoplasmic Sizes in Space',
+        x = '',y = ''
+    ) +
+    coord_flip()
+```
+
+## Radii distributions
+
+We will first plot the cell sizes of all cell types in all cancers
+
+```{r}
+ggplot(
+    graph_dt, aes(
+        x = factor(
+            sample_id,
+            levels = unique(graph_dt[,.(sample_id, histology)])[order(histology)]$sample_id
+        ), 
+        y = cell_area, fill = histology
+    )
+) + geom_boxplot(outlier.size=0.001) +
+    scale_fill_brewer(palette = "Set1") +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) + labs(
+        title = 'Cell Area Distribution of All Samples',
+        x = 'Sample', y = 'Cell Area'
+    )   
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+ggplot(
+    graph_dt, aes(
+        x = factor(
+            sample_id,
+            levels = unique(graph_dt[,.(sample_id, histology)])[order(histology)]$sample_id
+        ), 
+        y = cell_area, fill = histology
+    )
+) + geom_boxplot(outlier.shape=NA) +
+    facet_wrap(~get(cell_type_to_test)) +
+    scale_fill_brewer(palette = "Set1") +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) + labs(
+        title = 'Cell Area Distribution of All Cell Types by Sample',
+        x = 'Sample', y = 'Cell Area'
+    )   
+
+ggplot(
+    graph_dt, aes(x = get(cell_type_to_test), y = cell_area, fill = get(cell_type_to_test))
+) + geom_boxplot(outlier.shape=NA) +
+    facet_wrap(histology ~ sample_id, scale = 'free_y') +
+    scale_fill_manual(values = cell_type_color_manual) +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) +labs(
+        title = 'Cell Area Distribution of All Samples by Cell Types',
+        x = 'Cell Type', y = 'Cell Area', 
+        fill = 'Cell Type'
+    )
+```
+
+Then the nucleus area
+
+```{r}
+ggplot(
+    graph_dt, aes(
+        x = factor(
+            sample_id,
+            levels = unique(graph_dt[,.(sample_id, histology)])[order(histology)]$sample_id
+        ), 
+        y = nucleus_area, fill = histology
+    )
+) + geom_boxplot(outlier.size=0.001) +
+    scale_fill_brewer(palette = "Set1") +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) + labs(
+        title = 'Nucleus Area Distribution of All Samples',
+        x = 'Sample', y = 'Nucleus Area'
+    )
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+ggplot(
+    graph_dt, aes(
+        x = factor(
+            sample_id,
+            levels = unique(graph_dt[,.(sample_id, histology)])[order(histology)]$sample_id
+        ), 
+        y = nucleus_area, fill = histology
+    )
+) + geom_boxplot(outlier.shape=NA) +
+    facet_wrap(~get(cell_type_to_test)) +
+    scale_fill_brewer(palette = "Set1") +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) + labs(
+        title = 'Nucleus Area Distribution of All Cell Types by Sample',
+        x = 'Sample', y = 'Nucleus Area'
+    )
+
+ggplot(
+    graph_dt, aes(x = get(cell_type_to_test), y = nucleus_area, fill = get(cell_type_to_test))
+) + geom_boxplot(outlier.shape=NA) +
+    facet_wrap(histology ~ sample_id) +
+    scale_fill_manual(values = cell_type_color_manual) +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) +labs(
+        title = 'Nucleus Area Distribution of All Samples by Cell Types',
+        x = 'Cell Type', y = 'Nucleus Area',
+        fill = 'Cell Type'
+    )
+```
+
+Lastly the cytoplasmic area = cell area - nucleus area
+
+```{r}
+ggplot(
+    graph_dt, aes(
+        x = factor(
+            sample_id,
+            levels = unique(graph_dt[,.(sample_id, histology)])[order(histology)]$sample_id
+        ), 
+        y = cell_area - nucleus_area, fill = histology
+    )
+) + geom_boxplot(outlier.size=0.001) +
+    scale_fill_brewer(palette = "Set1") +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) + labs(
+        title = 'Cytoplasmic Area Distribution of All Samples',
+        x = 'Sample', y = 'Cytoplasmic Area'
+    )
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+ggplot(
+    graph_dt, aes(
+        x = factor(
+            sample_id,
+            levels = unique(graph_dt[,.(sample_id, histology)])[order(histology)]$sample_id
+        ), 
+        y = cell_area - nucleus_area, fill = histology
+    )
+) + geom_boxplot(outlier.shape=NA) +
+    facet_wrap(~get(cell_type_to_test)) +
+    scale_fill_brewer(palette = "Set1") +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) + labs(
+        title = 'Cytoplasmic Area Distribution of All Cell Types by Sample',
+        x = 'Sample', y = 'Cytoplasmic Area'
+    )
+
+ggplot(
+    graph_dt, aes(x = get(cell_type_to_test), y = cell_area - nucleus_area, fill = get(cell_type_to_test))
+) + geom_boxplot(outlier.shape=NA) +
+    facet_wrap(histology ~ sample_id, scale = 'free_y') +
+    scale_fill_manual(values = cell_type_color_manual) +
+    scale_y_log10() +
+    theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) +labs(
+        title = 'Cytoplasmic Area Distribution of All Samples by Cell Types',
+        x = 'Cell Type', y = 'Cytoplasmic Area'
+    )
+```
+
+From the above, we can see that for some unknown reason, the cell area for cells in PAs and GGs are way larger than those in CLNs and CNs. However, the nucleus area is relatively constant between the different histologies. Why could that be?
+
+Given that cell areas are different, maybe that is not the optimal metric to use for comparison. Instead we should be using nucleus area. 
+
+```{r}
+ggplot(
+    colData(banksy_embeddings),
+    aes(x = total_counts, y = cell_area)
+) + geom_point(size = 0.0001) + 
+    facet_wrap(sample_id ~ histology) +
+    geom_smooth(method = 'lm') + 
+    labs(title = 'Cell Area vs Total Counts', x = 'Total Counts', y = 'Cell Area')
+
+ggplot(
+    colData(banksy_embeddings),
+    aes(x = total_counts, y = nucleus_area)
+) + geom_point(size = 0.0001) + 
+    facet_wrap(sample_id ~ histology) +
+    geom_smooth(method = 'lm') + 
+    labs(title = 'Nucleus Area vs Total Counts', x = 'Total Counts', y = 'Nucleus Area')
+
+ggplot(
+    colData(banksy_embeddings),
+    aes(x = total_counts, y = cell_area - nucleus_area)
+) + geom_point(size = 0.0001) + 
+    facet_wrap(sample_id ~ histology) +
+    geom_smooth(method = 'lm') + 
+    labs(title = 'Cytoplasmic area vs Total Counts', x = 'Total Counts', y = 'Cytoplasmic Area')
+
+```
+
+## Statistical Test on Cell Type Radii
+
+We will now perform statistical tests to find out which cell types are larger than what you would expect on average in each CLN sample. 
+
+```{r}
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+radii_test = do.call('rbind',lapply(unique(graph_dt$sample_id), function(x){
+    pairwise_categorical_continuous_enrichment_t_test(
+        graph_dt[
+            sample_id == x,
+            .(sample_id, cell_type = `Fine Cell Type UMAP`, cell_area, nucleus_area)
+        ],
+        padj_method = 'fdr'
+    )[,sample_id := x]
+}))
+# merge in histology
+radii_test[unique(graph_dt[,.(sample_id, histology)]), histology := histology, on = 'sample_id']
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 20
+ggplot(radii_test[continuous_cols == 'cell_area']) +
+    geom_point(aes(
+        x = cell_type, y = sample_id, size = log10(N_var1),fill = delta, 
+        color = ifelse(q_value < 0.05 & delta > 0, 'red', 'black')
+    ), shape = 21) +
+    facet_wrap(~histology, nrow = 2, scale = 'free_y') +
+    scale_fill_gradient2(
+        low = muted('blue'), mid = 'white', high = muted('red')
+    ) +
+    scale_size_continuous(range = c(1,10)) +
+    scale_color_manual(
+        values = c('red' = 'red', 'black' = 'black')
+    ) + theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) + labs(
+        title = 'Cell Area Comparisons in CLNs',
+        x = 'Cell Type', y = 'Sample ID',
+        fill = 'Delta (Cell Size)', size = 'log10(# of Cells)',
+        color = 'Significance'
+    )
+
+ggplot(radii_test[continuous_cols == 'nucleus_area']) +
+    geom_point(aes(
+        x = cell_type, y = sample_id, size = log10(N_var1),fill = delta, 
+        color = ifelse(q_value < 0.05 & delta > 0, 'red', 'black')
+    ), shape = 21) +
+    facet_wrap(~histology, nrow = 2, scale = 'free_y') +
+    scale_fill_gradient2(
+        low = muted('blue'), mid = 'white', high = muted('red')
+    ) +
+    scale_size_continuous(range = c(1,10)) +
+    scale_color_manual(
+        values = c('red' = 'red', 'black' = 'black')
+    ) + theme_minimal() + theme(
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        text = element_text(size = 20) 
+    ) + labs(
+        title = 'Nucleus Area Comparison in CLNs',
+        x = 'Cell Type', y = 'Sample ID',
+        fill = 'Delta (Nucleus Size)', size = 'log10(# of Cells)',
+        color = 'Significance'
+    )
+```

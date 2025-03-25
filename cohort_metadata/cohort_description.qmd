@@ -1,0 +1,84 @@
+---
+title: "PLGG Cohort Description"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 12
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+        results: hold
+engine: knitr
+knitr:
+    opts_chunk: 
+        R.options:
+            width: 120
+---
+
+```{r}
+library(data.table)
+library(knitr)
+library(readxl)
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Introduction
+
+This document will look at the cohort of spatial PLGG dataset we are receiving from DKFZ. The metadata is here *`r workdir`coja/Spatial_PLGG/data/metadata/GNT.xlsx* and *`r workdir`coja/Spatial_PLGG/data/metadata/Xenium_PS.xlsx*. 
+
+```{r}
+metadata <- data.table(read_xlsx(paste0(
+    workdir, "coja/Spatial_PLGG/data/metadata/GNT.xlsx"
+)))
+kable(metadata[
+    xenium == 'yes',.(
+    `sample #`, id, np_nr, protocol,max_super_family_class,
+    max_family_class, max_class
+)])
+```
+
+# Single Cell Data
+
+Single cell data are either here `r workdir`coja/Spatial_PLGG/data/SN0304052 or here `r workdir`coja/Spatial_PLGG/data/snRNA_seq
+
+We will check which of these samples are received and where
+
+```{r}
+library(ggalluvial)
+library(ggrepel)
+ggplot(metadata[,.N, .(
+    max_super_family_class, max_family_class, 
+    max_class, xenium
+)], aes(
+    axis1 = max_super_family_class, 
+    axis2 = max_family_class,
+    axis3 = max_class,
+    y = N
+)) + geom_alluvium(
+    aes(fill = xenium), width = 1/12, color = "black"
+) + geom_stratum(width = 1/12, fill = "black", color = "grey") + 
+    geom_label_repel(stat = "stratum", aes(label = after_stat(
+        stringr::str_wrap(stratum, 20)
+    )),alpha = 0.7) + 
+    theme_minimal() + theme(
+        legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.margin = unit(c(1,1,1,1), "cm")
+    ) + 
+    ggtitle("Single Cell Sample Histologies") +
+    scale_fill_brewer(palette = "Paired") 
+```
+
+# Spatial Data

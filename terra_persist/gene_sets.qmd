@@ -1,0 +1,228 @@
+---
+title: ""
+author: "Peter Youyun Zheng"
+date: "`r Sys.Date()`"
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        toc-location: body
+        embed-resources: true
+---
+
+# A compendium of all the possible gene sets for the Xenium panel
+
+This document is a compendium of all the possible gene sets for the Xenium panel. The gene sets are organized by the following categories:
+
+*   [Xenium brain tumor panel](https://www.10xgenomics.com/products/xenium-panels#pre-designed-panels)
+*   Xenium brain tumor panel + 100 PERSIST genes
+*   Xenium brain tumor panel + 100 scanpy `highly_variable_genes` genes
+*   [Xenium custom panels](https://www.10xgenomics.com/products/xenium-panels#custom-panels) -- up to 480 genes PERSIST genes
+*   Xenium custom panels -- up to 480 genes scanpy `highly_variable_genes` genes
+
+We will create custom subset H5AD files for each gene set, transfer labels from the metadata sheet on [terra workspace](https://app.terra.bio/#workspaces/onix-dfci-sangita-signatures/PLGG_scrna_ST). 
+
+```{python}
+import scanpy as sc
+import pandas as pd
+import numpy as np
+import anndata as ad
+import os
+# setting my own working directory, feel free to change it to your own
+# local vs UGER
+if os.path.expanduser('~') in ["/Users/youyun", "/Users/youyunzheng"]: 
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir = os.path.expanduser('~')+"/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+else:
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir = "/xchip/beroukhimlab/"
+```
+
+```{python}
+#| code-fold: false
+# ========================================
+# the only thing that needs to be changed before running
+output_dir = workdir + 'youyun/plgg/data/xenium_selection/'
+scrna_h5ad = workdir + 'coja/Xenium/data/sc_sn/PLGG_sc_uncorrect_norm.h5ad'
+scrna_metadata = workdir + 'youyun/plgg/data/xenium_selection/single_cell_metadata.csv'
+# snrna_h5ad = workdir + 'coja/Xenium/data/sc_sn/PLGG_sn_uncorrect_norm.h5ad'
+snrna_metadata = workdir + 'youyun/plgg/data/xenium_selection/single_nuclei_metadata.csv'
+xenium_genes = workdir + 'youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv'
+persist_genes = workdir + 'youyun/plgg/data/xenium_selection/PERSIST_results_00132024.csv'
+# ========================================
+```
+
+# Getting the H5AD 
+
+```{python}
+# Load the full H5AD file
+sc_adata = sc.read_h5ad(scrna_h5ad)
+# in the notebook, the H5AD file was subsetted first
+# restrict to 10k highly variable genes
+adata_10k = sc_adata[:,sc_adata.var['highly_variable']]
+```
+
+Checking some QC
+
+```{python}
+sc.pl.scatter(sc_adata, x="total_counts", y="pct_counts_mt")
+sc.pl.scatter(sc_adata, x="total_counts", y="n_genes_by_counts")
+```
+
+Adding in the metadata, and get rid of cells without any annotation from John
+
+```{python}
+#| results: hold
+# reading in the metadata
+sc_adata.obs_names_make_unique()
+# metadata from John
+sc_metadata = pd.read_csv(scrna_metadata, index_col=0)
+# checking the overlap of cells we have in the metadata from John vs the H5AD with all genes
+cells_with_annotation = list(set(list(sc_metadata.index)) & set(list(sc_adata.obs.index)))
+# describe the discrepencies
+print('There are ' + str(sc_metadata.shape[0]) + ' cells in the metadata with annotation from John')
+print('There are ' + str(sc_adata.shape[0]) + ' cells in the H5AD file')
+print(
+    'There are ' + str(len(set(list(sc_metadata.index)) - set(list(sc_adata.obs.index)))) +
+    ' cells in the metadata with annotation from John that is not in the H5AD file'
+)
+print(
+    'There are ' + str(len(set(list(sc_adata.obs.index)) - set(list(sc_metadata.index)))) +
+    ' cells in the H5AD file that is not in the metadata with annotation from John'
+)
+print(
+    'Taking the intersection of the two sets gives us ' +
+    str(len(cells_with_annotation)) + ' cells'
+)
+# subsetting by barcode
+sc_adata = sc_adata[cells_with_annotation]
+# merge in the data with cell type annotation to sc_data.obs
+sc_adata.obs = sc_adata.obs.merge(
+    sc_metadata, left_index=True, right_index=True
+)
+# print out unique cell_label and counts
+print('Unique cell labels and their counts:' + str(sc_adata.obs['cell_label'].value_counts()))
+print('Unique cell class and their counts:' + str(sc_adata.obs['cell_class'].value_counts()))
+print('The scanpy object:')
+print(sc_adata)
+```
+
+Getting the Seurat highly variable genes
+
+```{python}
+# find variable genes
+hvarg_100 = sc.pp.highly_variable_genes(
+    sc_adata, layer='raw',
+    flavor='seurat_v3',
+    n_top_genes=100,
+    inplace=False
+)
+# hvarg_100
+```
+
+```{python}
+    # find variable genes
+hvarg_480 = sc.pp.highly_variable_genes(
+    sc_adata, layer='raw',
+    flavor='seurat_v3',
+    n_top_genes=480,
+    inplace=False
+)
+# hvarg_480
+```
+
+
+# Getting the xenium panel genes
+
+```{python}
+# reading in xenium panel csv file
+xenium_gene_list = pd.read_csv(xenium_genes)
+# concatenating Genes column into a string
+xenium_gene_list = xenium_gene_list['Genes']
+```
+
+# Getting the PERSIST genes
+
+A little bit complicated here because I didn't save the index which has the gene name so I am going to have to recreate the anndata object like the notebook and merge in the gene name to the list
+
+```{python}
+# reading in PERSIST genes
+persist_gene_list = pd.read_csv(persist_genes)
+# convert the row names to a column
+adata_10k_metadata = adata_10k.var.copy().reset_index(names = 'Genes')
+# persist_gene_list.head()
+# adata_10k.var.head()
+if all([
+    all(
+        persist_gene_list['highly_variable'] == 
+            adata_10k_metadata['highly_variable']
+    ),all(
+        persist_gene_list['means'].astype(np.float32) ==
+            adata_10k_metadata['means'].astype(np.float32)
+    ),all(
+        persist_gene_list['dispersions'].astype(np.float32) == 
+            adata_10k_metadata['dispersions'].astype(np.float32)
+    ),all(
+        persist_gene_list['dispersions_norm'].astype(np.float32) == 
+            adata_10k_metadata['dispersions_norm'].astype(np.float32)
+    )
+]):
+    print('pass')
+    persist_gene_list['Genes'] = adata_10k_metadata['Genes']
+persist_100 = persist_gene_list[persist_gene_list['persist_set_100'] == True]['Genes']
+persist_480 = persist_gene_list[persist_gene_list['persist_set_480'] == True]['Genes']
+```
+
+# Creating the custom H5AD files
+
+As mentioned above, we are creating custom subsets of the single cell data. 
+
+1. Xenium brain tumor panel
+2. Xenium brain tumor panel + 100 PERSIST genes
+3. Xenium brain tumor panel + 100 scanpy `highly_variable_genes` genes
+4. Xenium custom panels -- up to 480 genes PERSIST genes
+5. Xenium custom panels -- up to 480 genes scanpy `highly_variable_genes` genes
+
+```{python}
+# creating the custom H5AD files
+gene_panel_1 = list(xenium_gene_list)
+gene_panel_2 = list(set(pd.concat([xenium_gene_list, persist_100])))
+gene_panel_3 = list(set(list(xenium_gene_list) + list(hvarg_100[hvarg_100['highly_variable']].index)))
+gene_panel_4 = list(persist_480)
+gene_panel_5 = list(hvarg_480[hvarg_480['highly_variable']].index)
+print(
+    'The number of genes in the gene panels are:',
+    len(gene_panel_1),
+    len(gene_panel_2),
+    len(gene_panel_3),
+    len(gene_panel_4),
+    len(gene_panel_5),', respectively'
+)
+# writing out the gene list persist_100, persist_480
+persist_100.to_csv(output_dir + 'persist_100.csv', index=False)
+persist_480.to_csv(output_dir + 'persist_480.csv', index=False)
+```
+
+```{python}
+sc_adata_1 = sc_adata[:,gene_panel_1]
+sc_adata_2 = sc_adata[:,gene_panel_2]
+sc_adata_3 = sc_adata[:,gene_panel_3]
+sc_adata_4 = sc_adata[:,gene_panel_4]
+sc_adata_5 = sc_adata[:,gene_panel_5]
+```
+
+```{python}
+#| warning: false
+# save the custom H5AD files
+print('Saving the custom H5AD files to: ' + output_dir)
+sc_adata.write_h5ad(output_dir + 'sc_adata_processed_with_annotation.h5ad')
+sc_adata_1.write_h5ad(output_dir + 'sc_adata_1.h5ad')
+sc_adata_2.write_h5ad(output_dir + 'sc_adata_2.h5ad')
+sc_adata_3.write_h5ad(output_dir + 'sc_adata_3.h5ad')
+sc_adata_4.write_h5ad(output_dir + 'sc_adata_4.h5ad')
+sc_adata_5.write_h5ad(output_dir + 'sc_adata_5.h5ad')
+```

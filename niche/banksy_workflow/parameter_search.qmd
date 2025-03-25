@@ -1,0 +1,107 @@
+---
+title: "Parameter Search"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+In this doc, we will be look to generate the parameter search file we need to submit task array jobs to UGER.
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+
+# Parameters
+
+The parameters we will try to test fall into two categories:
+
+1.  BANKSY parameters: k1, k2, lambda1, lambda2, npcs -- 
+
+    1.  We want to try a range of values for k1 - k2 pairs to get a sense of how different number of neighbors affect the result. 
+        
+        Judging from other methods, [GraphST](https://github.com/JinmiaoChenLab/GraphST/blob/d62b0b7b6cd38ee285f3ac8cd67b7341a10bcc74/GraphST/preprocess.py#L78) uses 3 neighbors for network propagation. [STAGATE](https://stagate.readthedocs.io/en/latest/search.html?q=Cal_Spatial_Net&check_keywords=yes&area=default) uses `rad_cutoff=50` for single cell resolution data. 
+
+    2.  We will also want to try a range of lambda values to see how the weight of neighborhood information affect cell typing and domain segmentation results. 
+
+    3.  We will also want to try a range of number of PCs to see how the dimensionality reduction affect the result.
+
+2.  Leiden parameters: resolution, k neighbors -- 
+
+    1.  We want to try a range of resolution values to see how the granularity of clustering affect the result. 
+
+    2.  We also want to try a range of k neighbors to see how the number of neighbors affect the result.
+
+All in all, the parameter list we will try to test are:
+
+1.  k1: 5, 15, 50
+
+2.  k2: 10, 30, 100
+
+3.  lambda1: 0.1, 0.2
+
+4.  lambda2: 0.8, 0.9
+
+5.  number of PCs: 20, 30, 50
+
+6.  resolution: 0.75, 1
+
+7.  k neighbors for leiden: 30, 50
+
+```{r}
+param_grid = data.table(expand.grid(
+    # default 15
+    k1 = c(5, 15, 50),
+    # default 30
+    k2 = c(10, 30, 100),
+    # default 0.2
+    lambda1 = c(0.1, 0.2),
+    # default 0.8
+    lambda2 = c(0.8, 0.9),
+    # default 20
+    npcs = c(20, 30, 50)
+))[
+    , c('kc1','kc2','res1','res2') := list(
+        rep(30,.N), rep(50, .N), 
+        rep(0.75, .N), rep(1, .N)
+    )
+]
+kable(param_grid)
+```
+
+```{r}
+write.table(
+    param_grid, paste0(workdir,'youyun/plgg/code/niche/banksy_workflow/param_search.tsv'),
+    sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE
+)
+```
+

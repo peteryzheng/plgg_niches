@@ -1,0 +1,274 @@
+---
+title: ""
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+---
+
+# Introduction
+
+Using this notebook to run a few runs of QC and determine which cutoff is best. 
+
+```{r}
+#| echo: FALSE
+library(data.table)
+library(ggplot2)
+library(knitr)
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Loading Data
+
+```{r}
+source(paste0(workdir, "youyun/plgg/code/helpers/spatial_helper.R"))
+current_timestamp = format(Sys.time(), "%Y%m%d_%H%M%S")
+
+# LOAD DATA ===========================================================
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Loading data...'))
+total_se = loading_data()
+
+# STAGGER SPATIAL COORDINATES ==========================================
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Staggering spatial coordinates...'))
+total_se_staggered = stagger_spatial_coords(total_se)
+
+# SUBSET to only gene expression and not control probes ===============
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Subsetting to gene expression...'))
+total_se_staggered = total_se_staggered[rowData(total_se_staggered)$feature_type == 'Gene Expression',]
+
+```
+
+# Testing Different Parameters
+
+We are filtering cells on two things:
+
+1.  total transcript count per cell
+
+2.  number of genes detected per cell
+
+We are doing a median absolute deviation inspired by [single cell best practice](https://www.sc-best-practices.org/preprocessing_visualization/quality_control.html). The question is -- how may MADs do we use. 
+
+We will test a couple versions here differing by nmad x threshold x metric. We will make a table here:
+
+| nmad (total) | threshold (total) |  nmad (detected) | threshold (detected) |
+|--------------|-------------------|------------------|----------------------|
+| 3            | both              | 3                | lower                |
+| 3            | both              | 3                | both                 |
+| 3.5          | both              | 3.5              | lower                |
+| 3.5          | both              | 3.5              | both                 |
+| 4            | both              | 4                | lower                |
+| 4            | both              | 4                | both                 |
+| 3.5          | both              | 3.5              | lower                |
+| 3.5          | both              | 3.5              | both                 |
+| 5            | both              | 5                | lower                |
+| 5            | both              | 5                | both                 |
+
+
+We will then run UMAP to evaluate whether or not the QC was sufficient.
+
+```{r}
+QC_and_normalize = function(spe, nmad_total, threshold_total, nmad_detected, threshold_detected) {
+    qcstats <- perCellQCMetrics(spe)
+    
+    outliers = is_outlier( # outliers for log1p total counts -- upper lower
+        log(qcstats$total + 1), nmad = nmad_total, 
+        threshold = threshold_total
+    ) | is_outlier( # outliers for log1p genes by count -- lower
+        log(qcstats$detected + 1), nmad = nmad_detected, 
+        threshold = threshold_detected
+    )
+
+    print(paste0(
+        'Removing ', sum(outliers)/length(outliers)*100,
+        '% of cells due to low quality'
+    ))
+    keep <- !outliers
+    spe <- spe[, keep]
+
+    # Normalization to mean library size
+    spe <- computeLibraryFactors(spe)
+    aname <- "normcounts"
+    # log-normalize the counts
+    assay(spe, aname) <- normalizeCounts(spe, log = FALSE)
+    
+    return(spe)
+}
+```
+
+## No filtering
+
+```{r}
+# UMAP
+spe = total_se_staggered
+spe = computeLibraryFactors(spe)
+aname <- "normcounts"
+spe = spe[, colData(spe)$sizeFactor > 0]
+# log-normalize the counts
+assay(spe, aname) <- normalizeCounts(spe)
+
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running UMAP...'))
+umap = runUMAP(
+    spe, exprs_values = "normcounts", 
+    pca = 20, name = 'UMAP 0'
+)
+plotReducedDim(umap, dimred = 'UMAP 0',point_size = 0.01)
+```
+
+## total nmad = 3, threshold = both, detected nmad = 3, threshold = lower
+
+```{r}
+spe = QC_and_normalize(
+    spe = total_se_staggered, 
+    nmad_total = 3, threshold_total = "both", 
+    nmad_detected = 3, threshold_detected = "lower"
+)
+
+# UMAP
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running UMAP...'))
+umap = runUMAP(
+    spe, exprs_values = "normcounts", 
+    pca = 20, name = 'UMAP 1'
+)
+plotReducedDim(umap, dimred = 'UMAP 1',point_size = 0.01)
+```
+
+## total nmad = 3, threshold = both, detected nmad = 3, threshold = both
+
+```{r}
+spe = QC_and_normalize(
+    spe = total_se_staggered, 
+    nmad_total = 3, threshold_total = "both", 
+    nmad_detected = 3, threshold_detected = "both"
+)
+
+# UMAP
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running UMAP...'))
+umap = runUMAP(
+    spe, exprs_values = "normcounts", 
+    pca = 20, name = 'UMAP 2'
+)
+plotReducedDim(umap, dimred = 'UMAP 2',point_size = 0.01)
+```
+
+## total nmad = 4, threshold = both, detected nmad = 4, threshold = lower
+
+```{r}
+spe = QC_and_normalize(
+    spe = total_se_staggered, 
+    nmad_total = 4, threshold_total = "both", 
+    nmad_detected = 4, threshold_detected = "lower"
+)
+
+# UMAP
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running UMAP...'))
+umap = runUMAP(
+    spe, exprs_values = "normcounts", 
+    pca = 20, name = 'UMAP 3'
+)
+plotReducedDim(umap, dimred = 'UMAP 3',point_size = 0.01)
+```
+
+## total nmad = 4, threshold = both, detected nmad = 4, threshold = both
+
+```{r}
+spe = QC_and_normalize(
+    spe = total_se_staggered, 
+    nmad_total = 4, threshold_total = "both", 
+    nmad_detected = 4, threshold_detected = "both"
+)
+
+# UMAP
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running UMAP...'))
+umap = runUMAP(
+    spe, exprs_values = "normcounts", 
+    pca = 20, name = 'UMAP 4'
+)
+plotReducedDim(umap, dimred = 'UMAP 4',point_size = 0.01)
+```
+
+## total nmad = 3.5, threshold = both, detected nmad = 3.5, threshold = lower
+
+```{r}
+spe = QC_and_normalize(
+    spe = total_se_staggered, 
+    nmad_total = 3.5, threshold_total = "both", 
+    nmad_detected = 3.5, threshold_detected = "lower"
+)
+
+# UMAP
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running UMAP...'))
+umap = runUMAP(
+    spe, exprs_values = "normcounts", 
+    pca = 20, name = 'UMAP 5'
+)
+plotReducedDim(umap, dimred = 'UMAP 5',point_size = 0.01)
+```
+
+## total nmad = 3.5, threshold = both, detected nmad = 3.5, threshold = both
+
+```{r}
+spe = QC_and_normalize(
+    spe = total_se_staggered, 
+    nmad_total = 3.5, threshold_total = "both", 
+    nmad_detected = 3.5, threshold_detected = "both"
+)
+
+# UMAP
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running UMAP...'))
+umap = runUMAP(
+    spe, exprs_values = "normcounts", 
+    pca = 20, name = 'UMAP 6'
+)
+plotReducedDim(umap, dimred = 'UMAP 6',point_size = 0.01)
+```
+
+## total nmad = 5, threshold = both, detected nmad = 5, threshold = lower
+
+```{r}
+spe = QC_and_normalize(
+    spe = total_se_staggered, 
+    nmad_total = 5, threshold_total = "both", 
+    nmad_detected = 5, threshold_detected = "lower"
+)
+
+# UMAP
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running UMAP...'))
+umap = runUMAP(
+    spe, exprs_values = "normcounts", 
+    pca = 20, name = 'UMAP 7'
+)
+plotReducedDim(umap, dimred = 'UMAP 7',point_size = 0.01)
+```
+
+## total nmad = 5, threshold = both, detected nmad = 5, threshold = both
+
+```{r}
+spe = QC_and_normalize(
+    spe = total_se_staggered, 
+    nmad_total = 5, threshold_total = "both", 
+    nmad_detected = 5, threshold_detected = "both"
+)
+
+# UMAP
+print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running UMAP...'))
+umap = runUMAP(
+    spe, exprs_values = "normcounts", 
+    pca = 20, name = 'UMAP 8'
+)
+plotReducedDim(umap, dimred = 'UMAP 8',point_size = 0.01)
+```

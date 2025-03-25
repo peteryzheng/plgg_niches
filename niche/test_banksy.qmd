@@ -1,0 +1,126 @@
+---
+title: "Testing BANKSY on PLGG dataset"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+This is a test of BANKSY on one PLGG sample in our xenium dataset.
+
+```{r}
+#| echo: FALSE
+library(data.table)
+library(ggplot2)
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Load data
+
+This [tutorial](https://jef.works/blog/2024/03/24/spatial-transcriptomics-analysis-of-Xenium-lymph-node/) was helpful in making this code
+
+```{r}
+#| warning: false
+source(paste0(workdir, "youyun/plgg/code/niche/spatial_helper.R"))
+se = xenium2SPE(paste0(
+    workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer/output-XETG00078__0011059__16694A13__20230913__152454'
+))
+```
+
+# BANKSY
+
+We will follow the [readme file](https://github.com/prabhakarlab/Banksy?tab=readme-ov-file#quick-start) on the github repo.
+
+Load the necessary packages
+
+```{r}
+library(Banksy)
+
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+
+library(scater)
+library(cowplot)
+library(ggplot2)
+```
+
+QC and Normalization
+
+```{r}
+# QC based on total counts
+qcstats <- perCellQCMetrics(se)
+thres <- quantile(qcstats$total, c(0.05, 0.98))
+keep <- (qcstats$total > thres[1]) & (qcstats$total < thres[2])
+se <- se[, keep]
+
+# Normalization to mean library size
+se <- computeLibraryFactors(se)
+aname <- "normcounts"
+assay(se, aname) <- normalizeCounts(se, log = FALSE)
+```
+
+Compute the weighted neighborhood mean and AGF
+
+```{r}
+# default k_geom
+k_geom <- c(15, 30)
+
+se <- Banksy::computeBanksy(se, assay_name = aname, compute_agf = TRUE, k_geom = k_geom)
+```
+
+run PCA and UMAP on the banksy matrix
+
+```{r}
+set.seed(1000)
+# 0 for non spatial clustering, 0.2 for cell typing, and 0.8 for domain segmentation
+lambda = c(0, 0.2, 0.8)
+se <- Banksy::runBanksyPCA(se, use_agf = TRUE, lambda = lambda)
+se <- Banksy::runBanksyUMAP(se, use_agf = TRUE, lambda = lambda)
+se <- Banksy::clusterBanksy(se, use_agf = TRUE, lambda = lambda, resolution = 1.2)
+# Different clustering runs can be relabeled to minimise their differences with connectClusters:
+se <- Banksy::connectClusters(se)
+```
+
+# Visualization
+
+```{r}
+cnames <- colnames(colData(se))
+cnames <- cnames[grep("^clust", cnames)]
+colData(se) <- cbind(colData(se), spatialCoords(se))
+
+plot_nsp <- plotColData(se,
+    x = "sdimx", y = "sdimy",
+    point_size = 0.6, colour_by = cnames[1]
+)
+plot_bank <- plotColData(se,
+    x = "sdimx", y = "sdimy",
+    point_size = 0.6, colour_by = cnames[2]
+)
+
+
+plot_grid(plot_nsp + coord_equal(), plot_bank + coord_equal(), ncol = 2)
+```

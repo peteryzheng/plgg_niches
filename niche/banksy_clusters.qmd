@@ -446,12 +446,93 @@ setcolorder(
     )
 )
 kable(prelim_annotation_res1)
-write.table(
-    prelim_annotation_res1,
-    file = paste0(
-        workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
-    ),
-    sep = '\t', quote = FALSE, row.names = FALSE
+# write.table(
+#     prelim_annotation_res1,
+#     file = paste0(
+#         workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
+#     ),
+#     sep = '\t', quote = FALSE, row.names = FALSE
+# )
+```
+
+## Plotting out the preliminary annotation on UMAP
+
+Plotting out some cohort information:
+
+1.  UMAP before and after harmony correction
+2.  UMAP colored by the preliminary annotation
+3.  UMAP colored by the sample ID
+4.  UMAP colored by the histology
+
+we will first merge in the preliminary annotation into the banksy embeddings
+
+```{r}
+original_order = rownames(colData(banksy_embeddings))
+merged_coldata = merge(
+    colData(banksy_embeddings),
+    prelim_annotation_res1[,cluster := as.character(cluster)],
+    by.x = clust_name, by.y = 'cluster', all.x = TRUE
+)
+rownames(merged_coldata) = paste0(merged_coldata$cell_id, '__',merged_coldata$sample_id)
+colData(banksy_embeddings) = merged_coldata[original_order,]
+```
+
+```{r}
+cell_type_to_test = 'Fine Cell Type UMAP'
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+
+plot_grid(
+    ggdraw() + draw_label("BANKSY Cell Identity Embedding", fontface='bold'),
+    plot_grid(
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1,point_alpha = 0.5, color_by = cell_type_to_test
+        ) + theme(
+            legend.title = element_blank(),
+            legend.position = 'bottom'
+        ) + scale_color_manual(values = cell_type_color_manual) +
+            guides(colour = guide_legend(
+            override.aes = list(size = 5, alpha = 1),
+            nrow = 4
+        )) + labs(
+            title = 'Cell Type',
+            x = 'UMAP1', y = 'UMAP2'
+        ),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1,point_alpha = 0.5, color_by = "sample_id"
+        ) + theme(
+            legend.title = element_blank(),
+            legend.position = 'bottom',
+            legend.justification = "right"
+        ) + guides(colour = guide_legend(
+            override.aes = list(size = 5, alpha = 1),
+            nrow = 4
+        )) + labs(
+            title = 'Sample IDs',
+            x = 'UMAP1', y = 'UMAP2'
+        ),
+        plotReducedDim(
+            banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+            point_size = 0.1,point_alpha = 0.5, color_by = "histology"
+        ) + theme(
+            legend.title = element_blank(),
+            legend.position = 'bottom'
+        ) + guides(colour = guide_legend(
+            override.aes = list(size = 5, alpha = 1),
+            nrow = 4
+        )) + labs(
+            title = 'Histology',
+            x = 'UMAP1', y = 'UMAP2'
+        ),
+        
+        nrow = 1,
+        rel_widths = c(1, 1, 1)
+    ), ncol = 1,rel_heights = c(0.1, 5)
 )
 ```
 
@@ -459,48 +540,63 @@ write.table(
 
 ```{r}
 source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
-histology_cell_type_enrichment = pairwise_categorical_enrichment_test(
-    colData(banksy_embeddings)$`clust_Harmony_BANKSY_lam0.2_k50_res1`,
-    colData(banksy_embeddings)$histology
+histology_cell_type_enrichment = pairwise_categorical_continuous_enrichment_wilcox_test(dcast(
+    data.table(
+        sample_id = colData(banksy_embeddings)$sample_id,
+        histology = colData(banksy_embeddings)$histology,
+        cluster = as.character(colData(banksy_embeddings)$`clust_Harmony_BANKSY_lam0.2_k50_res1`)
+    )[
+        prelim_annotation_res1[,.(
+            cluster = as.character(cluster), 
+            `Fine Cell Type UMAP`
+        )],
+        on = c('cluster' = 'cluster')
+    ][
+        , .(proportion = as.numeric(.N)), 
+        .(sample_id, histology, `Fine Cell Type UMAP`)
+    ][, proportion := proportion/sum(proportion), .(sample_id, histology)],
+    sample_id + histology ~ `Fine Cell Type UMAP`,
+    value.var = 'proportion', fill = 0
+),padj_method = 'BH')
+setnames(
+    histology_cell_type_enrichment, 1:2,
+    c('histology','cell_type')
 )
-histology_cell_type_enrichment = merge(
-    histology_cell_type_enrichment, prelim_annotation_res1[
-        ,cluster := as.character(cluster)
-    ], by.x = 'var1', by.y = 'cluster'
-)
+
 ```
 
 ```{r}
 ggplot(histology_cell_type_enrichment) +
     geom_point(aes(
-        x = `Fine Cell Type UMAP`, y = var2, size = N_var1var2, 
+        x = factor(cell_type, levels = c(
+                'GABAergic Neuron 1','GABAergic Neuron 2','GABAergic Neuron 3',
+                'Glutamatergic Neuron 1','Glutamatergic Neuron 2','Glutamatergic Neuron 3',
+                'Unknown Neuron 1','Unknown Neuron 2' ,'RGC 1','RGC 2','Proliferation 1',
+                'OPC 1','Oligodendrocytes 1','Astrocyte 1','Astrocyte 2','Endothelial/VLMC 1',
+                'Lymphoid 1','Myeloid 1','Myeloid 2', 'Undetermined 1'
+            )), y = histology, size = N_var2, 
         # color by odds_ratios column capped at percentile 95
-        fill = pmin(
-            quantile(log(odds_ratios), 0.95, na.rm = TRUE), 
-            log(odds_ratios), na.rm = TRUE
-        ), color = ifelse(
-            q_value < 0.05 & odds_ratios > 1, 
+        fill = delta, color = ifelse(
+            q_value < 0.25 & as.numeric(delta) > 0, 
             'significant','not significant'
         )
     ), shape = 21, stroke = 1) +
     theme(
-        text = element_text(size = 15), 
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = 'right'
+        text = element_text(size = 15), legend.position = 'right',
+        axis.text.x = element_text(angle = 45, hjust = 1)
     ) + scale_fill_viridis_c() +
-    scale_size_area(max_size = 10) +
+    scale_size_area(max_size = 20) +
     scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
     labs(
-        title = 'Enrichment of Cell Type Across Histologies',
+        title = 'Enrichment of Cell Types Across Histologies',
         x = 'Cell Type',
         y = 'Histology',
-        size = 'Number of Cells',
-        fill = 'log OR',
+        size = 'Average Proportion',
+        fill = 'Delta Proportions',
         color = 'Significance'
     ) + guides(
-        fill = guide_legend(title = 'log OR'),
+        fill = guide_legend(title = 'Avg Delta'),
         color = guide_legend(title = 'Significance')
     )
-
 ```
 

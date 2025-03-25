@@ -1,0 +1,11 @@
+._*
+niche/logs/*
+niche/banksy_workflow/logs/*
+.vdoc.r
+.vdoc.py
+*/*/*/figure-html/*
+*/*/*/libs/*
+*.html
+*/*/*in_space.html
+*/*/*in_space_proseg.html
+*.zip
