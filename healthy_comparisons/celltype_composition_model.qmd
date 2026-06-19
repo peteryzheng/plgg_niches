@@ -1,0 +1,499 @@
+---
+title: "Cell-type composition: healthy brain vs PLGG"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 10
+        fig-height: 7
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk:
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Overview
+
+Beta-binomial pseudobulk models comparing non-neoplastic cell-type proportions
+between the healthy BCA atlas and PLGG tumors, controlling for age, sex, and
+brain location.
+
+Two analysis stages:
+
+- **Stage 1**: healthy vs all tumor (maximum power).
+- **Stage 2**: healthy vs each tumor entity (IntDx), one coefficient per entity.
+
+Pseudobulk unit: `sample_ID × location_broad`. Each row is a sample (or a
+donor × region for multi-region BCA donors) with counts per cell type and total
+non-neoplastic cells.
+
+```{r setup}
+#| echo: FALSE
+#| output: false
+suppressPackageStartupMessages({
+    library(arrow)
+    library(dplyr)
+    library(tidyr)
+    library(purrr)
+    library(stringr)
+    library(ggplot2)
+    library(ggrepel)
+    library(ComplexHeatmap)
+    library(circlize)
+    library(glmmTMB)
+    library(scales)
+})
+
+# Resolve data root from HOME (AGENTS.md convention)
+home = Sys.getenv("HOME")
+if (startsWith(home, "/Users/youyun") || startsWith(home, "/Users/youyunzheng")) {
+    data_root = file.path(home, "Documents/HMS/PhD/beroukhimlab/dfci_mount")
+} else if (home == "/PHShome/yz762") {
+    data_root = "/data/beroukhim1"
+} else if (home == "/home/yz762") {
+    data_root = "/mnt/storage/dept/medonc/beroukhim"
+} else {
+    data_root = "/xchip/beroukhimlab"
+}
+
+sc_dir   = file.path(data_root, "youyun/plgg/data/single_cell")
+code_dir = file.path(data_root, "youyun/plgg/code/healthy_comparisons")
+in_path  = file.path(sc_dir, "combined_healthyTumor_obs_metadata_clean.parquet")
+
+# Nature-style ggplot theme
+theme_nature = function(base_size = 9) {
+    theme_classic(base_size = base_size) +
+    theme(
+        text             = element_text(color = "black"),
+        axis.text        = element_text(size = base_size, color = "black"),
+        axis.title       = element_text(size = base_size + 1, color = "black"),
+        axis.line        = element_line(color = "black", linewidth = 0.4),
+        axis.ticks       = element_line(color = "black", linewidth = 0.4),
+        panel.border     = element_rect(color = "black", fill = NA, linewidth = 0.5),
+        strip.background = element_blank(),
+        strip.text       = element_text(size = base_size, face = "bold"),
+        legend.text      = element_text(size = base_size),
+        legend.title     = element_text(size = base_size, face = "bold"),
+        legend.key.size  = unit(0.4, "cm"),
+        plot.title       = element_text(size = base_size + 2, face = "bold", hjust = 0.5),
+        plot.subtitle    = element_text(size = base_size, hjust = 0.5, color = "gray40")
+    )
+}
+```
+
+# Data loading and pseudobulk
+
+```{r load-pseudobulk}
+df = read_parquet(in_path)
+cat("Loaded:", nrow(df), "cells\n")
+
+# --- Pseudobulk: counts per sample_ID x location_broad x cell_type -----------
+ct_counts = df |>
+    group_by(sample_ID, location_broad, cell_type_harmonised) |>
+    summarise(n_ct = n(), .groups = "drop")
+
+unit_totals = df |>
+    group_by(sample_ID, location_broad) |>
+    summarise(n_total = n(), .groups = "drop")
+
+# Sample-level covariates must be constant within sample_ID x location_broad.
+# Warn if any unit shows variation (e.g. mixed IntDx, which shouldn't occur).
+sample_meta = df |>
+    group_by(sample_ID, location_broad) |>
+    summarise(
+        condition                    = first(condition),
+        IntDx                        = first(IntDx),
+        age_yr                       = first(age_yr),
+        sex_combined                 = first(sex_combined),
+        fraction_neoplastic_detected = first(fraction_neoplastic_detected),
+        .groups = "drop"
+    )
+
+# Verify IntDx is constant within each tumor sample
+intdx_check = df |>
+    filter(condition == "tumor") |>
+    group_by(sample_ID, location_broad) |>
+    summarise(n_intdx = n_distinct(IntDx), .groups = "drop") |>
+    filter(n_intdx > 1)
+if (nrow(intdx_check) > 0) warning("Some tumor units have mixed IntDx: ", paste(intdx_check$sample_ID, collapse = ", "))
+
+# Complete grid: all sample x location units x all cell types (fill zeros)
+all_units = sample_meta |> select(sample_ID, location_broad)
+all_ct    = df |> distinct(cell_type_harmonised)
+pseudobulk = cross_join(all_units, all_ct) |>
+    left_join(ct_counts,    by = c("sample_ID", "location_broad", "cell_type_harmonised")) |>
+    left_join(unit_totals,  by = c("sample_ID", "location_broad")) |>
+    left_join(sample_meta,  by = c("sample_ID", "location_broad")) |>
+    mutate(n_ct = replace_na(n_ct, 0))
+
+cat("Pseudobulk units:", nrow(all_units), "\n")
+cat("Pseudobulk rows (units x cell types):", nrow(pseudobulk), "\n")
+cat("Healthy units:", sum(sample_meta$condition == "healthy"), "\n")
+cat("Tumor units:", sum(sample_meta$condition == "tumor"), "\n")
+
+# Cell types to model (Neoplastic already removed in clean parquet)
+cell_types = sort(unique(df$cell_type_harmonised))
+cat("Cell types:", paste(cell_types, collapse = ", "), "\n")
+```
+
+```{r model-helpers}
+#| echo: FALSE
+
+# Fit one beta-binomial model for a given cell type, formula, and dataset.
+# Returns ALL non-intercept coefficients; caller filters to the terms of interest.
+fit_betabin = function(ct, formula_str, dat) {
+    dat_ct = dat |>
+        filter(cell_type_harmonised == ct, !is.na(age_yr), !is.na(sex_combined)) |>
+        mutate(n_other = n_total - n_ct)
+
+    tryCatch({
+        fit = glmmTMB(
+            as.formula(formula_str),
+            family = betabinomial(link = "logit"),
+            data   = dat_ct
+        )
+        coef_tbl = as.data.frame(coef(summary(fit))$cond)
+        coef_tbl$term = rownames(coef_tbl)
+        rownames(coef_tbl) = NULL
+        names(coef_tbl) = c("estimate", "std.error", "statistic", "p.value", "term")
+        coef_tbl |>
+            filter(term != "(Intercept)") |>
+            mutate(
+                cell_type  = ct,
+                conf.low   = estimate - 1.96 * std.error,
+                conf.high  = estimate + 1.96 * std.error,
+                converged  = TRUE
+            )
+    }, error = function(e) {
+        tibble(
+            cell_type = ct, term = NA_character_,
+            estimate = NA_real_, std.error = NA_real_,
+            statistic = NA_real_, p.value = NA_real_,
+            conf.low = NA_real_, conf.high = NA_real_,
+            converged = FALSE, error_msg = conditionMessage(e)
+        )
+    })
+}
+```
+
+---
+
+# Stage 1: healthy vs all tumor
+
+```{r stage1-model}
+# Formula: proportion ~ condition (healthy/tumor) + age + location + sex
+# Reference for condition: "healthy"
+pseudobulk_s1 = pseudobulk |>
+    mutate(condition = relevel(factor(condition), ref = "healthy"))
+
+stage1_raw = map_dfr(cell_types, \(ct)
+    fit_betabin(
+        ct          = ct,
+        formula_str = "cbind(n_ct, n_other) ~ condition + age_yr + location_broad + sex_combined",
+        dat         = pseudobulk_s1
+    )
+)
+
+# Group effect: healthy vs all tumor (FDR across cell types)
+stage1 = stage1_raw |>
+    filter(converged, !is.na(p.value), term == "conditiontumor") |>
+    mutate(
+        q.value   = p.adjust(p.value, method = "BH"),
+        sig       = q.value < 0.1,
+        direction = if_else(estimate > 0, "Enriched in tumor", "Depleted in tumor")
+    )
+
+# Covariate effects: age, sex, location — FDR within each term across cell types
+covar_terms = c("age_yr", "sex_combinedMale",
+                "location_broadPosterior_fossa", "location_broadSupratentorial")
+stage1_covars = stage1_raw |>
+    filter(converged, !is.na(p.value), term %in% covar_terms) |>
+    group_by(term) |>
+    mutate(q.value = p.adjust(p.value, method = "BH")) |>
+    ungroup() |>
+    mutate(sig = q.value < 0.1)
+
+cat("Stage 1 convergence failures:",
+    sum(!stage1_raw$converged | is.na(stage1_raw$p.value)), "/", length(cell_types), "\n")
+print(stage1 |> select(cell_type, estimate, std.error, p.value, q.value, sig) |>
+      arrange(q.value))
+
+write.table(stage1, file.path(code_dir, "results_stage1_tumor_vs_healthy.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(stage1_covars, file.path(code_dir, "results_stage1_covariates.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+```{r stage1-plot, fig.width=5, fig.height=5}
+# Forest plot: log-OR per cell type, sorted by effect size.
+# Error bars = 95% CI; color = significance at q < 0.1.
+# x-axis clipped to 90th percentile of |estimate| so well-estimated cell types
+# are legible — CI bars for rare/tumor-specific types may extend off-screen.
+sig_colors = c("Enriched in tumor" = "#C0392B", "Depleted in tumor" = "#2980B9", "n.s." = "gray60")
+
+stage1_plot = stage1 |>
+    mutate(
+        sig_label  = if_else(sig, direction, "n.s."),
+        cell_type  = str_replace_all(cell_type, "_", " "),
+        cell_type  = reorder(cell_type, estimate)
+    )
+
+ggplot(stage1_plot, aes(x = estimate, y = cell_type, color = sig_label)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.4) +
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                   height = 0.25, linewidth = 0.5, alpha = 0.7) +
+    geom_point(size = 2.2) +
+    scale_color_manual(values = sig_colors, name = NULL) +
+    scale_x_continuous(expand = expansion(mult = 0.05)) +
+    coord_cartesian(xlim = c(-30, 30)) +
+    labs(
+        x        = "Log odds-ratio vs. healthy (beta-binomial)",
+        y        = NULL,
+        title    = "Cell-type proportions: tumor vs. healthy brain",
+        subtitle = "Adjusted for age, sex, and brain location  |  BH q < 0.1\nCI bars clipped for cell types near-absent in healthy"
+    ) +
+    theme_nature(base_size = 9) +
+    theme(legend.position = "bottom")
+```
+
+---
+
+# Stage 2: healthy vs each tumor entity (IntDx)
+
+```{r stage2-model}
+# Minimum samples per IntDx entity to include in the model
+MIN_SAMPLES_PER_ENTITY = 3
+
+entity_counts = pseudobulk |>
+    filter(condition == "tumor") |>
+    distinct(sample_ID, location_broad, IntDx) |>
+    count(IntDx, name = "n_units")
+
+entities_kept = entity_counts |> filter(n_units >= MIN_SAMPLES_PER_ENTITY) |> pull(IntDx)
+cat("IntDx entities with >=", MIN_SAMPLES_PER_ENTITY, "units:", paste(sort(entities_kept), collapse = ", "), "\n")
+cat("Excluded (too few units):", paste(setdiff(entity_counts$IntDx, entities_kept), collapse = ", "), "\n")
+
+# Build Stage 2 pseudobulk: group = IntDx for tumor, "Healthy" for healthy
+pseudobulk_s2 = pseudobulk |>
+    filter(is.na(IntDx) | IntDx %in% entities_kept) |>
+    mutate(
+        group = if_else(condition == "healthy", "Healthy", as.character(IntDx)),
+        group = relevel(factor(group), ref = "Healthy")
+    )
+
+stage2_raw = map_dfr(cell_types, \(ct)
+    fit_betabin(
+        ct          = ct,
+        formula_str = "cbind(n_ct, n_other) ~ group + age_yr + location_broad + sex_combined",
+        dat         = pseudobulk_s2
+    )
+)
+
+# Group effects: each IntDx entity vs healthy (FDR across all cell_type x entity pairs)
+stage2 = stage2_raw |>
+    filter(converged, !is.na(p.value),
+           str_detect(term, "^group"), term != "groupHealthy") |>
+    mutate(
+        entity  = str_remove(term, "^group"),
+        q.value = p.adjust(p.value, method = "BH"),
+        sig     = q.value < 0.1
+    )
+
+# Covariate effects from Stage 2 models — FDR within each term across cell types
+stage2_covars = stage2_raw |>
+    filter(converged, !is.na(p.value), term %in% covar_terms) |>
+    group_by(term) |>
+    mutate(q.value = p.adjust(p.value, method = "BH")) |>
+    ungroup() |>
+    mutate(sig = q.value < 0.1)
+
+cat("\nStage 2 convergence failures:",
+    sum(!stage2_raw$converged | is.na(stage2_raw$p.value)),
+    "/", length(cell_types) * length(entities_kept), "\n")
+
+write.table(stage2, file.path(code_dir, "results_stage2_by_entity.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(stage2_covars, file.path(code_dir, "results_stage2_covariates.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+```{r stage2-heatmap, fig.width=8, fig.height=6}
+# Heatmap: log-OR for each cell_type x entity. Rows = cell types, cols = entities.
+# Significance overlay: * for q < 0.1, ** for q < 0.01.
+
+# Pivot to matrix
+hm_data = stage2 |>
+    select(cell_type, entity, estimate, q.value) |>
+    mutate(cell_type = str_replace_all(cell_type, "_", " "))
+
+est_mat = hm_data |>
+    select(cell_type, entity, estimate) |>
+    pivot_wider(names_from = entity, values_from = estimate) |>
+    tibble::column_to_rownames("cell_type") |>
+    as.matrix()
+
+sig_mat = hm_data |>
+    select(cell_type, entity, q.value) |>
+    pivot_wider(names_from = entity, values_from = q.value) |>
+    tibble::column_to_rownames("cell_type") |>
+    as.matrix()
+
+# Align matrices (same rows/cols)
+est_mat = est_mat[rownames(est_mat), colnames(est_mat)]
+sig_mat = sig_mat[rownames(est_mat), colnames(est_mat)]
+
+# Significance annotation: ** q<0.01, * q<0.1
+sig_annot = matrix("", nrow = nrow(sig_mat), ncol = ncol(sig_mat),
+                   dimnames = dimnames(sig_mat))
+sig_annot[!is.na(sig_mat) & sig_mat < 0.01] = "**"
+sig_annot[!is.na(sig_mat) & sig_mat >= 0.01 & sig_mat < 0.1] = "*"
+
+# Hard cap at ±3 so cell types absent in healthy (which produce extreme ORs)
+# don't wash out the color scale for well-estimated comparisons. Direction and
+# rough magnitude are still communicated; asterisks mark significance.
+cap_val = 3
+col_fun = colorRamp2(
+    c(-cap_val, 0, cap_val),
+    c("#2166AC", "white", "#B2182B")   # blue-white-red, colorbrewer RdBu
+)
+
+# Sample size annotation for columns (n units per entity)
+n_entity = entity_counts |>
+    filter(IntDx %in% colnames(est_mat)) |>
+    arrange(match(IntDx, colnames(est_mat)))
+
+col_annot = HeatmapAnnotation(
+    "n units" = anno_barplot(
+        n_entity$n_units,
+        gp       = gpar(fill = "gray40", col = NA),
+        height   = unit(1.5, "cm"),
+        axis_param = list(gp = gpar(fontsize = 7))
+    ),
+    annotation_name_gp = gpar(fontsize = 8)
+)
+
+Heatmap(
+    est_mat,
+    name             = "log-OR\nvs. healthy",
+    col              = col_fun,
+    na_col           = "gray90",
+    cell_fun         = function(j, i, x, y, width, height, fill) {
+        grid.text(sig_annot[i, j], x, y,
+                  gp = gpar(fontsize = 9, col = "black", fontface = "bold"))
+    },
+    top_annotation   = col_annot,
+    row_names_gp     = gpar(fontsize = 8),
+    column_names_gp  = gpar(fontsize = 8, fontface = "bold"),
+    column_names_rot = 45,
+    cluster_rows     = TRUE,
+    cluster_columns  = TRUE,
+    show_row_dend    = TRUE,
+    show_column_dend = FALSE,
+    heatmap_legend_param = list(
+        title_gp     = gpar(fontsize = 8, fontface = "bold"),
+        labels_gp    = gpar(fontsize = 7),
+        legend_height = unit(3, "cm")
+    ),
+    column_title     = "Cell-type enrichment per PLGG entity vs. healthy brain",
+    column_title_gp  = gpar(fontsize = 10, fontface = "bold"),
+    row_title_gp     = gpar(fontsize = 9)
+)
+```
+
+---
+
+# Covariate effects on cell-type proportions
+
+Effects of age, sex, and brain location on cell-type proportions, extracted from
+the same models. FDR is applied within each covariate term across cell types.
+Location reference level is Intraventricular (alphabetically first).
+
+```{r covariate-heatmap-helper}
+#| echo: FALSE
+
+# Build a log-OR heatmap for covariate terms.
+# dat: long table with columns cell_type, term, estimate, q.value, sig
+plot_covar_heatmap = function(dat, title_str) {
+    hm = dat |>
+        mutate(
+            cell_type  = str_replace_all(cell_type, "_", " "),
+            term_label = recode(term,
+                "age_yr"                         = "Age (per yr)",
+                "sex_combinedMale"               = "Sex: Male vs Female",
+                "location_broadPosterior_fossa"  = "Location: Post. fossa vs Intraventricular",
+                "location_broadSupratentorial"   = "Location: Supratentorial vs Intraventricular"
+            )
+        )
+
+    sig_tbl = hm |> select(cell_type, term_label, q.value) |>
+        pivot_wider(names_from = term_label, values_from = q.value) |>
+        tibble::column_to_rownames("cell_type") |> as.matrix()
+
+    est_tbl = hm |> select(cell_type, term_label, estimate) |>
+        pivot_wider(names_from = term_label, values_from = estimate) |>
+        tibble::column_to_rownames("cell_type") |> as.matrix()
+
+    # Align to same rows
+    est_tbl = est_tbl[rownames(est_tbl), colnames(est_tbl)]
+    sig_tbl = sig_tbl[rownames(est_tbl), colnames(est_tbl)]
+
+    sig_annot = matrix("", nrow = nrow(sig_tbl), ncol = ncol(sig_tbl),
+                       dimnames = dimnames(sig_tbl))
+    sig_annot[!is.na(sig_tbl) & sig_tbl < 0.01] = "**"
+    sig_annot[!is.na(sig_tbl) & sig_tbl >= 0.01 & sig_tbl < 0.1] = "*"
+
+    # Symmetric cap at 95th percentile of absolute estimates
+    cap = quantile(abs(est_tbl), 0.95, na.rm = TRUE)
+    col_fn = colorRamp2(c(-cap, 0, cap), c("#2166AC", "white", "#B2182B"))
+
+    Heatmap(
+        est_tbl,
+        name             = "log-OR",
+        col              = col_fn,
+        na_col           = "gray90",
+        cell_fun         = function(j, i, x, y, width, height, fill) {
+            grid.text(sig_annot[i, j], x, y,
+                      gp = gpar(fontsize = 9, col = "black", fontface = "bold"))
+        },
+        row_names_gp     = gpar(fontsize = 8),
+        column_names_gp  = gpar(fontsize = 8),
+        column_names_rot = 30,
+        cluster_rows     = TRUE,
+        cluster_columns  = FALSE,   # keep covariate order meaningful
+        show_row_dend    = TRUE,
+        show_column_dend = FALSE,
+        heatmap_legend_param = list(
+            title_gp      = gpar(fontsize = 8, fontface = "bold"),
+            labels_gp     = gpar(fontsize = 7),
+            legend_height = unit(2.5, "cm")
+        ),
+        column_title     = title_str,
+        column_title_gp  = gpar(fontsize = 10, fontface = "bold")
+    )
+}
+```
+
+```{r stage1-covariate-heatmap, fig.width=7, fig.height=5.5}
+plot_covar_heatmap(stage1_covars, "Stage 1: covariate effects on cell-type proportions")
+```
+
+```{r stage2-covariate-heatmap, fig.width=7, fig.height=5.5}
+plot_covar_heatmap(stage2_covars, "Stage 2: covariate effects on cell-type proportions")
+```
+
+---
+
+# Session info
+
+```{r session-info}
+#| code-fold: false
+sessionInfo()
+```
