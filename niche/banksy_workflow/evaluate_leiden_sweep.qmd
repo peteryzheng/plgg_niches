@@ -1,0 +1,664 @@
+---
+title: "Evaluate Leiden resolution sweep"
+format:
+  html:
+    embed-resources: true   # inline figures/libs into one standalone .html (easy to copy off the cluster)
+    fig-dpi: 96
+editor_options:
+  chunk_output_type: console
+---
+
+# Purpose
+
+Pick data-backed defaults for cell-type (lam0.2) and niche (lam0.8) Leiden
+clustering from the (k_leiden x resolution) sweep produced by
+`leiden_resolution_sweep.R`.
+
+Evaluation runs in three layers, cheapest first:
+
+1. **Layer 1** — n_clusters heatmaps from the sweep TSV. Filter combos by
+   plausible cluster counts and look for plateaus (stable structure across
+   adjacent resolutions).
+2. **Layer 2** — biology for the finalists: re-run Leiden on the finalist
+   (k, res) pairs only (same seed as the sweep, so labels are reproducible),
+   then check cluster size distribution, sample mixing, marker expression
+   (lam0.2), and spatial coherence (lam0.8).
+3. **Decision** — pick the smallest cluster count per lambda that still
+   resolves the biology you care about (parsimony wins ties).
+
+Inputs : `leiden_resolution_sweep_counts.tsv` (from the sweep) and the same
+         90k-cell BANKSY subset RDS the sweep used.
+Outputs: a single decision table at the bottom; no objects saved to disk.
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+    library(SummarizedExperiment)
+    library(SpatialExperiment)
+    library(data.table)
+    library(ggplot2)
+    library(Banksy)
+    library(cowplot)   # composite plot_grid layouts (repo convention over patchwork)
+    library(pals)      # polychrome() / alphabet() categorical palettes
+    library(presto)    # wilcoxauc(): fast single-cell Wilcoxon-AUC, used in 2c/2c.5
+})
+
+# Path resolution mirrors the sweep script and AGENTS.md.
+home = Sys.getenv("HOME")
+if (home %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    workdir = "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+    subset_path = "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+} else if (home == "/PHShome/yz762") {
+    workdir = "/data/beroukhim1/"
+    subset_path = paste0(workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds")
+} else if (home == "/home/yz762") {
+    workdir = "/mnt/storage/dept/medonc/beroukhim/"
+    subset_path = paste0(workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds")
+} else {
+    workdir = "/xchip/beroukhimlab/"
+    subset_path = paste0(workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds")
+}
+
+# Sweep TSV lives next to this qmd (Quarto sets cwd to the qmd's dir).
+sweep_tsv = "leiden_resolution_sweep_counts.tsv"
+
+# Same seed as the sweep so Leiden labels are reproducible when we re-run
+# the finalist combos in Layer 2.
+seed_val = 55555
+
+# PLGG marker panel for Layer 2 cell-type identification, restricted to genes
+# that are actually on this cohort's custom 266-gene Xenium panel (verified
+# against rownames(o), 2026-08-03). The prior version of this list leaned on
+# canonical markers that are NOT on the panel and were silently dropped by the
+# intersect() in the 2c chunk -- GFAP, S100B (astro), the entire pan-neuronal
+# set (RBFOX3, SYT1, STMN2, SNAP25, MAP2, SYP), MBP, PLP1 (mature oligo), CD3D,
+# CD8A (T cell), CLDN5 (endothelial), FOXJ1 (ependymal) -- so the old heatmap
+# was blank for neurons, mature oligo, T cells, and ependymal.
+#
+# PLGG is not only glial tumors: ganglioglioma / DNET carry neuronal components
+# and PA cells resemble radial glia, so we keep a radial-glia (progenitor) group
+# plus a single merged `neuronal` group to read the glioneuronal axis. We do NOT
+# split excitatory / inhibitory / immature neuron subtypes: the panel has no
+# pan-neuronal anchor (RBFOX3/SYT1/SNAP25/MAP2 absent), the neuronal signal is
+# concentrated in patient-private glioneuronal-tumor samples, and the subtype
+# argmax was near-zero-margin / resolution-unstable. radial_glia markers are
+# pan-neural-progenitor (not RGC-specific) and light up across glial tumors.
+# Myeloid cells are one `myeloid` group (microglia + macrophage markers); we do
+# not resolve microglia vs bone-marrow-derived macrophages. PTPRC (CD45) is
+# dropped: it is pan-immune and would leak a myeloid signal onto T cells.
+# Groups with zero panel coverage are omitted entirely: pan-neuronal structural
+# genes, B/plasma, mural/pericyte, and ependymal (FOXJ1 absent).
+marker_panel = list(
+    astro_glial   = c("AQP4", "APOE", "GJA1"),
+    radial_glia   = c("NES", "PAX6", "SOX2", "HES1", "SOX9"),
+    opc           = c("OLIG1", "OLIG2", "PDGFRA", "CSPG4", "SOX10", "BCAN", "PTPRZ1"),
+    oligo_mature  = c("MOG", "MOBP", "CLDN11", "MAG", "ST18"),
+    neuronal      = c("SLC17A7", "SLC17A6", "RORB", "GAD1", "GAD2", "SOX11"),
+    myeloid       = c("P2RY12", "CX3CR1", "AIF1", "CD68", "ITGAM", "CD163"),
+    t_cell        = c("CD4", "CD2", "TRAC", "IL7R"),
+    endothelial   = c("PECAM1", "FLT1"),
+    proliferation = c("MKI67", "TOP2A", "PCNA", "CENPF")
+)
+```
+
+# Layer 1 — n_clusters filter
+
+Read the sweep output and look at how cluster count varies across the grid.
+The bounds below are loose first-pass filters: cell types need at least the
+major lineages separated (>=8) without fragmenting (<=25); niches need to
+keep the major spatial environments distinct (>=5) without becoming a
+patchwork (<=12).
+
+```{r layer1-load, message=FALSE}
+sweep = fread(sweep_tsv)
+# Defensive: enforce ordering for heatmap axes.
+sweep[, k   := factor(k,   levels = sort(unique(k)))]
+sweep[, res := factor(res, levels = sort(unique(as.numeric(as.character(res)))))]
+sweep[]
+```
+
+```{r layer1-heatmap, fig.width=9, fig.height=4}
+# Heatmap of n_clusters across the (k, res) grid, faceted by lambda.
+# Annotate cells that fall inside the plausibility band so the eye lands
+# on the candidate region immediately.
+plausible_band = list(`0.2` = c(8, 25), `0.8` = c(5, 12))
+sweep[, plausible := {
+    band = plausible_band[[as.character(lambda)]]
+    n_clusters >= band[1] & n_clusters <= band[2]
+}, by = lambda]
+
+ggplot(sweep, aes(x = res, y = k, fill = n_clusters)) +
+    geom_tile() +
+    geom_text(aes(label = n_clusters,
+                  colour = ifelse(plausible, "in band", "out")),
+              size = 3) +
+    scale_colour_manual(values = c("in band" = "black", "out" = "grey60"),
+                        name = NULL) +
+    scale_fill_viridis_c() +
+    facet_wrap(~ paste0("lambda = ", lambda)) +
+    labs(x = "Leiden resolution", y = "Leiden k_neighbors",
+         title = "Cluster counts across sweep grid",
+         caption = "Black labels = inside plausibility band; grey = outside") +
+    theme_bw()
+```
+
+```{r layer1-plateaus}
+# A plateau = two or more adjacent (k or res) cells with the same n_clusters.
+# Plateaus indicate the structure is stable to small parameter perturbations
+# at that point, which is the signal we want for a defensible default.
+plateau_rows = sweep[plausible == TRUE][
+    , .(combos = .N, ks = paste(unique(k), collapse = ",")),
+    by = .(lambda, n_clusters)
+][combos >= 2]
+plateau_rows[order(lambda, n_clusters)]
+```
+
+# Layer 1.5 — pick finalists
+
+After eyeballing the heatmap and plateau table above, fill in 2–4 candidates
+per lambda. Each row is `(k, res)` — the sweep's seed makes the labels
+reproducible when we re-cluster.
+
+```{r layer1-pick-finalists}
+# Picks span the in-band cluster counts at the strongest plateaus found in
+# the sweep (counts.tsv from leiden_resolution_sweep.R, 2026-05-11).
+# lam0.2 cell-type axis is very stable across (k, res); lam0.8 niche axis
+# is more sensitive, so we anchor each finalist on a plateau cell.
+#
+# lam0.2:
+#   12 clusters @ (k=80, res=0.2) — early-stable, coarsest defensible
+#   14 clusters @ (k=80, res=0.5) — widest plateau across (k, res), the
+#                                    strongest data-backed default
+#   18 clusters @ (k=50, res=0.8) — fine end of plausibility band
+# lam0.8:
+#    5 niches  @ (k=50, res=0.2) — coarsest defensible niche set
+#    8 niches  @ (k=120, res=0.5) — mid, sits on the 8-plateau
+#   11 niches  @ (k=80, res=0.6) — widest plateau, finest defensible
+finalists = data.table(
+    lambda = c(0.2, 0.2, 0.2,
+               0.8, 0.8, 0.8),
+    k      = c( 80,  80,  50,
+                50, 120,  80),
+    res    = c(0.2, 0.5, 0.8,
+               0.2, 0.5, 0.6)
+)
+finalists
+```
+
+# Layer 2 — biology for finalists
+
+## Load subset and re-cluster finalists
+
+We re-run Leiden only on the chosen combos — `clusterBanksy` expands a
+(k_neighbors, resolution) vector internally, so two calls (one per lambda)
+cover everything. Identical seed to the sweep keeps labels reproducible.
+
+```{r layer2-recluster, message=FALSE}
+# File-based cache: the recluster step is the only expensive chunk in this
+# qmd (~10 min for 6 combos). Cache to an RDS so re-renders are instant;
+# delete this file (or change its name) to force a fresh recluster after
+# editing the finalists table.
+recluster_cache = "evaluate_leiden_sweep_recluster.rds"
+
+if (file.exists(recluster_cache)) {
+    cat(sprintf("[%s] Loading cached recluster: %s\n",
+                format(Sys.time()), recluster_cache))
+    o = readRDS(recluster_cache)
+} else {
+    cat(sprintf("[%s] Loading subset object...\n", format(Sys.time())))
+    o = readRDS(subset_path)
+    colData(o)$sample_id = factor(colData(o)$sample_id)
+
+    # Drop any clust_* columns that came along with the saved object so the
+    # new clustering grid lands in clean colData slots.
+    existing_clust = grep("^clust_", colnames(colData(o)), value = TRUE)
+    if (length(existing_clust) > 0) colData(o)[, existing_clust] = NULL
+
+    set.seed(seed_val)
+    for (lam in unique(finalists$lambda)) {
+        f = finalists[lambda == lam]
+        cat(sprintf("[%s] Re-clustering lam%s for %d finalist combos...\n",
+                    format(Sys.time()), lam, nrow(f)))
+        o = Banksy::clusterBanksy(
+            o, dimred = paste0("Harmony_BANKSY_lam", lam),
+            k_neighbors = unique(f$k),
+            resolution  = unique(f$res),
+            algo = "leiden",
+            seed = seed_val
+        )
+    }
+    saveRDS(o, recluster_cache)
+    cat(sprintf("[%s] Cached to: %s\n", format(Sys.time()), recluster_cache))
+}
+
+# Build the list of columns we'll iterate over below.
+finalist_cols = finalists[, .(
+    cluster_col = sprintf("clust_Harmony_BANKSY_lam%s_k%d_res%s",
+                          lambda, k, res),
+    lambda = lambda, k = k, res = res
+)]
+finalist_cols
+```
+
+## 2a — cluster size distribution
+
+A healthy combo has no single cluster eating >40% of cells (under-segmented)
+and no clusters with <50 cells (noise). Combos that fail either bound are
+poor candidates regardless of marker / spatial story.
+
+```{r layer2-cluster-sizes}
+cluster_sizes = rbindlist(lapply(finalist_cols$cluster_col, function(cc) {
+    tab = table(colData(o)[[cc]])
+    data.table(
+        cluster_col = cc,
+        n_clusters  = length(tab),
+        min_size    = min(tab),
+        median_size = median(tab),
+        max_size    = max(tab),
+        max_frac    = max(tab) / sum(tab),
+        n_small     = sum(tab < 50)   # under-50-cell clusters
+    )
+}))
+cluster_sizes[, flag := fcase(
+    max_frac > 0.40,           "under-segmented (max_frac>0.40)",
+    n_small  >= 1,             "noise cluster(s) (<50 cells)",
+    default                  = "ok"
+)]
+cluster_sizes
+```
+
+## 2b — sample mixing (Shannon entropy)
+
+Per cluster, entropy of cell counts across samples normalized by
+`log(n_samples)`. 1 = perfectly mixed across all samples; near 0 = the
+cluster is essentially one sample. A single-sample cluster is **not**
+automatically an artifact: in this histologically heterogeneous n=11 cohort,
+patient-private clusters are expected — whether neoplastic or histology-specific
+normal populations — so they legitimately fail to mix while normal lineages
+(immune / vascular / glia / oligo) do integrate across patients. We therefore
+(i) record each cluster's median
+`transcript_counts` as a QC readout — a single-sample cluster with counts on
+par with the clean lineages is a real patient-private population, not
+low-quality noise — and (ii) defer the actual mixing judgement to the
+lineage-aware step (2c.5) that feeds the scorecard.
+
+```{r layer2-sample-entropy}
+n_samples = nlevels(colData(o)$sample_id)
+entropy_norm = function(x) {
+    p = prop.table(table(x))
+    p = p[p > 0]
+    -sum(p * log(p)) / log(n_samples)
+}
+
+# Per-cluster table (not just a combo summary): we need per-cluster entropy to
+# join against per-cluster lineage in 2c.5. med_counts is the artifact check.
+lib = colData(o)$transcript_counts
+entropy_bycluster = rbindlist(lapply(finalist_cols$cluster_col, function(cc) {
+    by_clust  = split(colData(o)$sample_id, colData(o)[[cc]])
+    by_counts = split(lib,                  colData(o)[[cc]])
+    ent = vapply(by_clust, entropy_norm, numeric(1))
+    data.table(
+        cluster_col = cc,
+        cluster     = names(by_clust),
+        entropy     = ent,
+        low_entropy = ent < 0.30,                        # near-single-sample
+        med_counts  = vapply(by_counts, median, numeric(1))
+    )
+}))
+
+# Combo-level summary carried into the scorecard (same columns as before).
+sample_entropy = entropy_bycluster[, .(
+    min_entropy    = min(entropy),
+    median_entropy = median(entropy),
+    n_low_entropy  = sum(low_entropy)
+), by = cluster_col]
+sample_entropy
+```
+
+Visual companion to the table: for each finalist combo, a UMAP colored by cluster
+and a UMAP colored by sample (top row) over a per-cluster entropy barchart. This
+lets you read off directly whether the low-entropy (firebrick) bars are the same
+clusters that sit apart / are dominated by one sample on the UMAPs.
+
+```{r layer2-entropy-plots, fig.width=13, fig.height=9, message=FALSE, warning=FALSE}
+# Optional downsample for plotting ONLY (1.0 = all cells). Lower if the HPC
+# render of ~12 large scatters is slow; does not touch any computed table.
+plot_frac = 0.15
+set.seed(seed_val)
+plot_idx = if (plot_frac < 1) sort(sample(ncol(o), round(ncol(o) * plot_frac))) else seq_len(ncol(o))
+
+# Precomputed lambda-matched UMAP coords, subset to the plotted cells.
+umap_coords = list(
+    `0.2` = as.data.table(reducedDim(o, "UMAP_Harmony_BANKSY_lam0.2"))[plot_idx, 1:2],
+    `0.8` = as.data.table(reducedDim(o, "UMAP_Harmony_BANKSY_lam0.8"))[plot_idx, 1:2]
+)
+for (nm in names(umap_coords)) setnames(umap_coords[[nm]], c("umap_1", "umap_2"))
+
+# Shared scatter builder (reused by the 2c.5 lineage UMAP in the same render
+# session): color points by `vals`, optionally label centroids. `label_vals`
+# lets us color by one variable (e.g. lineage) but label centroids by another
+# (e.g. cluster id). All value vectors are full-length; we index by plot_idx.
+umap_scatter = function(coords, vals, title, palette,
+                        show_labels = TRUE, label_vals = NULL) {
+    d = copy(coords)[, grp := factor(vals[plot_idx])]
+    if (!is.null(label_vals)) d[, lab := factor(label_vals[plot_idx])]
+    p = ggplot(d, aes(umap_1, umap_2, colour = grp)) +
+        geom_point(size = 0.1, alpha = 0.5) +
+        scale_colour_manual(values = palette, name = NULL, na.value = "grey80") +
+        guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+        labs(title = title, x = "UMAP 1", y = "UMAP 2") +
+        theme_bw()
+    if (show_labels) {
+        lab_col = if (!is.null(label_vals)) "lab" else "grp"
+        cent = d[, .(x = median(umap_1), y = median(umap_2)), by = c(lab_col)]
+        setnames(cent, lab_col, "lab")
+        p = p + geom_text(data = cent, aes(x = x, y = y, label = lab),
+                          inherit.aes = FALSE, colour = "black", size = 3.2)
+    }
+    p
+}
+
+# Sample palette shared across all combos so sample colors stay stable.
+samp_levels = levels(colData(o)$sample_id)
+sample_pal  = structure(pals::polychrome(length(samp_levels)), names = samp_levels)
+
+# One composite per finalist combo (both lambdas), lambda-matched UMAP.
+for (i in seq_len(nrow(finalist_cols))) {
+    cc     = finalist_cols$cluster_col[i]
+    lam    = as.character(finalist_cols$lambda[i])
+    coords = umap_coords[[lam]]
+
+    cl        = as.character(colData(o)[[cc]])
+    cl_levels = sort(unique(cl))
+    clpal     = structure(pals::polychrome(length(cl_levels)), names = cl_levels)
+
+    p_cluster = umap_scatter(coords, cl, paste0(cc, "\nclusters"),
+                             clpal, show_labels = TRUE)                     # label = cluster id
+    p_sample  = umap_scatter(coords, as.character(colData(o)$sample_id),
+                             "sample_id", sample_pal, show_labels = FALSE)
+
+    # Barchart: clusters ordered by ascending entropy; 0.30 gate dashed.
+    eb = entropy_bycluster[cluster_col == cc]
+    eb[, cluster := factor(cluster, levels = cluster[order(entropy)])]
+    p_entropy = ggplot(eb, aes(cluster, entropy, fill = low_entropy)) +
+        geom_col() +
+        geom_hline(yintercept = 0.30, linetype = "dashed") +
+        scale_fill_manual(values = c(`FALSE` = "grey70", `TRUE` = "firebrick"),
+                          name = "entropy < 0.30") +
+        labs(x = "cluster", y = "normalized entropy",
+             title = "per-cluster sample-mixing entropy") +
+        theme_bw()
+
+    print(cowplot::plot_grid(
+        cowplot::plot_grid(p_cluster, p_sample, nrow = 1),
+        p_entropy, ncol = 1, rel_heights = c(2, 1)))
+}
+```
+
+## 2c — marker expression per cluster (lam0.2 only)
+
+Two views of the same marker panel: raw mean log-expression per cluster
+(is the gene expressed at all?), and single-cell Wilcoxon AUC per cluster
+(one-vs-rest specificity -- this is the exact metric 2c.5's lineage argmax
+uses below, so it's the view to actually check the pick against). Good
+lam0.2 combos light up each lineage in a distinct cluster on both.
+
+```{r layer2-markers, fig.width=10, fig.height=5}
+# Use logcounts if present, else fall back to counts on a log1p.
+aname = if ("logcounts" %in% assayNames(o)) "logcounts" else "counts"
+genes_all = unlist(marker_panel, use.names = FALSE)
+genes_present = intersect(genes_all, rownames(o))
+missing_genes = setdiff(genes_all, rownames(o))
+if (length(missing_genes) > 0) {
+    message("Genes not in panel rownames (skipped): ",
+            paste(missing_genes, collapse = ", "))
+}
+lineage_of = setNames(rep(names(marker_panel), lengths(marker_panel)),
+                       genes_all)
+
+# Long-format mean per (cluster, gene), faceted by combo. Means computed
+# directly to avoid coercing the SCE to Seurat for a quick diagnostic.
+marker_mean = function(cc) {
+    g = colData(o)[[cc]]
+    expr = assay(o, aname)[genes_present, , drop = FALSE]
+    if (aname == "counts") expr = log1p(expr)
+    m = vapply(split(seq_along(g), g), function(idx) {
+        Matrix::rowMeans(expr[, idx, drop = FALSE])
+    }, numeric(length(genes_present)))
+    rownames(m) = genes_present
+    melt(as.data.table(m, keep.rownames = "gene"),
+         id.vars = "gene", variable.name = "cluster", value.name = "mean_expr")
+}
+lam02_cols = finalist_cols[startsWith(cluster_col,
+                                      "clust_Harmony_BANKSY_lam0.2"),
+                           cluster_col]
+marker_df = rbindlist(lapply(lam02_cols, function(cc) {
+    out = marker_mean(cc); out[, cluster_col := cc]; out
+}))
+marker_df[, lineage := lineage_of[gene]]
+marker_df[, gene := factor(gene, levels = genes_all)]
+
+ggplot(marker_df, aes(x = cluster, y = gene, fill = mean_expr)) +
+    geom_tile() +
+    facet_grid(lineage ~ cluster_col, scales = "free", space = "free") +
+    scale_fill_viridis_c() +
+    labs(title = "Marker mean expression per cluster (lam0.2 finalists)",
+         x = "cluster", y = NULL) +
+    theme_bw() +
+    theme(axis.text.x = element_text(size = 6),
+          strip.text.y = element_text(angle = 0))
+```
+
+```{r layer2-markers-auc, fig.width=10, fig.height=5}
+# Single-cell effect size (Wilcoxon AUC, one-vs-rest) per (cluster_col,
+# cluster, gene), computed once here from the raw single cells and reused
+# by both this heatmap and the 2c.5 lineage argmax below -- so what you
+# eyeball here is exactly what drives the lineage call. AUC=0.5 means no
+# separation between the cluster and every other cell; AUC=1 means the
+# gene perfectly separates the cluster from the rest.
+#
+# Chosen over z-scoring per-cluster pseudobulk means (the prior approach):
+# pseudobulk z-scoring only has as many points as there are clusters
+# (12-18) to estimate a gene's mean/SD from, which penalizes markers with
+# a naturally wide dynamic range across clusters (e.g. PAX6, which varies
+# a lot cluster-to-cluster for real biological reasons) relative to
+# markers with a narrow baseline -- even when the wide-range marker is far
+# more specific at the single-cell level. AUC is rank-based and
+# scale-invariant, so it doesn't have that failure mode, and it uses every
+# cell in a cluster instead of collapsing to one pseudobulk point.
+expr_all = assay(o, aname)[genes_present, , drop = FALSE]
+if (aname == "counts") expr_all = log1p(expr_all)
+auc_long = rbindlist(lapply(lam02_cols, function(cc) {
+    res = as.data.table(presto::wilcoxauc(expr_all, factor(colData(o)[[cc]])))
+    res[, cluster_col := cc]
+    res
+}))
+setnames(auc_long, c("feature", "group"), c("gene", "cluster"))
+auc_long[, lineage := lineage_of[gene]]
+auc_long[, gene := factor(gene, levels = genes_all)]
+
+ggplot(auc_long, aes(x = cluster, y = gene, fill = auc)) +
+    geom_tile() +
+    facet_grid(lineage ~ cluster_col, scales = "free", space = "free") +
+    scale_fill_gradient2(low = "steelblue", mid = "white", high = "firebrick",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "AUC\n(one-vs-rest)") +
+    labs(title = "Marker specificity per cluster (single-cell Wilcoxon AUC, lam0.2 finalists)",
+         x = "cluster", y = NULL) +
+    theme_bw() +
+    theme(axis.text.x = element_text(size = 6),
+          strip.text.y = element_text(angle = 0))
+```
+
+## 2c.5 — per-cluster lineage assignment (lam0.2)
+
+Assign each lam0.2 cluster a top lineage so the scorecard can treat sample
+mixing correctly. A single-sample cluster is a red flag **only** when it maps to
+a *normal* lineage (immune / vascular / glia / oligo — these should integrate
+across patients). The glioneuronal / progenitor compartment is **expected** to be
+patient-specific in this histologically heterogeneous cohort — whether those
+cells are neoplastic or histology-specific normal populations — so it must not
+gate the cell-type pick.
+
+The signature is the mean single-cell Wilcoxon AUC minus 0.5 (one-vs-rest,
+computed once in the 2c chunk above and reused here) over each lineage's
+panel-present markers; the argmax labels the cluster. AUC replaced z-scoring
+per-cluster pseudobulk means: pseudobulk z-scoring only has ~12-18 points
+(one per cluster) to estimate a gene's mean/SD from, which penalized markers
+with a wide dynamic range across clusters (e.g. PAX6) relative to markers
+with a narrow baseline, even when the wide-range marker was the more specific
+one at the single-cell level. These labels are still **directional, not
+definitive cell-type calls**: the margins between the top and runner-up
+lineage are often near zero for the glioneuronal clusters -- radial_glia and
+neuronal markers genuinely co-occur there (e.g. PAX6 alongside GAD2/SOX11) --
+so which subtype "wins" is sensitive to noise and can shift with resolution.
+Read them as a coarse normal-vs-glioneuronal split, not a fine cell-type
+annotation.
+
+```{r layer2-lineage-assign}
+# Lineages we expect to integrate across patients. radial_glia and the merged
+# `neuronal` group are deliberately LEFT OUT: in this histologically heterogeneous
+# cohort a patient-private glioneuronal / progenitor cluster is expected --
+# whether neoplastic or a histology-specific normal population -- so a
+# single-sample cluster mapping to one of those is not a mixing failure.
+normal_lineages = c("astro_glial", "opc", "oligo_mature",
+                    "myeloid", "t_cell", "endothelial")
+
+# Per-cluster top lineage for one finalist column: from the shared single-cell
+# AUC table (auc_long, computed once in the 2c chunk) -> mean(auc - 0.5)
+# within each lineage's panel-present markers -> argmax. Ties broken by
+# marker_panel list order (astro_glial first).
+lineage_score = function(cc) {
+    d = auc_long[cluster_col == cc]
+    sig_long = d[, .(score = mean(auc - 0.5)), by = .(cluster, lineage)]
+    sig_wide = dcast(sig_long, cluster ~ lineage, value.var = "score")
+    lineage_names = names(marker_panel)
+    m = as.matrix(sig_wide[, ..lineage_names])
+    top = lineage_names[max.col(replace(m, is.na(m), -Inf),
+                                ties.method = "first")]
+    data.table(cluster_col = cc, cluster = sig_wide$cluster, top_lineage = top)
+}
+
+lam02_lineage = rbindlist(lapply(lam02_cols, lineage_score))
+lam02_lineage[, is_normal_lineage := top_lineage %in% normal_lineages]
+# Merge in entropy + QC so the private-vs-artifact call is visible in one table.
+lam02_lineage = merge(
+    lam02_lineage,
+    entropy_bycluster[, .(cluster_col, cluster, entropy, low_entropy, med_counts)],
+    by = c("cluster_col", "cluster"), sort = FALSE
+)
+setorder(lam02_lineage, cluster_col, entropy)
+lam02_lineage
+```
+
+Preliminary cell-type UMAP: each lam0.2 finalist, cells colored by their cluster's
+assigned `top_lineage`, with the cluster id labeled at each centroid. The low-entropy
+clusters from 2b should land in the neuronal / radial-glia (glioneuronal / progenitor)
+lineages, while the normal lineages (myeloid, OPC, oligo, astro, T cell, endothelial)
+should spread across the UMAP and across samples.
+
+```{r layer2-lineage-umap, fig.width=15, fig.height=5.5, message=FALSE, warning=FALSE}
+# Fixed palette over all lineage names so colors are identical across the three
+# resolutions. Reuses umap_scatter / umap_coords / plot_idx from the 2b plot chunk.
+lineage_pal = structure(pals::alphabet(length(marker_panel)), names = names(marker_panel))
+
+lineage_umaps = lapply(lam02_cols, function(cc) {
+    # cluster -> top_lineage lookup for this combo, then map to each cell.
+    lin_map  = lam02_lineage[cluster_col == cc, setNames(top_lineage, cluster)]
+    cell_lin = lin_map[as.character(colData(o)[[cc]])]
+    # color by lineage, but label centroids by cluster id for cross-reference to 2b.
+    umap_scatter(umap_coords[["0.2"]], cell_lin,
+                 sub("clust_Harmony_BANKSY_", "", cc), lineage_pal,
+                 show_labels = TRUE, label_vals = as.character(colData(o)[[cc]]))
+})
+print(cowplot::plot_grid(plotlist = lineage_umaps, nrow = 1))
+```
+
+## 2d — spatial coherence (lam0.8 only)
+
+Niches should form contiguous patches in xy, not salt-and-pepper. Eyeball
+2–3 samples per finalist. If multiple samples disagree on which combo looks
+contiguous, weight the lam0.8 decision toward the combo that holds up
+across samples.
+
+```{r layer2-spatial, fig.width=12, fig.height=8}
+lam08_cols = finalist_cols[startsWith(cluster_col,
+                                      "clust_Harmony_BANKSY_lam0.8"),
+                           cluster_col]
+# Pick 3 samples with the largest cell counts so the spatial pattern is
+# visible at small point sizes; swap for specific samples of interest later.
+sample_pick = names(sort(table(colData(o)$sample_id), decreasing = TRUE))[1:3]
+
+coords = as.data.table(spatialCoords(o))
+setnames(coords, c("x", "y"))
+coords[, sample_id := colData(o)$sample_id]
+for (cc in lam08_cols) coords[[cc]] = factor(colData(o)[[cc]])
+
+for (cc in lam08_cols) {
+    # facet_wrap(scales="free") is incompatible with coord_equal (fixed
+    # ratio). For spatial coherence we care more about contiguity than
+    # true isotropy, so use theme(aspect.ratio=1) which works with free
+    # scales and keeps each facet roughly square.
+    p = ggplot(coords[sample_id %in% sample_pick],
+               aes(x = x, y = y, colour = .data[[cc]])) +
+        geom_point(size = 0.1, alpha = 0.6) +
+        facet_wrap(~ sample_id, scales = "free", nrow = 1) +
+        guides(colour = guide_legend(override.aes = list(size = 2))) +
+        labs(title = cc) +
+        theme_bw() +
+        theme(legend.position = "bottom",
+              aspect.ratio = 1)
+    print(p)
+}
+```
+
+# Decision scorecard
+
+Roll the diagnostics into one table so the final pick is mechanical. Sample
+mixing is applied **per axis**, reflecting what 2b / 2c.5 showed:
+
+- **lam0.8 (niches):** keep the original hard gate — a single-sample niche is
+  most likely an artifact, and there is no marker-based lineage to reason about.
+- **lam0.2 (cell types):** mixing is a red flag **only** for clusters that map
+  to a *normal* lineage. Patient-private glioneuronal / progenitor clusters are
+  expected (whether neoplastic or histology-specific normal), so they do not gate
+  the pick. We count
+  only low-entropy clusters whose top lineage is normal (`n_low_entropy_normal`);
+  the cell-type resolution is then decided by size sanity + marker separation
+  (2c) + parsimony, not by raw sample mixing.
+
+If two combos tie, prefer the lower-res / lower-k one (parsimony).
+
+```{r decision-scorecard}
+# lam0.2 mixing failures = low-entropy clusters that map to a NORMAL lineage.
+# (lam0.8 combos aren't in lam02_lineage, so they get 0 here and fall back to
+# the original n_low_entropy hard gate below.)
+low_entropy_normal = merge(
+    entropy_bycluster[low_entropy == TRUE, .(cluster_col, cluster)],
+    lam02_lineage[is_normal_lineage == TRUE, .(cluster_col, cluster)],
+    by = c("cluster_col", "cluster")
+)[, .(n_low_entropy_normal = .N), by = cluster_col]
+
+scorecard = merge(merge(
+    cluster_sizes[, .(cluster_col, n_clusters, max_frac, n_small, size_flag = flag)],
+    sample_entropy[, .(cluster_col, min_entropy, n_low_entropy)],
+    by = "cluster_col"
+), finalist_cols, by = "cluster_col")
+scorecard = merge(scorecard, low_entropy_normal, by = "cluster_col", all.x = TRUE)
+scorecard[is.na(n_low_entropy_normal), n_low_entropy_normal := 0]
+
+scorecard[, passes_size := size_flag == "ok"]
+# lam0.2: lineage-aware mixing; lam0.8: original hard gate on all low-entropy.
+scorecard[, passes_mixing := fifelse(lambda == 0.2,
+                                     n_low_entropy_normal == 0,
+                                     n_low_entropy == 0)]
+scorecard[, recommend := passes_size & passes_mixing]
+scorecard[order(lambda, n_clusters)]
+```
+
+Once a winner per lambda is picked from this table, update the downstream
+notebooks (`banksy_clusters_proseg.qmd`, `banksy_niches_proseg.qmd`) to use
+those (k, res) defaults and rerun. For lam0.2, confirm the pick on the 2c AUC
+heatmap (each lineage specific to a distinct cluster) before committing, since
+the scorecard no longer gates cell types on sample mixing.
