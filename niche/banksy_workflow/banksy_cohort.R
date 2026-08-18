@@ -1,11 +1,14 @@
 library(optparse)
 
-# local vs UGER
-if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
-    # in a local mac, the home directory is usuaully at '/Users/[username]'
-    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+# Path resolution per AGENTS.md so this script works across mac/cluster mounts.
+home <- Sys.getenv("HOME")
+if (home %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (home == "/PHShome/yz762") {
+    workdir <- "/data/beroukhim1/"
+} else if (home == "/home/yz762") {
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
 } else {
-    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
     workdir <- "/xchip/beroukhimlab/"
 }
 
@@ -37,23 +40,33 @@ if(!interactive()) {
             help = 'number of PCs to use for BANKSY', 
             metavar = 'npc'
         ),
+        # Cell-type (small lambda) leiden params. One k + a comma-separated
+        # list of resolutions; clusterBanksy expands the (k x res) grid.
+        # k=50 is BANKSY-recommended for ~90k+ cells; res 0.5 sat on the widest
+        # plateau in the prior sweep, res 1 is kept for continuity with earlier
+        # downstream analyses.
         make_option(
-            c('--k_leiden_lam1'), type = 'character', default = '30,50',
-            help = 'comma-separated k neighbors for leiden clustering on lam1 (cell typing)',
+            c('--k_ct'), type = 'integer', default = 50,
+            help = 'k_neighbors for cell-type leiden clustering (lam1)',
+            metavar = 'k'
         ),
         make_option(
-            c('--k_leiden_lam2'), type = 'character', default = '30,50',
-            help = 'comma-separated k neighbors for leiden clustering on lam2 (niche calling)',
+            c('--res_ct'), type = 'character', default = '0.5,1',
+            help = 'comma-separated resolutions for cell-type leiden clustering (lam1)',
+            metavar = 'res_list'
+        ),
+        # Niche (large lambda) leiden params. Same k/res as cell type so the
+        # two sides are compared on equal-footing grid; downstream analysis
+        # picks the resolution that yields contiguous niches per sample.
+        make_option(
+            c('--k_ni'), type = 'integer', default = 50,
+            help = 'k_neighbors for niche leiden clustering (lam2)',
+            metavar = 'k'
         ),
         make_option(
-            c('--res_lam1'), type = 'character', default = '0.75,1',
-            help = 'comma-separated Leiden resolutions to try for lam1 (cell typing)',
-            metavar = 'resolution'
-        ),
-        make_option(
-            c('--res_lam2'), type = 'character', default = '0.75,1',
-            help = 'comma-separated Leiden resolutions to try for lam2 (niche calling)',
-            metavar = 'resolution'
+            c('--res_ni'), type = 'character', default = '0.5,1',
+            help = 'comma-separated resolutions for niche leiden clustering (lam2)',
+            metavar = 'res_list'
         ),
         make_option(
             c('--seed'), type = 'integer', default = 55555,
@@ -72,17 +85,13 @@ if(!interactive()) {
     k_geom = c(opt$k1, opt$k2)
     lambda = c(opt$lam1, opt$lam2)
     npc = opt$npc
-    # One Leiden k_neighbors / resolution vector per lambda, in the same
-    # order as `lambda` (lam1 = cell typing, lam2 = niche calling) -- these
-    # no longer have to share one grid across both lambdas.
-    k_leiden_list = list(
-        as.numeric(strsplit(opt$k_leiden_lam1, ',')[[1]]),
-        as.numeric(strsplit(opt$k_leiden_lam2, ',')[[1]])
-    )
-    resolution_list = list(
-        as.numeric(strsplit(opt$res_lam1, ',')[[1]]),
-        as.numeric(strsplit(opt$res_lam2, ',')[[1]])
-    )
+    # Parse comma-separated resolutions into numeric vectors; trimws guards
+    # against accidental whitespace when called from a shell wrapper.
+    k_ct  = opt$k_ct
+    res_ct = as.numeric(strsplit(trimws(opt$res_ct), ',')[[1]])
+    k_ni  = opt$k_ni
+    res_ni = as.numeric(strsplit(trimws(opt$res_ni), ',')[[1]])
+    stopifnot(all(!is.na(res_ct)), all(!is.na(res_ni)))
     seed = opt$seed
     output_dir = opt$outputdir
 
@@ -118,12 +127,15 @@ if(!interactive()) {
     )
 
     # Clustering ================================================================
+    # banksy_clustering expects separate (k, res) per lambda so cell-type and
+    # niche grids can be tuned independently.
     print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running clustering on BANKSY output...'))
     total_se_staggered = banksy_clustering(
         total_se_staggered,
         aname = 'normcounts', seed_val = seed,
         k_geom_vec = k_geom, lambda_vec = lambda, pc_val = npc,
-        k_leiden_list = k_leiden_list, resolution_list = resolution_list,
+        k_leiden_celltype = k_ct, resolution_celltype = res_ct,
+        k_leiden_niche    = k_ni, resolution_niche    = res_ni,
         output_dir, current_timestamp
     )
 
@@ -142,7 +154,8 @@ if(!interactive()) {
         total_se_staggered,
         aname = 'normcounts',
         k_geom_vec = k_geom, lambda_vec = lambda, pc_val = npc,
-        k_leiden_list = k_leiden_list, resolution_list = resolution_list,
+        k_leiden_celltype = k_ct, resolution_celltype = res_ct,
+        k_leiden_niche    = k_ni, resolution_niche    = res_ni,
         output_dir, current_timestamp
     )
 
@@ -151,7 +164,8 @@ if(!interactive()) {
     generate_qc_plots(
         total_se_staggered,
         k_geom_vec = k_geom, lambda_vec = lambda, pc_val = npc,
-        k_leiden_list = k_leiden_list, resolution_list = resolution_list,
+        k_leiden_celltype = k_ct, resolution_celltype = res_ct,
+        k_leiden_niche    = k_ni, resolution_niche    = res_ni,
         output_dir, current_timestamp, seed_val = seed
     )
 

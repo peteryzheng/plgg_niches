@@ -70,7 +70,7 @@ loading_data = function(segmentation_method = c('proseg','default')){
     }
 
     metadata = data.table(readxl::read_excel(paste0(
-        workdir,'coja/Spatial_PLGG/data/metadata/Xenium_PS.xlsx'
+        workdir,'youyun/plgg/data/metadata/Xenium_PS.xlsx'
     )))[
         ,batch := as.factor(gsub('__.*','',gsub('output-XETG[0-9]+__','',file)))
     ]
@@ -200,25 +200,19 @@ score_lineages = function(expr_matrix, cluster_vec, panel = marker_panel) {
     data.table(cluster = sig_wide$cluster, top_lineage = top)
 }
 
-# Shared filename-building logic between banksy_clustering(),
-# annotate_cell_types(), and generate_qc_plots() so their output filenames
-# encode identical params without banksy_clustering() needing to return
-# param_string.
-cluster_param_string = function(k_geom_vec, lambda_vec, pc_val, k_leiden_list, resolution_list) {
-    per_lambda_string = paste(
-        vapply(seq_along(lambda_vec), function(i) {
-            paste0(
-                'lam', lambda_vec[i],
-                '_kleiden_', paste0(k_leiden_list[[i]], collapse = '_'),
-                '_res_', paste0(resolution_list[[i]], collapse = '_')
-            )
-        }, character(1)),
-        collapse = '_'
-    )
+# Shared filename-building logic between annotate_cell_types() and
+# generate_qc_plots(), matching banksy_clustering()'s own param_string
+# format exactly (kct_/resct_/kni_/resni_) so all three agree on a run's
+# filenames without banksy_clustering() needing to return param_string.
+cluster_param_string = function(k_geom_vec, lambda_vec, pc_val, k_leiden_celltype, resolution_celltype, k_leiden_niche, resolution_niche) {
     paste0(
         'k_geom_', paste0(k_geom_vec, collapse = '_'), '_',
         'pc_', pc_val, '_',
-        per_lambda_string
+        'lam_', paste0(lambda_vec, collapse = '_'), '_',
+        'kct_', paste0(k_leiden_celltype, collapse = '_'), '_',
+        'resct_', paste0(resolution_celltype, collapse = '_'), '_',
+        'kni_', paste0(k_leiden_niche, collapse = '_'), '_',
+        'resni_', paste0(resolution_niche, collapse = '_')
     )
 }
 
@@ -285,35 +279,63 @@ banksy_workflow = function(
 }
 
 
+# Leiden clustering on the Harmony-corrected BANKSY PCs, run once per lambda.
+# Cell-type (small lambda) and niche (large lambda) embeddings are clustered at
+# DIFFERENT (k_leiden, resolution) grids because the natural granularity is
+# different: cell types are finer than spatial niches. The smaller of the two
+# lambdas is treated as cell-type, the larger as niche; this assumes lambda_vec
+# has length exactly 2, matching the upstream BANKSY workflow.
 banksy_clustering = function(
     banksy_spe, aname, seed_val,
-    # not a clustering hyperparameter, but we need it for the output file name
+    # not a clustering hyperparameter, but needed for the output file name
     k_geom_vec, lambda_vec, pc_val,
-    # k_leiden_list / resolution_list: one numeric vector per lambda (same
-    # length/order as lambda_vec), since cell typing (lam1) and niche calling
-    # (lam2) can each need their own Leiden neighbors/resolution candidates
-    # rather than sharing one grid across both lambdas.
-    k_leiden_list, resolution_list,
+    k_leiden_celltype, resolution_celltype,
+    k_leiden_niche, resolution_niche,
     output_dir, current_time
 ){
+    stopifnot(length(lambda_vec) == 2)
     set.seed(seed_val)
     subset_indices = sample(1:ncol(banksy_spe), ncol(banksy_spe) * 0.05)
-    # current_time <- format(Sys.time(), "%Y%m%d_%H%M%S")
-    param_string = cluster_param_string(k_geom_vec, lambda_vec, pc_val, k_leiden_list, resolution_list)
+    # Map lambda -> (k_leiden, resolution) grid. Smaller lambda = cell-type,
+    # larger lambda = niche. Done once so the lapply below can index by value.
+    lam_celltype = min(as.numeric(lambda_vec))
+    lam_niche    = max(as.numeric(lambda_vec))
+    leiden_grid_by_lambda = list()
+    leiden_grid_by_lambda[[as.character(lam_celltype)]] = list(
+        k_leiden = k_leiden_celltype, resolution = resolution_celltype
+    )
+    leiden_grid_by_lambda[[as.character(lam_niche)]] = list(
+        k_leiden = k_leiden_niche, resolution = resolution_niche
+    )
+    # Encode both grids in the output filename so different sweeps don't collide.
+    param_string = paste0(
+        'k_geom_', paste0(k_geom_vec,collapse = '_'), '_',
+        'pc_', pc_val, '_',
+        'lam_', paste0(lambda_vec,collapse = '_'), '_',
+        'kct_', paste0(k_leiden_celltype,collapse = '_'), '_',
+        'resct_', paste0(resolution_celltype,collapse = '_'), '_',
+        'kni_', paste0(k_leiden_niche,collapse = '_'), '_',
+        'resni_', paste0(resolution_niche,collapse = '_')
+    )
     # Leiden clustering ===================================================
     print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Clustering...'))
-    Map(function(x, k_leiden_vec, resolution_vec){
-        print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Clustering lam', x, ' ...'))
+    lapply(lambda_vec, function(x){
+        grid = leiden_grid_by_lambda[[as.character(x)]]
+        print(paste0(
+            '[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ',
+            'Clustering lam', x, ' with k=', paste0(grid$k_leiden, collapse=','),
+            ' res=', paste0(grid$resolution, collapse=','), ' ...'
+        ))
         # running Leiden clustering on the Harmony corrected PCA loadings
         banksy_spe <<- Banksy::clusterBanksy(
             banksy_spe, dimred = paste0("Harmony_BANKSY_lam", x),
-            k_neighbors = k_leiden_vec,
-            resolution = resolution_vec,
+            k_neighbors = grid$k_leiden,
+            resolution = grid$resolution,
             algo = 'leiden',
             seed = seed_val
         )
         print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Finished clustering lam', x, ' ...'))
-    }, lambda_vec, k_leiden_list, resolution_list)
+    })
     saveRDS(banksy_spe, paste0(
         output_dir,'/banksy_clusters_',
         param_string,'_',current_time,'.rds'
@@ -350,17 +372,19 @@ banksy_clustering = function(
 
 # Writes an automated cell-type call directly into colData, replacing the
 # manual hand-curated lookup-table annotation previously done per-run in
-# banksy_clusters_proseg.qmd. Only annotates lam1 (cell-typing) cluster
-# columns -- there can be more than one now that lam1 gets multiple
-# candidate resolutions -- not lam2/niche columns, matching
+# banksy_clusters_proseg.qmd. Only annotates cell-typing (smaller-lambda)
+# cluster columns -- there can be more than one now that it gets multiple
+# candidate resolutions -- not niche columns, matching
 # cell_type_marker_ident()'s lowest-lambda convention.
 annotate_cell_types = function(
     banksy_spe, aname, k_geom_vec, lambda_vec, pc_val,
-    k_leiden_list, resolution_list,
+    k_leiden_celltype, resolution_celltype,
+    k_leiden_niche, resolution_niche,
     output_dir, current_time
 ){
     print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Annotating cell types...'))
-    param_string = cluster_param_string(k_geom_vec, lambda_vec, pc_val, k_leiden_list, resolution_list)
+    param_string = cluster_param_string(k_geom_vec, lambda_vec, pc_val,
+        k_leiden_celltype, resolution_celltype, k_leiden_niche, resolution_niche)
     cell_type_clusters = grep(
         paste0('lam', min(as.numeric(lambda_vec))),
         clusterNames(banksy_spe), value = TRUE
@@ -423,11 +447,13 @@ cell_type_marker_ident = function(
 # the full multi-million-cell object; entropy/AUC computations use all cells.
 generate_qc_plots = function(
     banksy_spe, k_geom_vec, lambda_vec, pc_val,
-    k_leiden_list, resolution_list,
+    k_leiden_celltype, resolution_celltype,
+    k_leiden_niche, resolution_niche,
     output_dir, current_time, plot_frac = 0.1, seed_val = 55555
 ){
     print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Generating QC plots...'))
-    param_string = cluster_param_string(k_geom_vec, lambda_vec, pc_val, k_leiden_list, resolution_list)
+    param_string = cluster_param_string(k_geom_vec, lambda_vec, pc_val,
+        k_leiden_celltype, resolution_celltype, k_leiden_niche, resolution_niche)
     qc_dir = paste0(output_dir, '/qc_plots_', param_string, '_', current_time)
     dir.create(qc_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -441,8 +467,15 @@ generate_qc_plots = function(
         -sum(p * log(p)) / log(n_samples)
     }
 
+    # pals::polychrome() errors above 36 colors -- fine for samples, but at
+    # full-cohort scale some (k, res) combos produce far more clusters than
+    # that, so interpolate beyond its max instead of erroring.
+    categorical_pal = function(n) {
+        if (n <= 36) pals::polychrome(n) else grDevices::colorRampPalette(pals::polychrome(36))(n)
+    }
+
     samp_levels = sort(unique(as.character(colData(banksy_spe)$sample_id)))
-    sample_pal  = structure(pals::polychrome(length(samp_levels)), names = samp_levels)
+    sample_pal  = structure(categorical_pal(length(samp_levels)), names = samp_levels)
 
     umap_scatter = function(coords_dt, vals, title, palette, show_labels = TRUE) {
         d = copy(coords_dt)[, grp := factor(vals[plot_idx])]
@@ -471,7 +504,7 @@ generate_qc_plots = function(
         for (cc in lam_cluster_cols) {
             cl = as.character(colData(banksy_spe)[[cc]])
             cl_levels = sort(unique(cl))
-            clpal = structure(pals::polychrome(length(cl_levels)), names = cl_levels)
+            clpal = structure(categorical_pal(length(cl_levels)), names = cl_levels)
             p_cluster = umap_scatter(coords, cl, paste0(cc, "\nclusters"), clpal)
             p_sample = umap_scatter(coords, as.character(colData(banksy_spe)$sample_id),
                                     "sample_id", sample_pal, show_labels = FALSE)
