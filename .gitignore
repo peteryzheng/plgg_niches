@@ -1,6 +1,8 @@
 ._*
 niche/logs/*
 niche/banksy_workflow/logs/*
+annotations/STalign/__pycache__/
+annotations/STalign/logs/
 .vdoc.r
 .vdoc.py
 */*/*/figure-html/*
