@@ -89,9 +89,19 @@ seed_val = 55555
 # dropped: it is pan-immune and would leak a myeloid signal onto T cells.
 # Groups with zero panel coverage are omitted entirely: pan-neuronal structural
 # genes, B/plasma, mural/pericyte, and ependymal (FOXJ1 absent).
+#
+# radial_glia trimmed to PAX6 + SOX2 (dropped NES, HES1, SOX9, 2026-08-17):
+# checked single-cell Wilcoxon AUC specificity per gene across all lam0.2
+# clusters and found NES/HES1/SOX9 each peak in a DIFFERENT already-named
+# lineage cluster (NES -> opc, SOX9/HES1 -> astro_glial) rather than the
+# radial_glia-called clusters, so they were diluting the radial_glia group
+# score with a competing lineage's signal instead of adding redundancy.
+# PAX6 was the cleanest, most specific marker; SOX2 kept as a second,
+# still-genuine (if less exclusive) progenitor/stemness gene for some
+# redundancy against single-gene dropout.
 marker_panel = list(
     astro_glial   = c("AQP4", "APOE", "GJA1"),
-    radial_glia   = c("NES", "PAX6", "SOX2", "HES1", "SOX9"),
+    radial_glia   = c("PAX6", "SOX2"),
     opc           = c("OLIG1", "OLIG2", "PDGFRA", "CSPG4", "SOX10", "BCAN", "PTPRZ1"),
     oligo_mature  = c("MOG", "MOBP", "CLDN11", "MAG", "ST18"),
     neuronal      = c("SLC17A7", "SLC17A6", "RORB", "GAD1", "GAD2", "SOX11"),
@@ -438,10 +448,13 @@ marker_df = rbindlist(lapply(lam02_cols, function(cc) {
 }))
 marker_df[, lineage := lineage_of[gene]]
 marker_df[, gene := factor(gene, levels = genes_all)]
+# Strip the redundant "clust_Harmony_BANKSY_" prefix for facet strip labels
+# (every column shares it -- the k/res suffix is what actually varies).
+marker_df[, cluster_col_short := sub("clust_Harmony_BANKSY_", "", cluster_col)]
 
 ggplot(marker_df, aes(x = cluster, y = gene, fill = mean_expr)) +
     geom_tile() +
-    facet_grid(lineage ~ cluster_col, scales = "free", space = "free") +
+    facet_grid(lineage ~ cluster_col_short, scales = "free", space = "free") +
     scale_fill_viridis_c() +
     labs(title = "Marker mean expression per cluster (lam0.2 finalists)",
          x = "cluster", y = NULL) +
@@ -477,10 +490,11 @@ auc_long = rbindlist(lapply(lam02_cols, function(cc) {
 setnames(auc_long, c("feature", "group"), c("gene", "cluster"))
 auc_long[, lineage := lineage_of[gene]]
 auc_long[, gene := factor(gene, levels = genes_all)]
+auc_long[, cluster_col_short := sub("clust_Harmony_BANKSY_", "", cluster_col)]
 
 ggplot(auc_long, aes(x = cluster, y = gene, fill = auc)) +
     geom_tile() +
-    facet_grid(lineage ~ cluster_col, scales = "free", space = "free") +
+    facet_grid(lineage ~ cluster_col_short, scales = "free", space = "free") +
     scale_fill_gradient2(low = "steelblue", mid = "white", high = "firebrick",
                          midpoint = 0.5, limits = c(0, 1),
                          name = "AUC\n(one-vs-rest)") +
