@@ -1,0 +1,2299 @@
+---
+title: "Unassigned Transcripts in Spatial Data"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+---
+
+# Introduction
+
+This notebook quantifies unassigned transcripts in the ProSeg-segmented Xenium
+cohort. The first analysis asks whether any sample has an unusually high
+fraction of gene transcripts assigned to `UNASSIGNED`. The second analysis is
+cell-centric: for a reproducible 10% sample of annotated cells, it calculates
+the percentage of nearby gene transcripts within 50 um of the cell centroid that
+are unassigned. The downstream source-profiling analysis adds a region-centric
+grid of transcript-supported candidate locations, keeps only locations supported
+by nearby segmented cells, and then compares high-unassigned patches against
+their own local assigned transcript milieu.
+
+The primary focus is the cerebellar liponeurocytoma samples (`dx == "LIPN"`),
+but the abnormality ranking uses all Xenium samples as the background.
+
+```{r}
+#| echo: FALSE
+suppressPackageStartupMessages({
+    library(data.table)
+    library(ggplot2)
+    library(knitr)
+    library(arrow)
+    library(readxl)
+    library(rcartocolor)
+    library(SummarizedExperiment)
+    library(SpatialExperiment)
+})
+
+set.seed(5555)
+
+# local vs remote
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # Local mac mount.
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # ERIS2 mount.
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # New server mount.
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    # DIPG/UGER fallback.
+    workdir <- "/xchip/beroukhimlab/"
+}
+workdir = normalizePath(path.expand(workdir), mustWork = FALSE)
+
+data_root = file.path(workdir, "youyun/plgg/data")
+proseg_root = file.path(data_root, "segmentation/proseg_run_121024")
+cache_dir = file.path(data_root, "segmentation/unassigned_transcripts_50um_gene_only")
+dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+
+radius_um = as.numeric(Sys.getenv("UNASSIGNED_RADIUS_UM", "50"))
+cell_sample_fraction = as.numeric(Sys.getenv("UNASSIGNED_CELL_SAMPLE_FRACTION", "0.1"))
+local_seed = as.integer(Sys.getenv("UNASSIGNED_CELL_SAMPLE_SEED", "5555"))
+tail_fraction = as.numeric(Sys.getenv("UNASSIGNED_TAIL_FRACTION", "0.20"))
+if (is.na(tail_fraction) || tail_fraction <= 0 || tail_fraction >= 0.5) {
+    stop("UNASSIGNED_TAIL_FRACTION must be between 0 and 0.5.")
+}
+tail_high_label = "high_unassigned_neighborhood"
+tail_low_label = "low_unassigned_neighborhood"
+tail_enrichment_q_threshold = as.numeric(Sys.getenv("UNASSIGNED_TAIL_ENRICHMENT_Q", "0.10"))
+if (
+    is.na(tail_enrichment_q_threshold) ||
+        tail_enrichment_q_threshold <= 0 ||
+        tail_enrichment_q_threshold > 1
+) {
+    stop("UNASSIGNED_TAIL_ENRICHMENT_Q must be between 0 and 1.")
+}
+region_gene_q_threshold = as.numeric(Sys.getenv("UNASSIGNED_REGION_GENE_Q_THRESHOLD", "0.05"))
+if (
+    is.na(region_gene_q_threshold) ||
+        region_gene_q_threshold <= 0 ||
+        region_gene_q_threshold > 1
+) {
+    stop("UNASSIGNED_REGION_GENE_Q_THRESHOLD must be between 0 and 1.")
+}
+region_gene_min_log2_fc = as.numeric(Sys.getenv("UNASSIGNED_REGION_GENE_MIN_LOG2_FC", "1"))
+if (is.na(region_gene_min_log2_fc) || region_gene_min_log2_fc < 0) {
+    stop("UNASSIGNED_REGION_GENE_MIN_LOG2_FC must be non-negative.")
+}
+region_gene_min_detected_regions = as.integer(
+    Sys.getenv("UNASSIGNED_REGION_GENE_MIN_DETECTED_REGIONS", "10")
+)
+if (is.na(region_gene_min_detected_regions) || region_gene_min_detected_regions < 1) {
+    stop("UNASSIGNED_REGION_GENE_MIN_DETECTED_REGIONS must be a positive integer.")
+}
+region_grid_spacing_um = as.numeric(Sys.getenv("UNASSIGNED_REGION_GRID_SPACING_UM", radius_um))
+if (is.na(region_grid_spacing_um) || region_grid_spacing_um <= 0) {
+    stop("UNASSIGNED_REGION_GRID_SPACING_UM must be positive.")
+}
+min_region_gene_transcripts = as.integer(Sys.getenv("UNASSIGNED_REGION_MIN_GENE_TRANSCRIPTS", "25"))
+if (is.na(min_region_gene_transcripts) || min_region_gene_transcripts < 1) {
+    stop("UNASSIGNED_REGION_MIN_GENE_TRANSCRIPTS must be a positive integer.")
+}
+min_region_assigned_transcripts = as.integer(Sys.getenv("UNASSIGNED_REGION_MIN_ASSIGNED_TRANSCRIPTS", "10"))
+if (is.na(min_region_assigned_transcripts) || min_region_assigned_transcripts < 1) {
+    stop("UNASSIGNED_REGION_MIN_ASSIGNED_TRANSCRIPTS must be a positive integer.")
+}
+min_region_cells_env = Sys.getenv("UNASSIGNED_REGION_MIN_CELLS", "3")
+min_region_cells = suppressWarnings(as.integer(min_region_cells_env))
+if (
+    is.na(min_region_cells) ||
+        min_region_cells < 1 ||
+        !grepl("^[0-9]+$", min_region_cells_env)
+) {
+    stop("UNASSIGNED_REGION_MIN_CELLS must be a positive integer.")
+}
+region_location_sample_n = as.integer(Sys.getenv("UNASSIGNED_REGION_SAMPLE_N", "5000"))
+if (is.na(region_location_sample_n) || region_location_sample_n < 1) {
+    stop("UNASSIGNED_REGION_SAMPLE_N must be a positive integer.")
+}
+tail_fraction_label = gsub(
+    "\\.",
+    "p",
+    format(tail_fraction * 100, trim = TRUE, scientific = FALSE)
+)
+region_grid_spacing_label = gsub(
+    "\\.",
+    "p",
+    format(region_grid_spacing_um, trim = TRUE, scientific = FALSE)
+)
+
+# These environment variables make quick smoke tests possible without editing
+# the notebook or overwriting the full-run cache files.
+sample_id_filter_env = Sys.getenv("UNASSIGNED_SAMPLE_IDS", "")
+sample_id_filter = if (nzchar(sample_id_filter_env)) {
+    strsplit(sample_id_filter_env, ",", fixed = TRUE)[[1]]
+} else {
+    character()
+}
+max_row_groups_env = Sys.getenv("UNASSIGNED_MAX_ROW_GROUPS", "")
+max_row_groups = if (nzchar(max_row_groups_env)) as.integer(max_row_groups_env) else NA_integer_
+force_recompute = Sys.getenv("UNASSIGNED_RECOMPUTE", "0") == "1"
+is_smoke_run = length(sample_id_filter) > 0 || !is.na(max_row_groups)
+
+cache_suffix = if (is_smoke_run) {
+    paste0(
+        "_smoke_",
+        if (length(sample_id_filter) > 0) paste(sample_id_filter, collapse = "-") else "all",
+        "_rg", ifelse(is.na(max_row_groups), "all", max_row_groups)
+    )
+} else {
+    ""
+}
+
+sample_summary_cache = file.path(cache_dir, paste0("sample_gene_unassigned_summary", cache_suffix, ".tsv"))
+cell_metadata_cache = file.path(cache_dir, "banksy_cell_metadata_proseg_centroids.rds")
+sampled_cell_cache = file.path(
+    cache_dir,
+    paste0(
+        "sampled_cells_proseg_centroids_",
+        round(cell_sample_fraction * 100), "pct_seed", local_seed, cache_suffix, ".rds"
+    )
+)
+local_summary_cache = file.path(
+    cache_dir,
+    paste0("cell_local_unassigned_", radius_um, "um_proseg_centroids", cache_suffix, ".tsv")
+)
+region_location_cache = file.path(
+    cache_dir,
+    paste0(
+        "sampled_locations_",
+        radius_um, "um_grid", region_grid_spacing_label, "um_gene_only",
+        "_mincells", min_region_cells,
+        "_n", region_location_sample_n, "_seed", local_seed,
+        cache_suffix, ".tsv"
+    )
+)
+region_local_profile_cache = file.path(
+    cache_dir,
+    paste0(
+        "location_local_gene_profiles_",
+        radius_um, "um_tail", tail_fraction_label, "pct_grid",
+        region_grid_spacing_label, "um_n", region_location_sample_n,
+        "_mincells", min_region_cells, "_seed", local_seed, cache_suffix, ".tsv"
+    )
+)
+region_local_summary_cache = file.path(
+    cache_dir,
+    paste0(
+        "location_local_unassigned_",
+        radius_um, "um_tail", tail_fraction_label, "pct_grid",
+        region_grid_spacing_label, "um_n", region_location_sample_n,
+        "_mincells", min_region_cells, "_seed", local_seed, cache_suffix, ".tsv"
+    )
+)
+```
+
+```{r}
+theme_set(theme_minimal(base_size = 25))
+```
+
+# Inputs and helper functions
+
+```{r}
+xenium_metadata = fread(file.path(data_root, "metadata/Xenium_metadata.csv"))
+setnames(xenium_metadata, "tumor location", "tumor_location")
+xenium_metadata[, `:=`(
+    id = as.character(id),
+    file = as.character(file)
+)]
+
+proseg_dt = data.table(
+    file = list.files(proseg_root, full.names = FALSE, recursive = FALSE)
+)[
+    , parquet_file := file.path(
+        proseg_root, file, paste0(file, "_proseg"), "outs", "transcripts.parquet"
+    )
+][
+    , cells_file := file.path(
+        proseg_root, file, paste0(file, "_proseg"), "outs", "cells.parquet"
+    )
+][
+    xenium_metadata,
+    on = "file"
+][
+    !is.na(id)
+]
+
+if (length(sample_id_filter) > 0) {
+    proseg_dt = proseg_dt[id %in% sample_id_filter]
+}
+
+if (nrow(proseg_dt) == 0) {
+    stop("No ProSeg transcript parquet files matched the metadata/sample filter.")
+}
+
+missing_parquet = proseg_dt[!file.exists(parquet_file)]
+if (nrow(missing_parquet) > 0) {
+    stop(
+        "Missing transcript parquet files for: ",
+        paste(missing_parquet$file, collapse = ", ")
+    )
+}
+missing_cells = proseg_dt[!file.exists(cells_file)]
+if (nrow(missing_cells) > 0) {
+    stop(
+        "Missing ProSeg/Xenium cell centroid files for: ",
+        paste(missing_cells$file, collapse = ", ")
+    )
+}
+
+lipn_sample_ids = xenium_metadata[dx == "LIPN", id]
+proseg_dt[, focus_group := fifelse(id %in% lipn_sample_ids, "LIPN focus", "Comparator")]
+
+kable(proseg_dt[, .(
+    sample_id = id, file, dx, histology = mc, alteration = alt, tumor_location,
+    focus_group
+)][order(dx, sample_id)])
+```
+
+```{r}
+schema_names = function(parquet_file) {
+    names(ParquetFileReader$create(parquet_file)$GetSchema())
+}
+
+column_indices = function(parquet_file, cols) {
+    idx = match(cols, schema_names(parquet_file))
+    if (any(is.na(idx))) {
+        stop(
+            "Missing required parquet columns in ", parquet_file, ": ",
+            paste(cols[is.na(idx)], collapse = ", ")
+        )
+    }
+    idx - 1L
+}
+
+iter_row_groups = function(parquet_file, cols, fun, max_row_groups = NA_integer_) {
+    reader = ParquetFileReader$create(parquet_file)
+    row_groups = seq.int(0L, reader$num_row_groups - 1L)
+    if (!is.na(max_row_groups)) {
+        row_groups = head(row_groups, max_row_groups)
+    }
+    col_idx = column_indices(parquet_file, cols)
+
+    for (row_group in row_groups) {
+        batch = as.data.table(as.data.frame(reader$ReadRowGroup(
+            row_group,
+            column_indices = col_idx
+        )))
+        fun(batch, row_group)
+        rm(batch)
+        gc(verbose = FALSE)
+    }
+    invisible(NULL)
+}
+
+add_sample_outlier_scores = function(sample_summary) {
+    sample_summary = copy(sample_summary)
+    cohort_median = median(sample_summary$prop_gene_unassigned, na.rm = TRUE)
+    cohort_mad = mad(sample_summary$prop_gene_unassigned, constant = 1.4826, na.rm = TRUE)
+    sample_summary[, robust_z := if (cohort_mad > 0) {
+        (prop_gene_unassigned - cohort_median) / cohort_mad
+    } else {
+        NA_real_
+    }]
+    sample_summary[, percentile_rank := frank(
+        prop_gene_unassigned,
+        ties.method = "average"
+    ) / .N]
+    sample_summary[, outlier_tier := fcase(
+        robust_z >= 3, "Strong high outlier",
+        robust_z >= 2, "Moderate high outlier",
+        default = "Not robust high outlier"
+    )]
+    sample_summary[]
+}
+```
+
+# Sample-level unassigned transcript burden
+
+```{r}
+summarize_one_sample = function(sample_row) {
+    sample_row = as.list(sample_row)
+    message("Summarizing gene transcript assignment for sample ", sample_row$id)
+
+    n_gene_transcripts = 0
+    n_gene_unassigned = 0
+
+    iter_row_groups(
+        parquet_file = sample_row$parquet_file,
+        cols = c("cell_id", "is_gene"),
+        max_row_groups = max_row_groups,
+        fun = function(batch, row_group) {
+            gene_idx = !is.na(batch$is_gene) & batch$is_gene
+            n_gene_transcripts <<- n_gene_transcripts + sum(gene_idx)
+            n_gene_unassigned <<- n_gene_unassigned + sum(
+                gene_idx & batch$cell_id == "UNASSIGNED",
+                na.rm = TRUE
+            )
+        }
+    )
+
+    data.table(
+        sample_id = sample_row$id,
+        file = sample_row$file,
+        dx = sample_row$dx,
+        histology = sample_row$mc,
+        alteration = sample_row$alt,
+        tumor_location = sample_row$tumor_location,
+        focus_group = sample_row$focus_group,
+        n_gene_transcripts = n_gene_transcripts,
+        n_gene_unassigned = n_gene_unassigned,
+        n_gene_assigned = n_gene_transcripts - n_gene_unassigned,
+        prop_gene_unassigned = n_gene_unassigned / n_gene_transcripts
+    )
+}
+
+if (!file.exists(sample_summary_cache) || force_recompute) {
+    sample_summary = rbindlist(lapply(seq_len(nrow(proseg_dt)), function(i) {
+        summarize_one_sample(proseg_dt[i])
+    }))
+    sample_summary = add_sample_outlier_scores(sample_summary)
+    fwrite(sample_summary, sample_summary_cache, sep = "\t")
+} else {
+    sample_summary = fread(sample_summary_cache)
+}
+
+sample_summary[, sample_id := as.character(sample_id)]
+sample_summary = sample_summary[order(-prop_gene_unassigned)]
+
+kable(sample_summary[, .(
+    sample_id, dx, histology, tumor_location,
+    n_gene_transcripts,
+    n_gene_unassigned,
+    prop_gene_unassigned = round(prop_gene_unassigned, 4),
+    robust_z = round(robust_z, 2),
+    percentile_rank = round(percentile_rank, 2),
+    outlier_tier
+)])
+```
+
+```{r}
+sample_summary[, sample_id_plot := factor(sample_id, levels = sample_id)]
+
+ggplot(sample_summary, aes(
+    x = sample_id_plot,
+    y = prop_gene_unassigned,
+    fill = dx,
+    alpha = focus_group
+)) +
+    geom_col(color = "grey25", linewidth = 0.2) +
+    geom_text(
+        aes(label = sprintf("%.1f%%", 100 * prop_gene_unassigned)),
+        hjust = -0.1,
+        size = 3.2
+    ) +
+    coord_flip(clip = "off") +
+    scale_alpha_manual(values = c("LIPN focus" = 1, "Comparator" = 0.55)) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1), expand = expansion(mult = c(0, 0.15))) +
+    labs(
+        title = "Sample-level gene transcript unassigned fraction",
+        x = "Sample",
+        y = "Gene transcripts assigned to UNASSIGNED",
+        fill = "Diagnosis",
+        alpha = ""
+    ) +
+    theme(legend.position = "bottom")
+```
+
+```{r}
+ggplot(sample_summary, aes(
+    x = dx,
+    y = prop_gene_unassigned,
+    color = focus_group
+)) +
+    geom_boxplot(aes(group = dx), color = "grey45", outlier.shape = NA) +
+    geom_point(aes(size = n_gene_transcripts), alpha = 0.85) +
+    geom_text(aes(label = sample_id), nudge_y = 0.01, size = 3, show.legend = FALSE) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_color_manual(values = c("LIPN focus" = "#D55E00", "Comparator" = "#0072B2")) +
+    labs(
+        title = "Unassigned gene transcript burden by diagnosis",
+        x = "Diagnosis",
+        y = "Gene transcripts assigned to UNASSIGNED",
+        color = "",
+        size = "Gene transcript count"
+    ) +
+    theme(legend.position = "bottom")
+```
+
+# Cell-centric local unassigned transcript burden
+
+```{r}
+load_banksy_cell_metadata = function() {
+    if (file.exists(cell_metadata_cache) && !force_recompute) {
+        return(readRDS(cell_metadata_cache))
+    }
+
+    banksy_subset_rds_path = file.path(
+        data_root, "Xenium_annotations",
+        "banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+    )
+    banksy_full_rds_path = file.path(
+        data_root, "Xenium_annotations",
+        "banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+    )
+    banksy_rds_path = if (file.exists(banksy_subset_rds_path)) {
+        banksy_subset_rds_path
+    } else {
+        banksy_full_rds_path
+    }
+    message("Using BANKSY annotated object: ", banksy_rds_path)
+
+    banksy_embeddings = readRDS(banksy_rds_path)
+    cell_res = 1
+    cell_clust_name = gsub(
+        ".0$", "",
+        sprintf("clust_Harmony_BANKSY_lam0.2_k50_res%.1f", cell_res)
+    )
+    niche_res = 1
+    niche_clust_name = gsub(
+        ".0$", "",
+        sprintf("clust_Harmony_BANKSY_lam0.8_k50_res%.1f", niche_res)
+    )
+
+    required_cols = c(
+        "cell_id", "sample_id", "histology", "alteration",
+        cell_clust_name, niche_clust_name
+    )
+    missing_cols = setdiff(required_cols, colnames(colData(banksy_embeddings)))
+    if (length(missing_cols) > 0) {
+        stop("Missing required BANKSY metadata columns: ", paste(missing_cols, collapse = ", "))
+    }
+
+    prelim_annotation_res1 = fread(file.path(
+        data_root, "xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv"
+    ))
+    setnames(prelim_annotation_res1, c(
+        "Coarse Cell Type", "Fine Cell Type",
+        "Fine Cell Type UMAP", "Fine Cell Type Annotation"
+    ), c(
+        "coarse_cell_type", "fine_cell_type",
+        "fine_cell_type_umap", "fine_cell_type_annotation"
+    ))
+
+    coords = as.data.table(spatialCoords(banksy_embeddings))
+    setnames(coords, names(coords)[1:2], c("banksy_x", "banksy_y"))
+    cd = as.data.table(as.data.frame(colData(banksy_embeddings)))
+    cell_id_from_coldata = as.character(cd$cell_id)
+    sample_id_from_coldata = as.character(cd$sample_id)
+    sample_suffix = paste0("__", sample_id_from_coldata)
+    banksy_cell_key_from_coldata = ifelse(
+        endsWith(cell_id_from_coldata, sample_suffix),
+        cell_id_from_coldata,
+        paste0(cell_id_from_coldata, sample_suffix)
+    )
+    banksy_cell_key_from_rownames = rownames(colData(banksy_embeddings))
+    banksy_cell_key = ifelse(
+        !is.na(banksy_cell_key_from_rownames) & endsWith(
+            banksy_cell_key_from_rownames,
+            sample_suffix
+        ),
+        banksy_cell_key_from_rownames,
+        banksy_cell_key_from_coldata
+    )
+
+    cell_dt = data.table(
+        cell_key = banksy_cell_key,
+        cell_id = as.character(cd$cell_id),
+        sample_id = as.character(cd$sample_id),
+        histology = as.character(cd$histology),
+        alteration = as.character(cd$alteration),
+        cell_cluster = as.integer(as.character(cd[[cell_clust_name]])),
+        niche_type = as.character(cd[[niche_clust_name]]),
+        pathology_annotation = if ("pathology_annotation" %in% names(cd)) {
+            as.character(cd$pathology_annotation)
+        } else {
+            NA_character_
+        },
+        banksy_x = coords$banksy_x,
+        banksy_y = coords$banksy_y
+    )
+    duplicated_banksy_keys = cell_dt[duplicated(cell_key), unique(cell_key)]
+    if (length(duplicated_banksy_keys) > 0) {
+        stop(
+            "Duplicated BANKSY cell_key values. Examples: ",
+            paste(head(duplicated_banksy_keys, 10), collapse = ", ")
+        )
+    }
+    cell_dt = merge(
+        cell_dt,
+        prelim_annotation_res1,
+        by.x = "cell_cluster",
+        by.y = "cluster",
+        all.x = TRUE,
+        sort = FALSE
+    )
+    cell_dt[is.na(coarse_cell_type), coarse_cell_type := "Other"]
+    cell_dt[is.na(fine_cell_type), fine_cell_type := "Other"]
+
+    # BANKSY spatial coordinates are offset for cohort-level plotting. The
+    # transcript parquet files use per-sample Xenium coordinates, so local
+    # transcript counting must use the per-sample cell centroids from the
+    # ProSeg/Xenium output.
+    proseg_centroids = rbindlist(lapply(seq_len(nrow(proseg_dt)), function(i) {
+        centroid_dt = as.data.table(read_parquet(
+            proseg_dt$cells_file[i],
+            col_select = c("cell_id", "x_centroid", "y_centroid")
+        ))
+        centroid_dt[, `:=`(
+            sample_id = as.character(proseg_dt$id[i]),
+            cell_id = as.character(cell_id)
+        )]
+        centroid_dt[, cell_key := paste0(cell_id, "__", sample_id)]
+        centroid_dt
+    }), use.names = TRUE, fill = TRUE)
+    duplicated_centroid_keys = proseg_centroids[duplicated(cell_key), unique(cell_key)]
+    if (length(duplicated_centroid_keys) > 0) {
+        stop(
+            "Duplicated ProSeg centroid cell_key values. Examples: ",
+            paste(head(duplicated_centroid_keys, 10), collapse = ", ")
+        )
+    }
+
+    cell_dt = merge(
+        cell_dt,
+        proseg_centroids[, .(
+            cell_key,
+            x = x_centroid,
+            y = y_centroid
+        )],
+        by = "cell_key",
+        all.x = TRUE,
+        sort = FALSE
+    )
+    missing_centroids = cell_dt[is.na(x) | is.na(y), .N]
+    if (missing_centroids > 0) {
+        missing_examples = cell_dt[is.na(x) | is.na(y), head(cell_key, 10)]
+        stop(
+            "Missing ProSeg/Xenium centroids for ", missing_centroids,
+            " BANKSY cells. Examples: ",
+            paste(missing_examples, collapse = ", "),
+            ". Cannot compare cells and transcripts in the same coordinate frame."
+        )
+    }
+
+    saveRDS(cell_dt, cell_metadata_cache)
+    cell_dt
+}
+
+cell_metadata = load_banksy_cell_metadata()
+if (length(sample_id_filter) > 0) {
+    cell_metadata = cell_metadata[sample_id %in% sample_id_filter]
+}
+
+kable(cell_metadata[, .(
+    n_cells = .N,
+    n_coarse_cell_types = uniqueN(coarse_cell_type),
+    n_niche_types = uniqueN(niche_type)
+), .(sample_id, histology)][order(sample_id)])
+```
+
+```{r}
+sample_cells_for_local_analysis = function(cell_dt) {
+    if (file.exists(sampled_cell_cache) && !force_recompute) {
+        return(readRDS(sampled_cell_cache))
+    }
+
+    set.seed(local_seed)
+    sampled = cell_dt[
+        ,
+        {
+            n_stratum = .N
+            n_keep = max(1L, ceiling(n_stratum * cell_sample_fraction))
+            keep_idx = sample.int(n_stratum, n_keep)
+            .SD[keep_idx][, `:=`(
+                stratum_n_cells = n_stratum,
+                stratum_sampled_cells = n_keep,
+                sampling_weight = n_stratum / n_keep
+            )]
+        },
+        by = .(sample_id, coarse_cell_type)
+    ]
+    sampled[, local_cell_index := seq_len(.N)]
+    saveRDS(sampled, sampled_cell_cache)
+    sampled
+}
+
+sampled_cells = sample_cells_for_local_analysis(cell_metadata)
+
+kable(sampled_cells[, .(
+    sampled_cells = .N,
+    represented_cells = sum(sampling_weight)
+), .(sample_id, coarse_cell_type)][order(sample_id, coarse_cell_type)])
+```
+
+```{r}
+count_local_unassigned_for_sample = function(sample_row, sampled_cells, radius_um) {
+    sample_row = as.list(sample_row)
+    sample_cells = copy(sampled_cells[sample_id == sample_row$id])
+    if (nrow(sample_cells) == 0) {
+        return(data.table())
+    }
+
+    message(
+        "Counting local gene transcript assignment for sample ",
+        sample_row$id, " with ", nrow(sample_cells), " sampled cells"
+    )
+
+    sample_cells[, cell_index := seq_len(.N)]
+    sample_cells[, `:=`(
+        cell_x = x,
+        cell_y = y,
+        gx = floor(x / radius_um),
+        gy = floor(y / radius_um)
+    )]
+    cell_grid = sample_cells[, .(gx, gy, cell_index, cell_x, cell_y)]
+
+    n_total = integer(nrow(sample_cells))
+    n_unassigned = integer(nrow(sample_cells))
+    radius_sq = radius_um^2
+    bbox = list(
+        xmin = min(sample_cells$cell_x) - radius_um,
+        xmax = max(sample_cells$cell_x) + radius_um,
+        ymin = min(sample_cells$cell_y) - radius_um,
+        ymax = max(sample_cells$cell_y) + radius_um
+    )
+    offsets = CJ(dx = -1L:1L, dy = -1L:1L)
+
+    iter_row_groups(
+        parquet_file = sample_row$parquet_file,
+        cols = c("cell_id", "x_location", "y_location", "is_gene"),
+        max_row_groups = max_row_groups,
+        fun = function(batch, row_group) {
+            # Keep only gene transcript coordinates that could fall in any
+            # sampled-cell radius; this avoids building unnecessary grid joins.
+            batch = batch[
+                !is.na(is_gene) & is_gene &
+                    x_location >= bbox$xmin & x_location <= bbox$xmax &
+                    y_location >= bbox$ymin & y_location <= bbox$ymax,
+                .(
+                    transcript_x = x_location,
+                    transcript_y = y_location,
+                    unassigned = cell_id == "UNASSIGNED"
+                )
+            ]
+            if (nrow(batch) == 0) {
+                return(invisible(NULL))
+            }
+
+            batch[, transcript_index := seq_len(.N)]
+            batch[, `:=`(
+                gx = floor(transcript_x / radius_um),
+                gy = floor(transcript_y / radius_um)
+            )]
+
+            neighbor_bins = batch[rep(seq_len(.N), each = nrow(offsets))]
+            neighbor_bins[, `:=`(
+                gx = gx + rep(offsets$dx, times = nrow(batch)),
+                gy = gy + rep(offsets$dy, times = nrow(batch))
+            )]
+
+            candidates = cell_grid[
+                neighbor_bins,
+                on = .(gx, gy),
+                allow.cartesian = TRUE,
+                nomatch = 0L
+            ]
+            if (nrow(candidates) == 0) {
+                return(invisible(NULL))
+            }
+
+            candidates = candidates[
+                (transcript_x - cell_x)^2 + (transcript_y - cell_y)^2 <= radius_sq
+            ]
+            if (nrow(candidates) == 0) {
+                return(invisible(NULL))
+            }
+
+            counts = candidates[, .(
+                n_gene_transcripts_50um = .N,
+                n_gene_unassigned_50um = sum(unassigned, na.rm = TRUE)
+            ), by = cell_index]
+
+            n_total[counts$cell_index] <<- n_total[counts$cell_index] +
+                counts$n_gene_transcripts_50um
+            n_unassigned[counts$cell_index] <<- n_unassigned[counts$cell_index] +
+                counts$n_gene_unassigned_50um
+            invisible(NULL)
+        }
+    )
+
+    sample_cells[, `:=`(
+        n_gene_transcripts_50um = n_total,
+        n_gene_unassigned_50um = n_unassigned,
+        prop_gene_unassigned_50um = fifelse(n_total > 0, n_unassigned / n_total, NA_real_)
+    )]
+
+    sample_cells[, .(
+        sample_id, cell_key, cell_id, x, y,
+        histology, alteration, coarse_cell_type, fine_cell_type,
+        fine_cell_type_umap, niche_type, pathology_annotation,
+        stratum_n_cells, stratum_sampled_cells, sampling_weight,
+        n_gene_transcripts_50um, n_gene_unassigned_50um,
+        prop_gene_unassigned_50um
+    )]
+}
+
+if (!file.exists(local_summary_cache) || force_recompute) {
+    local_unassigned = rbindlist(lapply(seq_len(nrow(proseg_dt)), function(i) {
+        count_local_unassigned_for_sample(proseg_dt[i], sampled_cells, radius_um)
+    }), use.names = TRUE, fill = TRUE)
+    fwrite(local_unassigned, local_summary_cache, sep = "\t")
+} else {
+    local_unassigned = fread(local_summary_cache)
+}
+
+local_unassigned[, sample_id := as.character(sample_id)]
+local_unassigned = local_unassigned[
+    !is.na(prop_gene_unassigned_50um) & n_gene_transcripts_50um > 0
+]
+
+if (nrow(local_unassigned) == 0) {
+    message(
+        "No sampled cells had gene transcripts within ", radius_um,
+        " um after filtering. Local milieu summaries and plots will be skipped."
+    )
+}
+
+kable(local_unassigned[, .(
+    sampled_cells_with_transcripts = .N,
+    median_local_unassigned = round(median(prop_gene_unassigned_50um, na.rm = TRUE), 4),
+    aggregate_local_unassigned = round(
+        sum(n_gene_unassigned_50um) / sum(n_gene_transcripts_50um),
+        4
+    )
+), .(sample_id, histology)][order(-aggregate_local_unassigned)])
+```
+
+```{r}
+if (nrow(local_unassigned) > 0) {
+    cell_type_local_summary = local_unassigned[, .(
+        sampled_cells = .N,
+        represented_cells = sum(sampling_weight),
+        median_local_unassigned = median(prop_gene_unassigned_50um, na.rm = TRUE),
+        iqr_local_unassigned = IQR(prop_gene_unassigned_50um, na.rm = TRUE),
+        aggregate_gene_transcripts_50um = sum(n_gene_transcripts_50um),
+        aggregate_gene_unassigned_50um = sum(n_gene_unassigned_50um),
+        aggregate_local_unassigned = sum(n_gene_unassigned_50um) / sum(n_gene_transcripts_50um)
+    ), .(
+        focus_group = fifelse(sample_id %in% lipn_sample_ids, "LIPN focus", "Comparator"),
+        coarse_cell_type
+    )]
+
+    cell_type_local_summary = cell_type_local_summary[order(
+        focus_group,
+        -aggregate_local_unassigned
+    )]
+} else {
+    cell_type_local_summary = data.table(
+        focus_group = character(),
+        coarse_cell_type = character(),
+        sampled_cells = integer(),
+        represented_cells = numeric(),
+        median_local_unassigned = numeric(),
+        iqr_local_unassigned = numeric(),
+        aggregate_local_unassigned = numeric(),
+        aggregate_gene_transcripts_50um = integer(),
+        aggregate_gene_unassigned_50um = integer()
+    )
+}
+
+kable(cell_type_local_summary[, .(
+    focus_group, coarse_cell_type, sampled_cells,
+    represented_cells = round(represented_cells),
+    median_local_unassigned = round(median_local_unassigned, 4),
+    iqr_local_unassigned = round(iqr_local_unassigned, 4),
+    aggregate_local_unassigned = round(aggregate_local_unassigned, 4),
+    aggregate_gene_transcripts_50um,
+    aggregate_gene_unassigned_50um
+)])
+```
+
+```{r}
+cell_type_levels = sort(unique(local_unassigned$coarse_cell_type))
+
+if (length(cell_type_levels) > 0) {
+    safe_native = rcartocolor::cartocolors$Safe
+    safe_colors = rcartocolor::carto_pal(
+        n = min(length(cell_type_levels), length(safe_native)),
+        name = "Safe"
+    )
+
+    if (length(cell_type_levels) > length(safe_colors)) {
+        safe_colors = grDevices::colorRampPalette(safe_colors)(length(cell_type_levels))
+    }
+
+    cell_type_palette = setNames(safe_colors[seq_along(cell_type_levels)], cell_type_levels)
+} else {
+    cell_type_palette = character()
+}
+```
+
+```{r}
+#| fig-height: 12
+if (nrow(local_unassigned) > 0) {
+    ggplot(local_unassigned, aes(
+        x = reorder(coarse_cell_type, prop_gene_unassigned_50um, FUN = median),
+        y = prop_gene_unassigned_50um,
+        fill = coarse_cell_type
+    )) +
+        geom_boxplot(outlier.alpha = 0.15, linewidth = 0.2) +
+        facet_wrap(
+            ~ histology,
+            nrow = 2,
+            scales = "free_x"
+        ) +
+        scale_fill_manual(values = cell_type_palette, drop = FALSE) +
+        scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+        labs(
+            title = paste0("Local unassigned gene transcript burden within ", radius_um, " um"),
+            x = "Coarse cell type",
+            y = "Nearby gene transcripts assigned to UNASSIGNED",
+            fill = "Coarse cell type"
+        ) +
+        theme(
+            axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position = "none"
+        )
+} else {
+    message("Skipping cell-type local unassigned plot because local_unassigned has no rows.")
+}
+```
+
+```{r}
+#| fig-height: 10
+if (nrow(local_unassigned) > 0) {
+    ggplot(local_unassigned, aes(
+        x = sample_id,
+        y = prop_gene_unassigned_50um,
+        fill = coarse_cell_type
+    )) +
+        geom_boxplot(outlier.alpha = 0.1, linewidth = 0.2) +
+        facet_wrap(~ histology, scales = "free_x") +
+        scale_fill_manual(values = cell_type_palette, drop = FALSE) +
+        scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+        guides(fill = guide_legend(nrow = 3, byrow = TRUE)) +
+        labs(
+            title = paste0("Sample-level cell milieu burden within ", radius_um, " um"),
+            x = "Sample",
+            y = "Nearby gene transcripts assigned to UNASSIGNED",
+            fill = "Coarse cell type"
+        ) +
+        theme(
+            axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position = "bottom"
+        )
+} else {
+    message("Skipping sample-level local unassigned plot because local_unassigned has no rows.")
+}
+```
+
+```{r}
+#| fig-height: 10
+#| fig-width: 12
+
+spatial_local = copy(local_unassigned)
+
+if (nrow(spatial_local) > 0) {
+    ggplot(spatial_local, aes(
+        x = x,
+        y = y,
+        color = prop_gene_unassigned_50um
+    )) +
+        geom_point(size = 0.25, alpha = 0.9) +
+        facet_wrap(~ histology + sample_id, ncol = 4) +
+        scale_color_viridis_c(
+            labels = scales::percent_format(accuracy = 1),
+            option = "magma"
+        ) +
+        coord_equal() +
+        labs(
+            title = paste0("All sampled cells colored by local ", radius_um, " um unassigned burden"),
+            x = "X location",
+            y = "Y location",
+            color = "Unassigned"
+        ) +
+        theme(
+            axis.text = element_blank(),
+            axis.ticks = element_blank(),
+            panel.grid = element_blank()
+        )
+}
+```
+
+# Region-centered high-unassigned neighborhoods
+
+The cell-centered plots above use sampled cell centroids as neighborhood anchors.
+That asks which segmented cells sit near unassigned transcripts. The region-centered
+analysis below instead starts from a deterministic grid of transcript-containing
+candidate locations, then keeps only grid locations with nearby segmented-cell
+support before counting local transcripts. This makes the tissue-supported patch
+the unit of analysis, then asks whether the unassigned transcripts in that patch
+resemble the assigned transcript milieu already observed in the same 50 um disk.
+
+```{r}
+sample_region_locations_for_sample = function(
+    sample_row, grid_spacing_um, cell_metadata, radius_um, min_region_cells
+) {
+    sample_row = as.list(sample_row)
+    message("Sampling transcript-supported grid locations for sample ", sample_row$id)
+
+    occupied_bins = list()
+    iter_row_groups(
+        parquet_file = sample_row$parquet_file,
+        cols = c("x_location", "y_location", "is_gene"),
+        max_row_groups = max_row_groups,
+        fun = function(batch, row_group) {
+            batch = batch[
+                !is.na(is_gene) & is_gene,
+                .(
+                    gx = floor(x_location / grid_spacing_um),
+                    gy = floor(y_location / grid_spacing_um)
+                )
+            ]
+            if (nrow(batch) == 0) {
+                return(invisible(NULL))
+            }
+
+            occupied_bins[[length(occupied_bins) + 1L]] <<- batch[
+                ,
+                .(seed_gene_transcripts = .N),
+                by = .(gx, gy)
+            ]
+            invisible(NULL)
+        }
+    )
+
+    if (length(occupied_bins) == 0) {
+        return(data.table())
+    }
+
+    candidate_locations = rbindlist(occupied_bins, use.names = TRUE)[
+        ,
+        .(seed_gene_transcripts = sum(seed_gene_transcripts)),
+        by = .(gx, gy)
+    ][order(gx, gy)]
+    candidate_locations[, candidate_grid_locations := .N]
+
+    # Bound the region-centered analysis so notebook renders remain practical.
+    # Sampling from transcript-supported grid bins preserves tissue coverage while
+    # avoiding a full all-grid neighborhood count.
+    if (nrow(candidate_locations) > region_location_sample_n) {
+        set.seed(local_seed + as.integer(sample_row$id))
+        keep_idx = sample.int(nrow(candidate_locations), region_location_sample_n)
+        region_locations = candidate_locations[keep_idx][order(gx, gy)]
+    } else {
+        region_locations = candidate_locations
+    }
+
+    region_locations[, `:=`(
+        sample_id = as.character(sample_row$id),
+        histology = as.character(sample_row$mc),
+        alteration = as.character(sample_row$alt),
+        location_id = sprintf("grid_%s_%s", gx, gy),
+        x = (gx + 0.5) * grid_spacing_um,
+        y = (gy + 0.5) * grid_spacing_um
+    )]
+    region_locations[, region_key := paste0(location_id, "__", sample_id)]
+
+    # Tissue support is defined from nearby segmented-cell centroids before any
+    # expensive transcript-radius counting. This removes transcript-only,
+    # out-of-tissue grid bins from the high-unassigned tail definition.
+    sample_cells = copy(cell_metadata[sample_id == sample_row$id])
+    if (nrow(sample_cells) == 0) {
+        stop("No cell centroids available for sample ", sample_row$id)
+    }
+    region_locations[, location_index := seq_len(.N)]
+    region_locations[, sampled_candidate_grid_locations := .N]
+    region_locations[, `:=`(
+        local_gx = floor(x / radius_um),
+        local_gy = floor(y / radius_um)
+    )]
+    location_grid = region_locations[, .(
+        local_gx, local_gy, location_index, location_x = x, location_y = y
+    )]
+
+    sample_cells[, `:=`(
+        local_gx = floor(x / radius_um),
+        local_gy = floor(y / radius_um),
+        cell_x = x,
+        cell_y = y
+    )]
+    offsets = CJ(dx = -1L:1L, dy = -1L:1L)
+    neighbor_bins = sample_cells[rep(seq_len(.N), each = nrow(offsets))]
+    neighbor_bins[, `:=`(
+        local_gx = local_gx + rep(offsets$dx, times = nrow(sample_cells)),
+        local_gy = local_gy + rep(offsets$dy, times = nrow(sample_cells))
+    )]
+
+    nearby_cells = location_grid[
+        neighbor_bins,
+        on = .(local_gx, local_gy),
+        allow.cartesian = TRUE,
+        nomatch = 0L
+    ][
+        (cell_x - location_x)^2 + (cell_y - location_y)^2 <= radius_um^2
+    ]
+    if (nrow(nearby_cells) > 0) {
+        cell_support = nearby_cells[, .(
+            n_cells_50um = .N,
+            n_coarse_cell_types_50um = uniqueN(coarse_cell_type)
+        ), by = location_index]
+        region_locations = merge(
+            region_locations,
+            cell_support,
+            by = "location_index",
+            all.x = TRUE,
+            sort = FALSE
+        )
+    } else {
+        region_locations[, `:=`(
+            n_cells_50um = 0L,
+            n_coarse_cell_types_50um = 0L
+        )]
+    }
+    region_locations[is.na(n_cells_50um), n_cells_50um := 0L]
+    region_locations[
+        is.na(n_coarse_cell_types_50um),
+        n_coarse_cell_types_50um := 0L
+    ]
+    region_locations = region_locations[n_cells_50um >= min_region_cells]
+    if (nrow(region_locations) == 0) {
+        return(data.table())
+    }
+
+    region_locations[, .(
+        sample_id, region_key, location_id, gx, gy, x, y,
+        histology, alteration, seed_gene_transcripts,
+        candidate_grid_locations, sampled_candidate_grid_locations,
+        n_cells_50um, n_coarse_cell_types_50um
+    )]
+}
+
+if (!file.exists(region_location_cache) || force_recompute) {
+    region_locations = rbindlist(lapply(seq_len(nrow(proseg_dt)), function(i) {
+        sample_region_locations_for_sample(
+            proseg_dt[i],
+            region_grid_spacing_um,
+            cell_metadata,
+            radius_um,
+            min_region_cells
+        )
+    }), use.names = TRUE, fill = TRUE)
+    fwrite(region_locations, region_location_cache, sep = "\t")
+} else {
+    region_locations = fread(region_location_cache)
+}
+
+region_locations[, sample_id := as.character(sample_id)]
+
+kable(region_locations[, .(
+    sampled_candidate_grid_locations = unique(sampled_candidate_grid_locations)[1],
+    cell_supported_grid_locations = .N,
+    candidate_grid_locations = unique(candidate_grid_locations)[1],
+    region_sampling_fraction = unique(sampled_candidate_grid_locations)[1] /
+        unique(candidate_grid_locations)[1],
+    cell_support_retention_fraction = .N /
+        unique(sampled_candidate_grid_locations)[1],
+    median_cells_50um = as.numeric(median(n_cells_50um)),
+    median_coarse_cell_types_50um = as.numeric(median(n_coarse_cell_types_50um)),
+    median_seed_gene_transcripts = as.numeric(median(seed_gene_transcripts)),
+    grid_spacing_um = region_grid_spacing_um
+), by = .(sample_id, histology)][order(sample_id)])
+```
+
+```{r}
+count_region_unassigned_for_sample = function(sample_row, region_locations, radius_um) {
+    sample_row = as.list(sample_row)
+    sample_locations = copy(region_locations[sample_id == sample_row$id])
+    if (nrow(sample_locations) == 0) {
+        return(data.table())
+    }
+
+    message(
+        "Counting local gene transcript assignment for sample ",
+        sample_row$id, " with ", nrow(sample_locations), " grid locations"
+    )
+
+    # These locations have already passed the segmented-cell support threshold;
+    # transcript counts are only computed for tissue-supported neighborhoods.
+    sample_locations[, location_index := seq_len(.N)]
+    sample_locations[, `:=`(
+        location_x = x,
+        location_y = y,
+        local_gx = floor(x / radius_um),
+        local_gy = floor(y / radius_um)
+    )]
+    location_grid = sample_locations[, .(
+        local_gx, local_gy, location_index, location_x, location_y
+    )]
+
+    n_total = integer(nrow(sample_locations))
+    n_unassigned = integer(nrow(sample_locations))
+    radius_sq = radius_um^2
+    bbox = list(
+        xmin = min(sample_locations$location_x) - radius_um,
+        xmax = max(sample_locations$location_x) + radius_um,
+        ymin = min(sample_locations$location_y) - radius_um,
+        ymax = max(sample_locations$location_y) + radius_um
+    )
+    offsets = CJ(dx = -1L:1L, dy = -1L:1L)
+
+    iter_row_groups(
+        parquet_file = sample_row$parquet_file,
+        cols = c("cell_id", "x_location", "y_location", "is_gene"),
+        max_row_groups = max_row_groups,
+        fun = function(batch, row_group) {
+            # Keep only gene transcripts that can fall in at least one grid disk.
+            batch = batch[
+                !is.na(is_gene) & is_gene &
+                    x_location >= bbox$xmin & x_location <= bbox$xmax &
+                    y_location >= bbox$ymin & y_location <= bbox$ymax,
+                .(
+                    transcript_x = x_location,
+                    transcript_y = y_location,
+                    unassigned = cell_id == "UNASSIGNED"
+                )
+            ]
+            if (nrow(batch) == 0) {
+                return(invisible(NULL))
+            }
+
+            batch[, `:=`(
+                local_gx = floor(transcript_x / radius_um),
+                local_gy = floor(transcript_y / radius_um)
+            )]
+            neighbor_bins = batch[rep(seq_len(.N), each = nrow(offsets))]
+            neighbor_bins[, `:=`(
+                local_gx = local_gx + rep(offsets$dx, times = nrow(batch)),
+                local_gy = local_gy + rep(offsets$dy, times = nrow(batch))
+            )]
+
+            candidates = location_grid[
+                neighbor_bins,
+                on = .(local_gx, local_gy),
+                allow.cartesian = TRUE,
+                nomatch = 0L
+            ]
+            if (nrow(candidates) == 0) {
+                return(invisible(NULL))
+            }
+
+            candidates = candidates[
+                (transcript_x - location_x)^2 +
+                    (transcript_y - location_y)^2 <= radius_sq
+            ]
+            if (nrow(candidates) == 0) {
+                return(invisible(NULL))
+            }
+
+            counts = candidates[, .(
+                n_gene_transcripts_50um = .N,
+                n_gene_unassigned_50um = sum(unassigned, na.rm = TRUE)
+            ), by = location_index]
+            n_total[counts$location_index] <<- n_total[counts$location_index] +
+                counts$n_gene_transcripts_50um
+            n_unassigned[counts$location_index] <<- n_unassigned[counts$location_index] +
+                counts$n_gene_unassigned_50um
+            invisible(NULL)
+        }
+    )
+
+    sample_locations[, `:=`(
+        n_gene_transcripts_50um = n_total,
+        n_gene_unassigned_50um = n_unassigned,
+        n_gene_assigned_50um = n_total - n_unassigned,
+        prop_gene_unassigned_50um = fifelse(n_total > 0, n_unassigned / n_total, NA_real_)
+    )]
+    sample_locations[, .(
+        sample_id, region_key, location_id, x, y, gx, gy,
+        histology, alteration, seed_gene_transcripts,
+        candidate_grid_locations, sampled_candidate_grid_locations,
+        n_cells_50um, n_coarse_cell_types_50um,
+        n_gene_transcripts_50um, n_gene_unassigned_50um,
+        n_gene_assigned_50um, prop_gene_unassigned_50um
+    )]
+}
+
+if (!file.exists(region_local_summary_cache) || force_recompute) {
+    region_local_unassigned = rbindlist(lapply(seq_len(nrow(proseg_dt)), function(i) {
+        count_region_unassigned_for_sample(proseg_dt[i], region_locations, radius_um)
+    }), use.names = TRUE, fill = TRUE)
+
+    # Tail assignment uses only tissue-supported regions with enough local
+    # total and assigned transcript support. Keeping the assigned-transcript
+    # floor here prevents all-unassigned locations from defining the high tail.
+    region_local_unassigned = region_local_unassigned[
+        !is.na(prop_gene_unassigned_50um) &
+            n_cells_50um >= min_region_cells &
+            n_gene_transcripts_50um >= min_region_gene_transcripts &
+            n_gene_assigned_50um >= min_region_assigned_transcripts
+    ]
+    region_thresholds = region_local_unassigned[, .(
+        low_unassigned_threshold = quantile(
+            prop_gene_unassigned_50um,
+            probs = tail_fraction,
+            na.rm = TRUE
+        ),
+        high_unassigned_threshold = quantile(
+            prop_gene_unassigned_50um,
+            probs = 1 - tail_fraction,
+            na.rm = TRUE
+        ),
+        n_supported_locations = .N
+    ), by = sample_id]
+    region_local_unassigned = merge(
+        region_local_unassigned,
+        region_thresholds,
+        by = "sample_id",
+        all.x = TRUE,
+        sort = FALSE
+    )
+    region_local_unassigned[, `:=`(
+        local_unassigned_rank = frank(
+            prop_gene_unassigned_50um,
+            ties.method = "average"
+        ),
+        tail_label = fcase(
+            prop_gene_unassigned_50um >= high_unassigned_threshold,
+            tail_high_label,
+            prop_gene_unassigned_50um <= low_unassigned_threshold,
+            tail_low_label,
+            default = "middle"
+        )
+    ), by = sample_id]
+    region_local_unassigned[, local_unassigned_percentile := (
+        local_unassigned_rank - 0.5
+    ) / n_supported_locations]
+    fwrite(region_local_unassigned, region_local_summary_cache, sep = "\t")
+} else {
+    region_local_unassigned = fread(region_local_summary_cache)
+}
+
+region_local_unassigned[, sample_id := as.character(sample_id)]
+
+if (nrow(region_local_unassigned) > 0) {
+    region_tail_summary = region_local_unassigned[, .(
+        sampled_locations = .N,
+        median_local_unassigned = median(prop_gene_unassigned_50um, na.rm = TRUE),
+        aggregate_local_unassigned = sum(n_gene_unassigned_50um) /
+            sum(n_gene_transcripts_50um),
+        median_gene_transcripts_50um = as.numeric(median(n_gene_transcripts_50um)),
+        median_gene_assigned_50um = as.numeric(median(n_gene_assigned_50um)),
+        median_cells_50um = as.numeric(median(n_cells_50um)),
+        median_coarse_cell_types_50um = as.numeric(median(n_coarse_cell_types_50um))
+    ), by = .(sample_id, histology, tail_label)][
+        order(sample_id, factor(tail_label, levels = c(
+            tail_high_label, "middle", tail_low_label
+        )))
+    ]
+
+    kable(region_tail_summary[, .(
+        sample_id,
+        histology,
+        tail_label,
+        sampled_locations,
+        median_cells_50um = round(median_cells_50um),
+        median_coarse_cell_types_50um = round(median_coarse_cell_types_50um),
+        median_gene_transcripts_50um = round(median_gene_transcripts_50um),
+        median_gene_assigned_50um = round(median_gene_assigned_50um),
+        median_local_unassigned = round(median_local_unassigned, 4),
+        aggregate_local_unassigned = round(aggregate_local_unassigned, 4)
+    )])
+} else {
+    message("Skipping region tail labels because no supported grid locations are available.")
+}
+```
+
+```{r}
+#| fig-height: 10
+#| fig-width: 12
+if (nrow(region_local_unassigned) > 0) {
+    ggplot(region_local_unassigned, aes(
+        x = x,
+        y = y,
+        color = prop_gene_unassigned_50um
+    )) +
+        geom_point(size = 0.2, alpha = 0.85) +
+        facet_wrap(~ histology + sample_id, ncol = 4) +
+        scale_color_viridis_c(
+            labels = scales::percent_format(accuracy = 1),
+            option = "magma"
+        ) +
+        coord_equal() +
+        labs(
+            title = paste0("Grid locations colored by local ", radius_um, " um unassigned burden"),
+            x = "X location",
+            y = "Y location",
+            color = "Unassigned"
+        ) +
+        theme(
+            axis.text = element_blank(),
+            axis.ticks = element_blank(),
+            panel.grid = element_blank()
+        )
+}
+```
+
+```{r}
+count_region_gene_profiles_for_sample = function(
+    sample_row, region_local_unassigned, cell_metadata, radius_um
+) {
+    sample_row = as.list(sample_row)
+    sample_locations = copy(region_local_unassigned[
+        sample_id == sample_row$id &
+            tail_label %in% c(tail_high_label, tail_low_label)
+    ])
+    if (nrow(sample_locations) == 0) {
+        return(data.table())
+    }
+
+    message(
+        "Counting region-level gene profiles for sample ",
+        sample_row$id, " with ", nrow(sample_locations), " high/low-tail locations"
+    )
+
+    sample_locations[, location_index := seq_len(.N)]
+    sample_locations[, `:=`(
+        location_x = x,
+        location_y = y,
+        local_gx = floor(x / radius_um),
+        local_gy = floor(y / radius_um)
+    )]
+    location_grid = sample_locations[, .(
+        local_gx, local_gy, location_index, location_x, location_y
+    )]
+
+    transcript_source_map = unique(cell_metadata[
+        sample_id == sample_row$id,
+        .(
+            transcript_cell_id = as.character(cell_id),
+            transcript_coarse_cell_type = as.character(coarse_cell_type)
+        )
+    ])
+
+    radius_sq = radius_um^2
+    bbox = list(
+        xmin = min(sample_locations$location_x) - radius_um,
+        xmax = max(sample_locations$location_x) + radius_um,
+        ymin = min(sample_locations$location_y) - radius_um,
+        ymax = max(sample_locations$location_y) + radius_um
+    )
+    offsets = CJ(dx = -1L:1L, dy = -1L:1L)
+    counts_list = list()
+
+    iter_row_groups(
+        parquet_file = sample_row$parquet_file,
+        cols = c("cell_id", "feature_name", "x_location", "y_location", "is_gene"),
+        max_row_groups = max_row_groups,
+        fun = function(batch, row_group) {
+            batch = batch[
+                !is.na(is_gene) & is_gene &
+                    x_location >= bbox$xmin & x_location <= bbox$xmax &
+                    y_location >= bbox$ymin & y_location <= bbox$ymax,
+                .(
+                    transcript_cell_id = as.character(cell_id),
+                    feature_name = as.character(feature_name),
+                    transcript_x = x_location,
+                    transcript_y = y_location
+                )
+            ]
+            if (nrow(batch) == 0) {
+                return(invisible(NULL))
+            }
+
+            batch = merge(
+                batch,
+                transcript_source_map,
+                by = "transcript_cell_id",
+                all.x = TRUE,
+                sort = FALSE
+            )
+            batch[, assignment_group := fifelse(
+                transcript_cell_id == "UNASSIGNED",
+                "UNASSIGNED",
+                "ASSIGNED"
+            )]
+            batch[
+                assignment_group == "UNASSIGNED",
+                transcript_coarse_cell_type := "UNASSIGNED"
+            ]
+            batch[
+                assignment_group == "ASSIGNED" & is.na(transcript_coarse_cell_type),
+                transcript_coarse_cell_type := "Assigned unannotated"
+            ]
+
+            batch[, `:=`(
+                local_gx = floor(transcript_x / radius_um),
+                local_gy = floor(transcript_y / radius_um)
+            )]
+            neighbor_bins = batch[rep(seq_len(.N), each = nrow(offsets))]
+            neighbor_bins[, `:=`(
+                local_gx = local_gx + rep(offsets$dx, times = nrow(batch)),
+                local_gy = local_gy + rep(offsets$dy, times = nrow(batch))
+            )]
+
+            candidates = location_grid[
+                neighbor_bins,
+                on = .(local_gx, local_gy),
+                allow.cartesian = TRUE,
+                nomatch = 0L
+            ]
+            if (nrow(candidates) == 0) {
+                return(invisible(NULL))
+            }
+
+            candidates = candidates[
+                (transcript_x - location_x)^2 +
+                    (transcript_y - location_y)^2 <= radius_sq
+            ]
+            if (nrow(candidates) == 0) {
+                return(invisible(NULL))
+            }
+
+            counts_list[[length(counts_list) + 1L]] <<- candidates[, .(
+                n_transcripts = .N
+            ), by = .(
+                location_index,
+                feature_name,
+                assignment_group,
+                transcript_coarse_cell_type
+            )]
+            invisible(NULL)
+        }
+    )
+
+    if (length(counts_list) == 0) {
+        return(data.table())
+    }
+
+    profile_counts = rbindlist(counts_list, use.names = TRUE)[
+        ,
+        .(n_transcripts = sum(n_transcripts)),
+        by = .(
+            location_index, feature_name, assignment_group,
+            transcript_coarse_cell_type
+        )
+    ]
+
+    merge(
+        sample_locations[, .(
+            location_index, sample_id, region_key, location_id,
+            histology, alteration, x, y, tail_label,
+            n_cells_50um, n_coarse_cell_types_50um,
+            n_gene_transcripts_50um, n_gene_unassigned_50um,
+            n_gene_assigned_50um
+        )],
+        profile_counts,
+        by = "location_index",
+        all.y = TRUE,
+        sort = FALSE
+    )[, location_index := NULL][]
+}
+
+if (nrow(region_local_unassigned) > 0 &&
+        (!file.exists(region_local_profile_cache) || force_recompute)) {
+    region_local_profiles = rbindlist(lapply(seq_len(nrow(proseg_dt)), function(i) {
+        count_region_gene_profiles_for_sample(
+            proseg_dt[i],
+            region_local_unassigned,
+            cell_metadata,
+            radius_um
+        )
+    }), use.names = TRUE, fill = TRUE)
+    fwrite(region_local_profiles, region_local_profile_cache, sep = "\t")
+} else if (file.exists(region_local_profile_cache)) {
+    region_local_profiles = fread(region_local_profile_cache)
+} else {
+    region_local_profiles = data.table()
+}
+
+if (nrow(region_local_profiles) > 0) {
+    region_local_profiles[, sample_id := as.character(sample_id)]
+    kable(region_local_profiles[, .(
+        profiled_locations = uniqueN(region_key),
+        n_gene_profile_rows = .N,
+        n_profile_transcripts = sum(n_transcripts),
+        n_unassigned_profile_transcripts = sum(
+            n_transcripts[assignment_group == "UNASSIGNED"],
+            na.rm = TRUE
+        )
+    ), by = .(sample_id, histology, tail_label)][order(sample_id, tail_label)])
+} else {
+    message("Skipping region gene profile summaries because no region profile rows are available.")
+}
+```
+
+```{r}
+compute_region_cell_type_enrichment = function(region_local_profiles, pseudocount = 0.5) {
+    if (nrow(region_local_profiles) == 0) {
+        return(data.table())
+    }
+
+    assigned_dt = region_local_profiles[
+        assignment_group == "ASSIGNED" &
+            tail_label %in% c(tail_high_label, tail_low_label),
+        .(
+            n_transcripts = sum(n_transcripts),
+            n_locations = uniqueN(region_key)
+        ),
+        by = .(
+            sample_id, histology, tail_label,
+            coarse_cell_type = transcript_coarse_cell_type
+        )
+    ]
+    if (nrow(assigned_dt) == 0) {
+        return(data.table())
+    }
+
+    sample_cell_types = unique(assigned_dt[, .(sample_id, histology, coarse_cell_type)])
+    tail_labels = data.table(tail_label = c(tail_high_label, tail_low_label))
+    sample_cell_types[, cross_join_key := 1L]
+    tail_labels[, cross_join_key := 1L]
+    enrichment_grid = merge(
+        sample_cell_types,
+        tail_labels,
+        by = "cross_join_key",
+        allow.cartesian = TRUE
+    )[, cross_join_key := NULL]
+
+    assigned_dt = merge(
+        enrichment_grid,
+        assigned_dt,
+        by = c("sample_id", "histology", "coarse_cell_type", "tail_label"),
+        all.x = TRUE,
+        sort = FALSE
+    )
+    assigned_dt[is.na(n_transcripts), n_transcripts := 0L]
+    assigned_dt[is.na(n_locations), n_locations := 0L]
+
+    tail_totals = assigned_dt[, .(
+        total_assigned_transcripts = sum(n_transcripts)
+    ), by = .(sample_id, tail_label)]
+    assigned_dt = merge(
+        assigned_dt,
+        tail_totals,
+        by = c("sample_id", "tail_label"),
+        all.x = TRUE,
+        sort = FALSE
+    )
+
+    enrichment_wide = dcast(
+        assigned_dt,
+        sample_id + histology + coarse_cell_type ~ tail_label,
+        value.var = c("n_transcripts", "total_assigned_transcripts"),
+        fill = 0
+    )
+    high_count_col = paste0("n_transcripts_", tail_high_label)
+    low_count_col = paste0("n_transcripts_", tail_low_label)
+    high_total_col = paste0("total_assigned_transcripts_", tail_high_label)
+    low_total_col = paste0("total_assigned_transcripts_", tail_low_label)
+    for (missing_col in setdiff(
+        c(high_count_col, low_count_col, high_total_col, low_total_col),
+        names(enrichment_wide)
+    )) {
+        enrichment_wide[, (missing_col) := 0]
+    }
+
+    n_types = uniqueN(enrichment_wide$coarse_cell_type)
+    enrichment_wide[, `:=`(
+        high_count = as.integer(get(high_count_col)),
+        low_count = as.integer(get(low_count_col)),
+        high_total = as.integer(get(high_total_col)),
+        low_total = as.integer(get(low_total_col))
+    )]
+    enrichment_wide[, `:=`(
+        high_fraction = (high_count + pseudocount) /
+            (high_total + pseudocount * n_types),
+        low_fraction = (low_count + pseudocount) /
+            (low_total + pseudocount * n_types)
+    )]
+    enrichment_wide[, log2_high_low_fc := log2(high_fraction / low_fraction)]
+    enrichment_wide[, fisher_p_value := mapply(
+        function(high_count, high_total, low_count, low_total) {
+            fisher.test(matrix(
+                c(
+                    high_count,
+                    max(high_total - high_count, 0),
+                    low_count,
+                    max(low_total - low_count, 0)
+                ),
+                nrow = 2,
+                byrow = TRUE
+            ))$p.value
+        },
+        high_count,
+        high_total,
+        low_count,
+        low_total
+    )]
+    enrichment_wide[, fisher_q_value := p.adjust(fisher_p_value, method = "BH"), by = sample_id]
+    enrichment_wide[, .(
+        sample_id, histology, coarse_cell_type,
+        high_count, low_count, high_total, low_total,
+        high_fraction, low_fraction, log2_high_low_fc,
+        fisher_p_value, fisher_q_value
+    )][order(sample_id, -log2_high_low_fc)]
+}
+
+region_cell_type_enrichment = compute_region_cell_type_enrichment(region_local_profiles)
+
+if (nrow(region_cell_type_enrichment) > 0) {
+    kable(region_cell_type_enrichment[, .(
+        sample_id,
+        histology,
+        coarse_cell_type,
+        high_count,
+        low_count,
+        high_fraction = round(high_fraction, 3),
+        low_fraction = round(low_fraction, 3),
+        log2_high_low_fc = round(log2_high_low_fc, 2),
+        fisher_p_value = signif(fisher_p_value, 3),
+        fisher_q_value = signif(fisher_q_value, 3)
+    )])
+} else {
+    message("Skipping region cell-type enrichment because no assigned profile rows are available.")
+}
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 14
+if (nrow(region_cell_type_enrichment) > 0) {
+    region_volcano_dt = copy(region_cell_type_enrichment)
+    region_volcano_dt[, `:=`(
+        neg_log10_fisher_p = -log10(pmax(fisher_p_value, .Machine$double.xmin)),
+        tail_assigned_transcripts = high_count + low_count,
+        enrichment_status = fcase(
+            fisher_q_value <= tail_enrichment_q_threshold & log2_high_low_fc > 0,
+            "Enriched",
+            fisher_q_value <= tail_enrichment_q_threshold & log2_high_low_fc < 0,
+            "Depleted",
+            default = "Not significant"
+        )
+    )]
+
+    ggplot(region_volcano_dt, aes(
+        x = log2_high_low_fc,
+        y = neg_log10_fisher_p
+    )) +
+        geom_vline(xintercept = 0, linewidth = 0.3, color = "grey70") +
+        geom_point(aes(
+            color = enrichment_status,
+            size = tail_assigned_transcripts
+        ), alpha = 0.85) +
+        ggrepel::geom_text_repel(
+            aes(label = coarse_cell_type),
+            size = 3,
+            min.segment.length = 0,
+            max.overlaps = Inf,
+            show.legend = FALSE
+        ) +
+        facet_wrap(~ histology + sample_id, ncol = 4, scales = "free_y") +
+        scale_color_manual(
+            values = c(
+                "Enriched" = "#B2182B",
+                "Depleted" = "#2166AC",
+                "Not significant" = "grey70"
+            ),
+            drop = FALSE
+        ) +
+        scale_size_continuous(range = c(1.5, 6), name = "Tail assigned\ntranscripts") +
+        labs(
+            title = paste0(
+                "Region-level assigned cell-type milieu in top vs bottom ",
+                round(tail_fraction * 100), "% unassigned neighborhoods"
+            ),
+            subtitle = paste0(
+                "Grid locations, not anchor cells; color uses exploratory FDR <= ",
+                tail_enrichment_q_threshold
+            ),
+            x = "Assigned transcript composition log2 high/low fold change",
+            y = "-log10 exploratory Fisher p-value",
+            color = ""
+        ) +
+        theme(
+            legend.position = "bottom",
+            panel.grid.minor = element_blank()
+        )
+} else {
+    message("Skipping region cell-type enrichment volcano because no enrichment rows are available.")
+}
+```
+
+# Region-level assigned-vs-unassigned gene composition
+
+This section compares gene composition between unassigned transcripts and the
+assigned transcript mixture within the same retained high-unassigned grid
+locations. For each retained region, each gene is normalized to its fraction of
+the local assigned or unassigned transcript pool, then summarized as
+`log2(unassigned_fraction / assigned_fraction)`. This is not cell-level
+differential expression; it is a paired within-region transcript-composition
+contrast that helps identify genes preferentially represented in the unassigned
+pool after using the local assigned pool as the reference. Because neighboring
+grid locations overlap, the p/q values are treated as exploratory and plots
+emphasize supported effect sizes and marker identity.
+
+```{r}
+marker_path = file.path(data_root, "markers/final_manual_markers.csv")
+signature_markers = if (file.exists(marker_path)) {
+    fread(marker_path)[
+        category == "Cell Type" & !is.na(marker) & !is.na(annotation),
+        .(
+            feature_name = as.character(marker),
+            marker_group = as.character(annotation)
+        )
+    ]
+} else {
+    data.table(feature_name = character(), marker_group = character())
+}
+signature_markers = unique(signature_markers)
+
+gene_marker_groups = if (nrow(signature_markers) > 0) {
+    signature_markers[, .(
+        marker_group = paste(sort(unique(marker_group)), collapse = "; ")
+    ), by = feature_name]
+} else {
+    data.table(feature_name = character(), marker_group = character())
+}
+
+compute_region_assigned_unassigned_gene_contrast = function(
+    region_local_profiles, pseudocount = 0.5
+) {
+    if (nrow(region_local_profiles) == 0) {
+        return(data.table())
+    }
+
+    high_profiles = region_local_profiles[
+        tail_label == tail_high_label &
+            assignment_group %in% c("ASSIGNED", "UNASSIGNED")
+    ]
+    if (nrow(high_profiles) == 0) {
+        return(data.table())
+    }
+    high_profiles[, `:=`(
+        x = as.numeric(x),
+        y = as.numeric(y),
+        n_transcripts = as.numeric(n_transcripts),
+        n_cells_50um = as.numeric(n_cells_50um),
+        n_coarse_cell_types_50um = as.numeric(n_coarse_cell_types_50um),
+        n_gene_transcripts_50um = as.numeric(n_gene_transcripts_50um),
+        n_gene_unassigned_50um = as.numeric(n_gene_unassigned_50um),
+        n_gene_assigned_50um = as.numeric(n_gene_assigned_50um)
+    )]
+
+    region_keys = unique(high_profiles[, .(
+        sample_id, histology, region_key, location_id, x, y,
+        n_cells_50um, n_coarse_cell_types_50um,
+        n_gene_transcripts_50um, n_gene_unassigned_50um,
+        n_gene_assigned_50um
+    )])
+    region_keys = region_keys[
+        n_gene_assigned_50um >= min_region_assigned_transcripts &
+            n_gene_unassigned_50um > 0
+    ]
+    if (nrow(region_keys) == 0) {
+        return(data.table())
+    }
+
+    gene_counts = high_profiles[
+        region_keys[, .(sample_id, region_key)],
+        on = .(sample_id, region_key),
+        nomatch = 0L
+    ][
+        ,
+        .(n_transcripts = as.numeric(sum(n_transcripts, na.rm = TRUE))),
+        by = .(
+            sample_id, histology, region_key, location_id, x, y,
+            feature_name, assignment_group
+        )
+    ]
+    count_wide = dcast(
+        gene_counts,
+        sample_id + histology + region_key + location_id + x + y + feature_name ~
+            assignment_group,
+        value.var = "n_transcripts",
+        fill = 0
+    )
+    for (missing_col in setdiff(c("ASSIGNED", "UNASSIGNED"), names(count_wide))) {
+        count_wide[, (missing_col) := 0L]
+    }
+
+    observed_genes = unique(high_profiles[, .(sample_id, histology, feature_name)])
+    region_gene_grid = merge(
+        region_keys[, .(
+            sample_id, histology, region_key, location_id, x, y,
+            n_cells_50um, n_coarse_cell_types_50um,
+            n_gene_unassigned_50um, n_gene_assigned_50um
+        )],
+        observed_genes,
+        by = c("sample_id", "histology"),
+        allow.cartesian = TRUE
+    )
+    region_gene_grid = merge(
+        region_gene_grid,
+        count_wide,
+        by = c("sample_id", "histology", "region_key", "location_id", "x", "y", "feature_name"),
+        all.x = TRUE,
+        sort = FALSE
+    )
+    region_gene_grid[is.na(ASSIGNED), ASSIGNED := 0L]
+    region_gene_grid[is.na(UNASSIGNED), UNASSIGNED := 0L]
+    region_gene_grid[, n_observed_genes := uniqueN(feature_name), by = .(sample_id, histology)]
+    # Normalize each gene to its region-level assigned and unassigned transcript
+    # pools before forming the paired composition contrast.
+    region_gene_grid[, `:=`(
+        assigned_fraction = (ASSIGNED + pseudocount) /
+            (n_gene_assigned_50um + pseudocount * n_observed_genes),
+        unassigned_fraction = (UNASSIGNED + pseudocount) /
+            (n_gene_unassigned_50um + pseudocount * n_observed_genes)
+    )]
+    region_gene_grid[, log2_unassigned_assigned_fc := log2(
+        unassigned_fraction / assigned_fraction
+    )]
+
+    contrast_dt = region_gene_grid[
+        ,
+        {
+            values = log2_unassigned_assigned_fc[
+                is.finite(log2_unassigned_assigned_fc)
+            ]
+            p_value = if (length(values) > 1 && any(values != 0)) {
+                tryCatch(
+                    wilcox.test(values, mu = 0, exact = FALSE)$p.value,
+                    error = function(e) NA_real_
+                )
+            } else {
+                NA_real_
+            }
+
+            .(
+                n_regions_tested = as.numeric(uniqueN(region_key)),
+                n_regions_unassigned_detected = as.numeric(sum(UNASSIGNED > 0, na.rm = TRUE)),
+                n_regions_assigned_detected = as.numeric(sum(ASSIGNED > 0, na.rm = TRUE)),
+                unassigned_count = as.numeric(sum(UNASSIGNED, na.rm = TRUE)),
+                assigned_count = as.numeric(sum(ASSIGNED, na.rm = TRUE)),
+                median_region_unassigned_transcripts = median(
+                    n_gene_unassigned_50um,
+                    na.rm = TRUE
+                ),
+                median_region_assigned_transcripts = median(
+                    n_gene_assigned_50um,
+                    na.rm = TRUE
+                ),
+                median_log2_unassigned_assigned_fc = median(values, na.rm = TRUE),
+                mean_log2_unassigned_assigned_fc = mean(values, na.rm = TRUE),
+                median_unassigned_fraction = median(unassigned_fraction, na.rm = TRUE),
+                median_assigned_fraction = median(assigned_fraction, na.rm = TRUE),
+                p_value = p_value
+            )
+        },
+        by = .(sample_id, histology, feature_name)
+    ]
+    contrast_dt[, q_value := p.adjust(p_value, method = "BH"), by = sample_id]
+    contrast_dt[, `:=`(
+        # Gene-composition interpretation uses stricter per-sample criteria than
+        # the broader tail-enrichment screen because this plot highlights genes,
+        # not region or cell-type summaries.
+        passes_q_only = !is.na(q_value) & q_value < region_gene_q_threshold,
+        passes_unassigned_region_support =
+            n_regions_unassigned_detected >= region_gene_min_detected_regions,
+        passes_unassigned_effect_threshold =
+            median_log2_unassigned_assigned_fc > region_gene_min_log2_fc
+    )]
+    contrast_dt[, passes_supported_unassigned_enriched := (
+        passes_q_only &
+            passes_unassigned_effect_threshold &
+            passes_unassigned_region_support
+    )]
+    contrast_dt[, passes_interpretation_threshold := passes_supported_unassigned_enriched]
+    contrast_dt[order(sample_id, -median_log2_unassigned_assigned_fc)]
+}
+
+region_gene_composition_contrast = compute_region_assigned_unassigned_gene_contrast(
+    region_local_profiles
+)
+
+if (nrow(region_gene_composition_contrast) > 0) {
+    region_gene_contrast_diagnostics = region_gene_composition_contrast[, .(
+        n_tested_high_unassigned_regions = unique(n_regions_tested)[1],
+        median_high_region_unassigned_transcripts = unique(
+            median_region_unassigned_transcripts
+        )[1],
+        median_high_region_assigned_transcripts = unique(
+            median_region_assigned_transcripts
+        )[1],
+        n_genes_tested = .N,
+        n_genes_passing_q_only = sum(passes_q_only, na.rm = TRUE),
+        n_genes_passing_q_and_lfc = sum(
+            passes_q_only & passes_unassigned_effect_threshold,
+            na.rm = TRUE
+        ),
+        n_genes_supported_unassigned_enriched = sum(
+            passes_supported_unassigned_enriched,
+            na.rm = TRUE
+        )
+    ), by = .(sample_id, histology)][order(sample_id)]
+
+    kable(region_gene_contrast_diagnostics[, .(
+        sample_id,
+        histology,
+        n_tested_high_unassigned_regions,
+        median_high_region_unassigned_transcripts = round(
+            median_high_region_unassigned_transcripts
+        ),
+        median_high_region_assigned_transcripts = round(
+            median_high_region_assigned_transcripts
+        ),
+        n_genes_tested,
+        n_genes_passing_q_only,
+        n_genes_passing_q_and_lfc,
+        n_genes_supported_unassigned_enriched
+    )])
+
+    supported_unassigned_genes = region_gene_composition_contrast[
+        passes_supported_unassigned_enriched == TRUE
+    ][
+        order(sample_id, -median_log2_unassigned_assigned_fc)
+    ]
+    supported_unassigned_genes = merge(
+        supported_unassigned_genes,
+        gene_marker_groups,
+        by = "feature_name",
+        all.x = TRUE,
+        sort = FALSE
+    )
+    supported_unassigned_genes[is.na(marker_group), marker_group := "Other"]
+
+    kable(supported_unassigned_genes[
+        ,
+        .(
+            sample_id,
+            histology,
+            feature_name,
+            marker_group,
+            n_regions_tested,
+            n_regions_unassigned_detected,
+            unassigned_count,
+            median_log2_fc = round(median_log2_unassigned_assigned_fc, 2),
+            p_value = signif(p_value, 3),
+            q_value = signif(q_value, 3)
+        )
+    ])
+} else {
+    message("Skipping assigned-vs-unassigned gene composition contrast because no high-tail region profiles are available.")
+}
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 14
+if (nrow(region_gene_composition_contrast) > 0) {
+    region_gene_volcano_dt = copy(region_gene_composition_contrast)
+    region_gene_volcano_dt[, `:=`(
+        neg_log10_p = -log10(pmax(p_value, .Machine$double.xmin)),
+        detected_region_support = n_regions_unassigned_detected,
+        composition_status = fcase(
+            passes_supported_unassigned_enriched == TRUE,
+            "Supported unassigned-enriched",
+            default = "Exploratory/background"
+        )
+    )]
+    label_dt = region_gene_volcano_dt[
+        ,
+        {
+            supported = .SD[
+                passes_supported_unassigned_enriched == TRUE
+            ][
+                order(-median_log2_unassigned_assigned_fc)
+            ]
+            n_fallback = max(0L, 8L - min(8L, nrow(supported)))
+            fallback = .SD[
+                passes_supported_unassigned_enriched != TRUE &
+                    is.finite(median_log2_unassigned_assigned_fc) &
+                    median_log2_unassigned_assigned_fc > 0
+            ][
+                order(-median_log2_unassigned_assigned_fc)
+            ]
+            rbindlist(
+                list(head(supported, 8L), head(fallback, n_fallback)),
+                use.names = TRUE,
+                fill = TRUE
+            )
+        },
+        by = .(sample_id, histology)
+    ]
+
+    ggplot(region_gene_volcano_dt, aes(
+        x = median_log2_unassigned_assigned_fc,
+        y = neg_log10_p
+    )) +
+        geom_vline(xintercept = 0, linewidth = 0.3, color = "grey70") +
+        geom_vline(
+            xintercept = region_gene_min_log2_fc,
+            linewidth = 0.25,
+            color = "grey80",
+            linetype = "dashed"
+        ) +
+        geom_point(aes(
+            color = composition_status,
+            size = detected_region_support
+        ), alpha = 0.85) +
+        ggrepel::geom_text_repel(
+            data = label_dt,
+            aes(label = feature_name),
+            size = 3,
+            min.segment.length = 0,
+            max.overlaps = Inf,
+            show.legend = FALSE
+        ) +
+        facet_wrap(~ histology + sample_id, ncol = 4, scales = "free_y") +
+        scale_color_manual(
+            values = c(
+                "Supported unassigned-enriched" = "#B2182B",
+                "Exploratory/background" = "grey70"
+            ),
+            drop = FALSE
+        ) +
+        scale_y_continuous(
+            limits = c(0, NA),
+            expand = expansion(mult = c(0, 0.05))
+        ) +
+        scale_size_continuous(range = c(1.5, 6), name = "Unassigned\nregion\nsupport") +
+        labs(
+            title = "Gene-composition contrast in high-unassigned regions",
+            subtitle = paste0(
+                "Color requires q < ", region_gene_q_threshold,
+                ", median log2 FC > ", region_gene_min_log2_fc,
+                ", and >= ", region_gene_min_detected_regions,
+                " high-unassigned regions with that gene detected in the unassigned pool"
+            ),
+            x = "Median log2(unassigned_fraction / assigned_fraction)",
+            y = "-log10 exploratory paired Wilcoxon p-value",
+            color = ""
+        ) +
+        theme(
+            legend.position = "bottom",
+            panel.grid.minor = element_blank()
+        )
+} else {
+    message("Skipping assigned-vs-unassigned gene volcano because no contrast rows are available.")
+}
+```
+
+```{r}
+#| fig-height: 18
+#| fig-width: 12
+if (nrow(region_gene_composition_contrast) > 0) {
+    histology_sample_counts = unique(
+        region_gene_composition_contrast[, .(histology, sample_id)]
+    )[
+        ,
+        .(n_histology_samples = uniqueN(sample_id)),
+        by = histology
+    ]
+
+    supported_region_gene_dt = region_gene_composition_contrast[
+        passes_supported_unassigned_enriched == TRUE
+    ]
+    histology_gene_meta_dt = if (nrow(supported_region_gene_dt) > 0) {
+        supported_region_gene_dt[
+            ,
+            .(
+                n_samples = uniqueN(sample_id),
+                min_log2_fc = min(median_log2_unassigned_assigned_fc, na.rm = TRUE),
+                median_log2_fc = median(median_log2_unassigned_assigned_fc, na.rm = TRUE),
+                mean_log2_fc = mean(median_log2_unassigned_assigned_fc, na.rm = TRUE),
+                min_unassigned_detected_regions = min(
+                    n_regions_unassigned_detected,
+                    na.rm = TRUE
+                ),
+                combined_p_value = {
+                    fisher_stat = -2 * sum(log(pmax(p_value, .Machine$double.xmin)))
+                    pchisq(fisher_stat, df = 2 * .N, lower.tail = FALSE)
+                }
+            ),
+            by = .(histology, feature_name)
+        ]
+    } else {
+        data.table(
+            histology = character(),
+            feature_name = character(),
+            n_samples = integer(),
+            min_log2_fc = numeric(),
+            median_log2_fc = numeric(),
+            mean_log2_fc = numeric(),
+            min_unassigned_detected_regions = numeric(),
+            combined_p_value = numeric()
+        )
+    }
+    histology_gene_meta_dt = merge(
+        histology_gene_meta_dt,
+        histology_sample_counts,
+        by = "histology",
+        all.x = TRUE,
+        sort = FALSE
+    )[
+        n_samples == n_histology_samples
+    ]
+    histology_gene_meta_dt[, histology_meta_q_value := p.adjust(
+        combined_p_value,
+        method = "BH"
+    ), by = histology]
+
+    if (nrow(histology_gene_meta_dt) > 0) {
+        histology_gene_meta_dt = merge(
+            histology_gene_meta_dt,
+            gene_marker_groups,
+            by = "feature_name",
+            all.x = TRUE,
+            sort = FALSE
+        )
+        histology_gene_meta_dt[is.na(marker_group), marker_group := "Other"]
+        marker_group_base_order = unique(c(cell_type_levels, "Neuron", "RGC", "Other"))
+        marker_group_rank = function(x) {
+            ranks = match(strsplit(x, "; ", fixed = TRUE)[[1]], marker_group_base_order)
+            ranks = ranks[!is.na(ranks)]
+            if (length(ranks) == 0) {
+                length(marker_group_base_order) + 1L
+            } else {
+                min(ranks)
+            }
+        }
+        marker_group_order_dt = unique(histology_gene_meta_dt[, .(marker_group)])
+        marker_group_order_dt[, marker_group_order := vapply(
+            marker_group,
+            marker_group_rank,
+            integer(1)
+        )]
+        marker_group_order = marker_group_order_dt[
+            order(marker_group_order, marker_group),
+            marker_group
+        ]
+        histology_gene_meta_dt[, marker_group := factor(
+            marker_group,
+            levels = marker_group_order
+        )]
+        gene_order = histology_gene_meta_dt[, .(
+            marker_group = as.character(marker_group[1]),
+            marker_group_order = match(as.character(marker_group[1]), marker_group_order),
+            median_effect = median(median_log2_fc, na.rm = TRUE)
+        ), by = feature_name][
+            order(marker_group_order, median_effect, feature_name),
+            feature_name
+        ]
+        histology_order = unique(
+            region_gene_composition_contrast[order(histology), histology]
+        )
+
+        kable(histology_gene_meta_dt[
+            order(histology, marker_group, -median_log2_fc),
+            .(
+                histology,
+                feature_name,
+                marker_group,
+                n_samples,
+                min_log2_fc = round(min_log2_fc, 2),
+                median_log2_fc = round(median_log2_fc, 2),
+                mean_log2_fc = round(mean_log2_fc, 2),
+                min_unassigned_detected_regions,
+                combined_p_value = signif(combined_p_value, 3),
+                histology_meta_q_value = signif(histology_meta_q_value, 3)
+            )
+        ])
+
+        ggplot(histology_gene_meta_dt, aes(
+            x = factor(histology, levels = histology_order),
+            y = factor(feature_name, levels = gene_order),
+            fill = median_log2_fc,
+            size = min_unassigned_detected_regions
+        )) +
+            geom_point(shape = 21, color = "grey20", stroke = 0.25, alpha = 0.9) +
+            scale_fill_gradient(
+                low = "#FDDDBC",
+                high = "#B2182B",
+                name = "Histology\nmedian\nlog2 FC"
+            ) +
+            scale_size_continuous(
+                range = c(2, 7),
+                name = "Minimum\nunassigned\nregions"
+            ) +
+            facet_grid(marker_group ~ ., scales = "free_y", space = "free_y") +
+            labs(
+                title = "Histology-level supported unassigned-enriched gene-composition effects",
+                subtitle = paste0(
+                    "Shown genes pass q < ", region_gene_q_threshold,
+                    ", median log2 FC > ", region_gene_min_log2_fc,
+                    ", and >= ", region_gene_min_detected_regions,
+                    " unassigned-detected high regions in every sample from that histology"
+                ),
+                x = "Histology",
+                y = "Gene"
+            ) +
+            theme(
+                axis.text.x = element_text(angle = 45, hjust = 1),
+                legend.position = "bottom",
+                panel.grid = element_blank()
+            )
+    } else {
+        message("Skipping histology-level gene meta plot because no gene passes the strict criteria in every sample from a histology.")
+    }
+} else {
+    message("Skipping histology-level gene meta plot because no contrast rows are available.")
+}
+```
+
+# Cached outputs
+
+```{r}
+output_manifest = data.table(
+    output = c(
+        "Sample-level summary",
+        "BANKSY cell metadata cache",
+        "Sampled cell cache",
+        "Cell-local unassigned summary",
+        "Region grid-location cache",
+        "Region-local unassigned summary",
+        "Region-local gene source profiles"
+    ),
+    path = c(
+        sample_summary_cache,
+        cell_metadata_cache,
+        sampled_cell_cache,
+        local_summary_cache,
+        region_location_cache,
+        region_local_summary_cache,
+        region_local_profile_cache
+    ),
+    exists = file.exists(c(
+        sample_summary_cache,
+        cell_metadata_cache,
+        sampled_cell_cache,
+        local_summary_cache,
+        region_location_cache,
+        region_local_summary_cache,
+        region_local_profile_cache
+    ))
+)
+
+kable(output_manifest)
+```
