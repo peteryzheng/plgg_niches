@@ -21,15 +21,24 @@ knitr:
 ---
 
 ```{r}
+#| echo: FALSE
 library(data.table)
+library(ggplot2)
 library(knitr)
 library(readxl)
-# local vs UGER
+
+# local vs remote
 if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
     # in a local mac, the home directory is usuaully at '/Users/[username]'
-    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
 } else {
-    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    # in dipg or uger, the home directory is '/home/unix/[username]'
     workdir <- "/xchip/beroukhimlab/"
 }
 ```
@@ -82,3 +91,31 @@ ggplot(metadata[,.N, .(
 ```
 
 # Spatial Data
+
+Cleaning up the xenium cohort data -- we have the first metadata file which was initially sent by Phillip, and he sent us a second one w updated driver alterations adn tumor lcoations
+
+```{r}
+setwd(paste0(workdir, "youyun/plgg/data/metadata/"))
+xenium_metadata_v1 = data.table(read_xlsx(paste0(
+    workdir, "youyun/plgg/data/metadata/Xenium_PS.xlsx"
+)))[,.(file, idat, id, mc, nr)]
+xenium_metadata_v2 = data.table(read_xlsx(paste0(
+    workdir, "youyun/plgg/data/metadata/Xenium.xlsx"
+)))
+
+xenium_metadata = merge(xenium_metadata_v1, xenium_metadata_v2, by = c('file','idat','nr'))
+# reset the column order so that these columns start 
+# file, idat, nr, id, mc, dx, alt, tumor location and then whatever is rest
+xenium_metadata = xenium_metadata[,mget(c(
+    'file', 'idat', 'nr', 'id', 'mc', 'dx', 'alt', 
+    'tumor location', setdiff(colnames(xenium_metadata), c(
+        'file', 'idat', 'nr', 'id', 'mc', 'dx', 'alt', 
+        'tumor location'
+    ))
+))]
+
+write.csv(xenium_metadata, 
+    paste0(workdir, "youyun/plgg/data/metadata/Xenium_metadata.csv"), 
+    row.names = FALSE
+)
+```
