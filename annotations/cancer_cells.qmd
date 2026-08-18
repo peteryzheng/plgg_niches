@@ -1,0 +1,281 @@
+---
+title: "Enriched Cells in Annotated Regions as Cancer Cells"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+Here we will be using linear models to test the association between cell types and pathology annotation regions. For each histology type, we have 2-4 samples. Each of these samples have 2-3 pathologist marked regions. Our goal in the most simplistic sense is to identify cell types that are enriched or depleted in these regions. 
+
+Previously, what we have done is using fisher exact tests to test the association between every single cell type and every single pathology region within each sample, then combine p values across samples. This works in principle, but is not ideal since p values do not convey the direction of the association. So combining an enriched p value and depleted p value will still yield a significant combined p value. Additionally, we are not accounting for the sample level variability due to covariates such as age, location of the tumor, etc. 
+
+So to improve on this short comings, we will be using linear models to test the association between cell types and pathology annotation regions. We will be using the `lme4` package to fit the models. The models will be of the form:
+
+$$
+\begin{align}
+y_{ij} = \beta_0 + \beta_1 x_{ij} + \epsilon_{ij}
+\end{align}
+$$
+
+Where $y_{ij}$ is the proportion of cell type $i$ in region $j$, $x_{ij}$ is the pathology annotation region, and $\epsilon_{ij}$ is the residual error. This way we can model the association between cell types and pathology annotation regions. 
+
+However, this approach does have some limitations. For example, since we have 2-4 samples per histology type, our dataset will consist of 2-4 observations per pathology region and cell type (i-j pairs). This means we don't have much power to detect associations. Additionally, we are also doing this individually for each cell type independently, so we are not accounting for the correlation between cell types.
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+library(Seurat)
+library(dbscan)
+library(circlize)
+library(Seurat)
+library(scales)
+library(htmlwidgets)
+
+library(lme4)
+library(lmerTest)
+
+
+# local vs remote
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    # in dipg or uger, the home directory is '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+```
+
+
+# Preperations
+
+## Loading the data
+
+The objects are here:
+
+RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
+
+    -   `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
+
+Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
+
+
+```{r}
+# load the banksy embeddings
+banksy_embeddings <- readRDS(ifelse(
+    !Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng"), paste0(
+        workdir, "youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+))
+colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+
+# Load the cell type clusters annotation
+prelim_annotation_res1 = fread(paste0(
+    workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
+))
+
+# specify the cluster names 
+# this is mainly to keep track of which resolution we are using
+cell_res = 1
+cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
+niche_res = 1
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
+
+# # filter the banksy object to only include the cells with annotated cell types
+# annotated_cell_clusters = sort(unique(prelim_annotation_res1$cluster))
+# banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)[,cell_clust_name] %in% annotated_cell_clusters]
+```
+
+
+## Build the color palette for all niches and cell types downstream
+
+```{r}
+set.seed(5555)
+cluster_classes = levels(colData(banksy_embeddings)[[niche_clust_name]])
+niche_color_manual = structure(
+    pals::polychrome()[c(1:length(cluster_classes))],
+    names = sample(cluster_classes)
+)
+# for niche resolution 0.5
+# niches_to_show = c(1:11, 13, 14, 16, 17)
+# for niche resolution 1
+niches_to_show = c(1:20, 22:25)
+
+cell_type_to_test = 'Coarse Cell Type'
+cell_type_to_test = 'Fine Cell Type'
+cell_type_to_test = 'Fine Cell Type UMAP'
+
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+```
+
+# Modeling Data Manipulation
+
+We will then build the data for modeling from the spatial data. 
+
+First we will clean up the data. 
+
+```{r}
+sparsity_threshold = 0.01
+modeling_data = as.data.table(merge(
+    colData(banksy_embeddings)[
+        c('cell_id','sample_id', 'histology','alteration', cell_clust_name, 'pathology_annotation')
+    ], prelim_annotation_res1[, .(cluster, cell_type = get(cell_type_to_test))],
+    by.x = cell_clust_name, by.y = 'cluster', all.x = TRUE
+))[,cell_id := paste0(cell_id, '__', sample_id)]
+# cleanup so that cells not annotated or really minority populations are noted as "Other"
+modeling_data[
+    , num_cells_per_sample := .N, .(sample_id)
+][
+    , cell_type := ifelse(
+        .N/num_cells_per_sample < sparsity_threshold |
+            is.na(cell_type), 'Other', cell_type
+    ),.(sample_id, cell_type)
+]
+kable(modeling_data[
+    , .(
+        number_of_cell_types = length(unique(cell_type)),
+        cell_types = paste(sort(unique(cell_type)), collapse = ', ')
+    ), .(sample_id, histology, alteration)
+][order(-histology)])
+# Set the reference category for pathology_annotation
+modeling_data$pathology_annotation = relevel(
+    factor(modeling_data$pathology_annotation),
+    ref = "unannotated"
+)
+# one hot encode the cell types
+glm_modeling_data = dcast(
+    modeling_data,
+    cell_id + sample_id + histology + alteration + pathology_annotation ~ cell_type,
+    value.var = 'cell_type', fun.aggregate = length, fill = 0
+)
+```
+
+Now, we will calculate the proportion of each cell type in each pathology region for each sample.
+
+```{r}
+# modeling_dt = dcast(
+#     unique(modeling_data[
+#         , num_cells_per_sample_region := .N, .(sample_id, pathology_annotation)
+#     ][
+#         , .(prop_cell_type_per_sample_region = .N/num_cells_per_sample_region), .(
+#             sample_id, pathology_annotation, cell_type,
+#             histology, alteration
+#         )
+#     ]), sample_id + pathology_annotation + histology + alteration ~ cell_type,
+#     value.var = 'prop_cell_type_per_sample_region', fill = 0
+# )
+# # Set the reference category for pathology_annotation
+# modeling_dt$pathology_annotation <- relevel(
+#     factor(modeling_dt$pathology_annotation),
+#     ref = "unannotated"
+# )
+```
+
+# Run the GLM Models for PA
+
+We will then run the GLM for each cell type.
+
+```{r}
+kable(glm_modeling_data[
+    grepl('pilo',histology), 
+    .(
+        N = length(unique(pathology_annotation)),
+        regions = paste(sort(unique(pathology_annotation)), collapse = ', ')
+    ), 
+    .(sample_id, histology)
+])
+pa_cells_w_annotations = dcast(
+    modeling_data[
+        grepl('pilo', histology) & sample_id != 320784 &
+            pathology_annotation != 'Predominantly glial component\nwith dysplastic ganglion cells'
+    ], cell_id + sample_id + histology + alteration + pathology_annotation ~ cell_type,
+    value.var = 'cell_type', fun.aggregate = length, fill = 0
+)
+
+# clean up the data
+pa_cells_w_annotations$pathology_annotation = relevel(
+    factor(pa_cells_w_annotations$pathology_annotation),
+    ref = "unannotated"
+)
+
+# test by cell type
+cell_type_of_interest = setdiff(colnames(pa_cells_w_annotations), c(
+    'cell_id', 'sample_id', 'histology', 
+    'alteration', 'pathology_annotation'
+))[1]
+pa_associations = rbindlist(lapply(
+    setdiff(colnames(pa_cells_w_annotations), c(
+        'cell_id', 'sample_id', 'histology', 
+        'alteration', 'pathology_annotation'
+    )),function(cell_type_of_interest) {
+        print(cell_type_of_interest)
+
+        results <- tryCatch({
+            summary(glmer(
+                get(cell_type_of_interest) ~ pathology_annotation + (1|sample_id),
+                data = pa_cells_w_annotations, family = 'binomial'
+            ))$coefficients
+        }, warning = function(w) {
+            message(sprintf("Warning for cell type %s: %s", cell_type_of_interest, conditionMessage(w)))
+            return(NULL)
+        }, error = function(e) {
+            message(sprintf("Error for cell type %s: %s", cell_type_of_interest, conditionMessage(e)))
+            return(NULL)
+        })
+        
+        annotation_region = gsub('pathology_annotation', '', rownames(results))
+        return(as.data.table(results)[
+            , c('annotation_region','cell_type') := list(
+                annotation_region, cell_type_of_interest
+            )
+        ])
+    }
+), use.names = TRUE, fill = TRUE)
+
+# fdr correction and write out the results
+pa_associations[,q_val := p.adjust(`Pr(>|z|)`, method = 'fdr')]
+write.csv(pa_associations, paste0(
+    workdir,'youyun/plgg/code/annotations/pa_associations.csv'
+))
+```

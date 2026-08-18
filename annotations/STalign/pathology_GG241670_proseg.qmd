@@ -1,0 +1,441 @@
+---
+title: "pathology GG241670 proseg"
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        toc: true
+        toc-depth: 2
+        embed-resources: true
+jupyter: python3
+---
+
+<!-- Auto-converted from `pathology_GG241670_proseg.ipynb`. Source-of-truth for edits is this `.qmd`. -->
+
+```{python}
+import json
+# STalign path configuration (auto-generated)
+from pathlib import Path
+import os
+import re
+import pandas as pd
+import numpy as np
+
+from PIL import Image
+def detect_workdir() -> str:
+    home = os.path.expanduser("~")
+    if home in ["/Users/youyun", "/Users/youyunzheng"]:
+        return home + "/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+    if home == "/home/yz762":
+        return "/mnt/storage/dept/medonc/beroukhim/"
+    if home == "/PHShome/yz762":
+        return "/data/beroukhim1/"
+    return "/data/beroukhim1/"
+
+
+WORKDIR = Path(detect_workdir())
+XENIUM_ANNOT_ROOT = WORKDIR / "youyun/plgg/data/Xenium_annotations"
+PROSEG_ROOT = WORKDIR / "youyun/plgg/data/segmentation/proseg_run_121024"
+METADATA_XLSX = WORKDIR / "youyun/plgg/data/metadata/Xenium_PS.xlsx"
+OUTPUT_ROOT = WORKDIR / "youyun/plgg/data/Xenium_annotations/pathology_annotations_030226"
+OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+
+SAMPLE_ID = "GG241670"
+IMAGE_GROUP = "LGG1"
+
+GEOJSON_PATH = XENIUM_ANNOT_ROOT / "geojsons" / "230918_Xenium_CytAssist_LGG1_merged.geojson"
+if not GEOJSON_PATH.exists():
+    raise FileNotFoundError(
+        f"Missing canonical GeoJSON for {SAMPLE_ID}: {GEOJSON_PATH}. "
+        "GeoJSON files are assumed to be pre-staged under geojsons/, including LGG1_merged."
+    )
+
+IMAGE_JPG_ROOT = XENIUM_ANNOT_ROOT / "images"
+IMAGE_FILE = IMAGE_JPG_ROOT / f"230918_Xenium_CytAssist_{IMAGE_GROUP}.jpg"
+if not IMAGE_FILE.exists():
+    raise FileNotFoundError(
+        f"Missing JPG image for {SAMPLE_ID}: {IMAGE_FILE}. "
+        "JPG images are assumed to be pre-staged under images/."
+    )
+
+def read_jpg(path: Path) -> np.ndarray:
+    img = np.asarray(Image.open(path).convert("RGB"))
+    return img
+
+def resolve_cells_csv(sample_id: str) -> Path:
+    metadata = pd.read_excel(METADATA_XLSX)
+    numeric_id = re.sub(r"^[A-Za-z]+", "", sample_id)
+    matches = metadata.loc[metadata["id"].astype(str) == numeric_id, "file"]
+    if matches.empty:
+        raise ValueError(f"Could not find sample {sample_id} in metadata: {METADATA_XLSX}")
+
+    file_name = matches.iloc[0]
+    cells_csv = PROSEG_ROOT / file_name / f"{file_name}_proseg" / "outs" / "cells.csv.gz"
+    if not cells_csv.exists():
+        raise FileNotFoundError(f"cells.csv.gz missing for {sample_id}: {cells_csv}")
+    return cells_csv
+
+
+CELL_CSV_PATH = resolve_cells_csv(SAMPLE_ID)
+OUTPUT_FILE = OUTPUT_ROOT / f"proseg_pathology_{SAMPLE_ID}_proseg_meta.csv"
+```
+
+
+```{python}
+import matplotlib.pyplot as plt
+import geopandas as gpd
+import geoplot
+import geoplot.crs as gcrs
+import pandas as pd
+import numpy as np
+from STalign import STalign
+import seaborn as sns
+from shapely.geometry import shape, GeometryCollection, Point
+import scipy
+```
+
+Methods
+
+
+```{python}
+# Function to convert a string to a tuple
+def string_to_tuple(text):
+  return tuple(text.split(','))
+    
+def rgb2hex(r,g,b):
+    hex = "#{:02x}{:02x}{:02x}".format(r,g,b)
+    return hex
+```
+
+
+```{python}
+def geojson_contains_xy(geojson, xy):
+    hits = geojson[geojson.contains(xy)]
+    if hits.empty:
+        return {"annotation": "unannotated", "region_id": pd.NA}
+
+    hit = hits.iloc[0]
+    region_id = hit.get("id")
+    if pd.isna(region_id):
+        region_id = hit.name
+    return {"annotation": hit["color"], "region_id": str(region_id)}
+```
+
+# H&E and Geojson
+
+
+```{python}
+# Plot the full resolution and downsampled images side-by-side
+fig, ax = plt.subplots(1, figsize=(12, 12))
+image_file = str(IMAGE_FILE)
+V = read_jpg(IMAGE_FILE)
+ax.imshow(V, cmap="gray")
+ax.set_title(f"Image shape: {V.shape}")
+
+# Convert GeoJSON to a GeoDataFrame
+df_geojson = gpd.read_file(GEOJSON_PATH)
+s = gpd.GeoDataFrame(df_geojson)
+s["name"] = s["classification"].apply(lambda t: json.loads(t).get("name"))
+s["rgb"] = s["classification"].apply(lambda t: json.loads(t).get("color"))
+s["color"] = s["rgb"].apply(lambda c: rgb2hex(int(c[0]), int(c[1]), int(c[2])))
+
+# Plot
+s.geometry = s.geometry.scale(xfact=1/7, yfact=1/7, origin=(0,0))
+s.boundary.plot(ax=ax,color=s['color'],aspect=1)
+
+plt.show()
+```
+
+# ST Align
+
+
+```{python}
+from STalign import STalign
+image_file = str(IMAGE_FILE)
+V = read_jpg(IMAGE_FILE)
+Inorm = STalign.normalize(V)
+
+print(Inorm.min())
+print(Inorm.max())
+
+fig,ax = plt.subplots()
+ax.imshow(Inorm)
+```
+
+
+```{python}
+I = Inorm.transpose(2,0,1)
+print(I.shape)
+
+YI = np.array(range(I.shape[1]))*1. # needs to be longs not doubles for STalign.transform later so multiply by 1.
+XI = np.array(range(I.shape[2]))*1. # needs to be longs not doubles for STalign.transform later so multiply by 1.
+extentI = STalign.extent_from_x((YI,XI))
+```
+
+
+```{python}
+cell_csv = pd.read_csv(CELL_CSV_PATH)
+# get cell centroid coordinates
+xM = -np.array(cell_csv['y_centroid'])
+yM = -np.array(cell_csv['x_centroid'])
+
+# plot
+fig,ax = plt.subplots()
+ax.scatter(xM,yM,s=1,alpha=0.2)
+```
+
+
+```{python}
+# rasterize at 30um resolution (assuming positions are in um units) and plot
+XJ,YJ,M,fig = STalign.rasterize(xM, yM, dx=10)
+
+ax = fig.axes[0]
+ax.invert_yaxis()
+```
+
+
+```{python}
+print(M.shape)
+J = np.vstack((M, M, M)) # make into 3xNxM
+print(J.min())
+print(J.max())
+
+# normalize
+J = STalign.normalize(J)
+print(J.min())
+print(J.max())
+
+# double check size of things
+print(I.shape)
+print(M.shape)
+print(J.shape)
+```
+
+
+```{python}
+# manually make corresponding points
+pointsI = np.array([[400.,4900.],[700., 9100.],
+                    [3100.,5800.],[3700.,8000.]])
+pointsJ = np.array([[-100.,-7800.],[-400.,-100.],
+                    [-5000.,-6000.],[-5900.,-2000]])
+
+# plot
+extentJ = STalign.extent_from_x((YJ,XJ))
+
+fig,ax = plt.subplots(1,2)
+ax[0].imshow((I.transpose(1,2,0).squeeze()), extent=extentI)
+ax[1].imshow((J.transpose(1,2,0).squeeze()), extent=extentJ)
+
+ax[0].scatter(pointsI[:,1],pointsI[:,0], c='blue',s=2)
+ax[1].scatter(pointsJ[:,1],pointsJ[:,0], c='blue',s=5)
+for i in range(pointsI.shape[0]):
+    ax[0].text(pointsI[i,1],pointsI[i,0],f'{i}', c='red')
+    ax[1].text(pointsJ[i,1],pointsJ[i,0],f'{i}', c='red')
+
+# invert only rasterized image
+ax[1].invert_yaxis()
+```
+
+
+```{python}
+# compute initial affine transformation from points
+L,T = STalign.L_T_from_points(pointsI,pointsJ)
+```
+
+
+```{python}
+print(L)
+print(T)
+print(L.shape)
+print(T.shape)
+
+# note points are as y,x
+affine = np.dot(np.linalg.inv(L), [yM - T[0], xM - T[1]])
+print(affine.shape)
+xMaffine = affine[0,:]
+yMaffine = affine[1,:]
+
+# plot
+fig,ax = plt.subplots()
+ax.scatter(yMaffine,xMaffine,s=1,alpha=0.1)
+ax.imshow((I).transpose(1,2,0))
+```
+
+
+```{python}
+import torch
+# set device for building tensors
+if torch.cuda.is_available():
+    torch.set_default_device('cuda:0')
+else:
+    torch.set_default_device('cpu')
+```
+
+
+```{python}
+%%time
+
+# run LDDMM
+# specify device (default device for STalign.LDDMM is cpu)
+if torch.cuda.is_available():
+    device = 'cuda:0'
+else:
+    device = 'cpu'
+
+# keep all other parameters default
+params = {'L':L,'T':T,
+          'niter':2000,
+          'pointsI':pointsI,
+          'pointsJ':pointsJ,
+          'device':device,
+          'sigmaM':0.15,
+          'sigmaB':0.10,
+          'sigmaA':0.11,
+          'epV': 10,
+          'muB': torch.tensor([0,0,0]), # black is background in target
+          'muA': torch.tensor([1,1,1]) # use white as artifact
+          }
+
+out = STalign.LDDMM([YI,XI],I,[YJ,XJ],J,**params)
+```
+
+
+```{python}
+# get necessary output variables
+A = out['A']
+v = out['v']
+xv = out['xv']
+```
+
+
+```{python}
+# now transform the points
+phi = STalign.build_transform(xv,v,A,XJ=[YI,XI],direction='f')
+phiiJ = STalign.transform_image_target_to_source(xv,v,A,[YJ,XJ],J,[YI,XI])
+phiipointsJ = STalign.transform_points_target_to_source(xv,v,A,pointsJ)
+
+#switch tensor from cuda to cpu for plotting with numpy
+if phi.is_cuda:
+    phi = phi.cpu()
+if phiiJ.is_cuda:
+    phiiJ = phiiJ.cpu()
+if phiipointsJ.is_cuda:
+    phiipointsJ = phiipointsJ.cpu()
+
+# plot
+fig,ax = plt.subplots()
+
+levels = np.arange(-50000,50000,500)
+
+ax.contour(XI,YI,phi[...,0],colors='r',linestyles='-',levels=levels)
+ax.contour(XI,YI,phi[...,1],colors='g',linestyles='-',levels=levels)
+ax.set_aspect('equal')
+ax.set_title('target to source')
+
+ax.imshow(phiiJ.permute(1,2,0),extent=extentI)
+ax.scatter(phiipointsJ[:,1].detach(),phiipointsJ[:,0].detach(),c="m")
+```
+
+
+```{python}
+# Now apply to points
+tpointsJ = STalign.transform_points_target_to_source(xv,v,A,np.stack([yM, xM], -1))
+
+#switch tensor from cuda to cpu for plotting with numpy
+if tpointsJ.is_cuda:
+    tpointsJ = tpointsJ.cpu()
+```
+
+
+```{python}
+###### plot
+fig,ax = plt.subplots()
+ax.imshow((I).transpose(1,2,0),extent=extentI)
+ax.scatter(phiipointsJ[:,1].detach(),phiipointsJ[:,0].detach(),c="g")
+ax.scatter(pointsI[:,1],pointsI[:,0], c='r')
+ax.scatter(tpointsJ[:,1].detach(),tpointsJ[:,0].detach(),s=1,alpha=0.1)
+```
+
+# Geojson Scaling
+
+
+```{python}
+# Read in geojson and add color based on annotation
+
+df_geojson = gpd.read_file(GEOJSON_PATH)
+s = gpd.GeoDataFrame(df_geojson)
+s["name"] = s["classification"].apply(lambda t: json.loads(t).get("name"))
+s["rgb"] = s["classification"].apply(lambda t: json.loads(t).get("color"))
+s["color"] = s["rgb"].apply(lambda c: rgb2hex(int(c[0]), int(c[1]), int(c[2])))
+# scale
+s.geometry = s.geometry.scale(xfact=1/7, yfact=1/7, origin=(0,0))
+
+# Read in H&E Image
+image_file = str(IMAGE_FILE)
+V = read_jpg(IMAGE_FILE)
+
+### Plot
+# H&E
+fig, ax = plt.subplots(figsize=(12, 12))
+ax.imshow(V)
+#Geojson
+s.boundary.plot(ax=ax,color=s['color'],aspect=1)
+# STAlign adjusted Xenium
+ax.scatter(tpointsJ[:,1].detach(),tpointsJ[:,0].detach(),s=1,alpha=0.1)
+plt.show()
+```
+
+# Annotation Plotting
+
+
+```{python}
+results = np.hstack((cell_csv, tpointsJ.numpy()))
+results = pd.DataFrame(results)
+
+names = list(cell_csv.columns)
+names.append("STAlign_x")
+names.append("STAlign_y")
+names
+
+results.columns = names
+results['adjust_xy'] = list(zip(results['STAlign_y'], results['STAlign_x']))
+results['region_meta'] = results['adjust_xy'].apply(lambda x: geojson_contains_xy(s, Point(x)))
+results['annotation'] = results['region_meta'].apply(lambda d: d["annotation"]).astype('category')
+results['region_id'] = results['region_meta'].apply(lambda d: d["region_id"]).astype('string')
+results = results.drop(columns=['region_meta'])
+
+recode_map = {
+'#0000ff':'Loose, myxoid component',
+'#f7a5f8':'Compact. fibrillary component',
+'#ff00ff':'Blood ',
+'#66c4ad':'Dysplastic Neurons / Ganglion Cells',
+'#e48b58':'Predominantly glial component\nwith dysplastic ganglion cells',
+'#299002':'Highly Calcified Area',
+'unannotated':'unannotated'
+}
+results['annotation'] = results['annotation'].replace(recode_map)
+
+sns.relplot(data=results, x='STAlign_y', y='STAlign_x',s=1,hue='annotation')
+plt.show()
+```
+
+
+```{python}
+results.to_csv(OUTPUT_FILE, index=False)
+```
+
+
+```{python}
+
+```
+
+
+```{python}
+
+```
+
+
+```{python}
+
+```
+

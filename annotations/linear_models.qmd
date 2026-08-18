@@ -1,0 +1,687 @@
+---
+title: "Modeling of Cell Type Proportions in Pathology Regions"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+Here we will be using linear models to test the association between cell types and pathology annotation regions. For each histology type, we have 2-4 samples. Each of these samples have 2-3 pathologist marked regions. Our goal in the most simplistic sense is to identify cell types that are enriched or depleted in these regions. 
+
+Previously, what we have done is using fisher exact tests to test the association between every single cell type and every single pathology region within each sample, then combine p values across samples. This works in principle, but is not ideal since p values do not convey the direction of the association. So combining an enriched p value and depleted p value will still yield a significant combined p value. Additionally, we are not accounting for the sample level variability due to covariates such as age, location of the tumor, etc. 
+
+So to improve on this short coming, we use count-based beta-binomial mixed-effect models to test association between cell types and pathology annotation regions. We fit these models with `glmmTMB`, using a sample-level random intercept to account for baseline between-sample composition differences. Each annotated `region_id` within a sample is treated as a separate observation, while unannotated cells are pooled into a single per-sample reference observation. The model is:
+
+$$
+\begin{align}
+k_{ij} &\sim \text{BetaBinomial}(n_{ij}, p_{ij}, \phi) \\\\
+\text{logit}(p_{ij}) &= \beta_0 + \beta_1 x_{ij} + b_{s(i)}, \quad b_{s(i)} \sim \mathcal{N}(0,\sigma^2_s)
+\end{align}
+$$
+
+Where $k_{ij}$ is the count of cells from cell type $i$ in observation $j$, $n_{ij}$ is the total number of cells in that sample-region observation, and $x_{ij}$ is the pathology annotation region. This setup models morphology effects while adjusting for sample-to-sample baseline shifts.
+
+However, this approach does have some limitations. Even after splitting annotated polygons into separate `region_id` observations, we still only have 2-4 independent samples per histology type. This means power remains limited and the sample-level random effect is doing most of the between-sample adjustment. Additionally, we are also doing this individually for each cell type independently, so we are not accounting for the correlation between cell types.
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+library(Seurat)
+library(dbscan)
+library(circlize)
+library(Seurat)
+library(scales)
+library(htmlwidgets)
+library(glmmTMB)
+
+
+# local vs remote
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    # in dipg or uger, the home directory is '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+source(paste0(workdir,'/youyun/plgg/code/helpers/pathology_mixed_models.R'))
+```
+
+
+# Preperations
+
+## Loading the data
+
+The objects are here:
+
+RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
+
+    -   `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
+
+Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
+
+
+```{r}
+banksy_subset_rds_path = file.path(
+    workdir, "youyun/plgg/data/Xenium_annotations",
+    "banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+)
+banksy_full_rds_path = file.path(
+    workdir, "youyun/plgg/data/Xenium_annotations",
+    "banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+)
+banksy_rds_path = if (grepl('mount',workdir)) banksy_subset_rds_path else banksy_full_rds_path
+
+# load the banksy embeddings
+banksy_embeddings <- readRDS(banksy_rds_path)
+message("Using BANKSY annotated object: ", banksy_rds_path)
+
+required_annotation_cols = c("pathology_annotation", "region_id")
+missing_annotation_cols = setdiff(required_annotation_cols, colnames(colData(banksy_embeddings)))
+if (length(missing_annotation_cols) > 0) {
+    stop(
+        "Missing required annotation metadata columns: ",
+        paste(missing_annotation_cols, collapse = ", ")
+    )
+}
+
+normalize_region_id = function(region_id) {
+    region_id = trimws(as.character(region_id))
+    region_id[region_id %in% c("", "NA")] = NA_character_
+    region_id
+}
+
+build_observation_id = function(sample_id, region_id, pathology_annotation) {
+    region_key = ifelse(
+        is.na(region_id),
+        as.character(pathology_annotation),
+        as.character(region_id)
+    )
+    paste(as.character(sample_id), region_key, sep = "::")
+}
+
+colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+colData(banksy_embeddings)$pathology_annotation = ifelse(
+    !grepl('Compact', colData(banksy_embeddings)$pathology_annotation), colData(banksy_embeddings)$pathology_annotation,
+    gsub('\\.', ',', colData(banksy_embeddings)$pathology_annotation)
+)
+colData(banksy_embeddings)$region_id = normalize_region_id(colData(banksy_embeddings)$region_id)
+
+if (sum(
+    colData(banksy_embeddings)$pathology_annotation != "unannotated" &
+        is.na(colData(banksy_embeddings)$region_id)
+) > 0) {
+    stop("Found annotated cells with missing region_id values. Expected only unannotated cells to lack region_id.")
+}
+
+colData(banksy_embeddings)$observation_id = build_observation_id(
+    sample_id = colData(banksy_embeddings)$sample_id,
+    region_id = colData(banksy_embeddings)$region_id,
+    pathology_annotation = colData(banksy_embeddings)$pathology_annotation
+)
+
+# Load the cell type clusters annotation
+prelim_annotation_res1 = fread(paste0(
+    workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
+))
+
+# specify the cluster names 
+# this is mainly to keep track of which resolution we are using
+cell_res = 1
+cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
+niche_res = 1
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
+
+# # filter the banksy object to only include the cells with annotated cell types
+# annotated_cell_clusters = sort(unique(prelim_annotation_res1$cluster))
+# banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)[,cell_clust_name] %in% annotated_cell_clusters]
+```
+
+
+## Build the color palette for all niches and cell types downstream
+
+```{r}
+set.seed(5555)
+cluster_classes = levels(colData(banksy_embeddings)[[niche_clust_name]])
+niche_color_manual = structure(
+    pals::polychrome()[c(1:length(cluster_classes))],
+    names = sample(cluster_classes)
+)
+# for niche resolution 0.5
+# niches_to_show = c(1:11, 13, 14, 16, 17)
+# for niche resolution 1
+niches_to_show = c(1:20, 22:25)
+
+cell_type_to_test = 'Coarse Cell Type'
+# cell_type_to_test = 'Fine Cell Type'
+# cell_type_to_test = 'Fine Cell Type UMAP'
+
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+```
+
+## Visualize Pathology Annotations in Space
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+graph_dt = as.data.table(cbind(
+    spatialCoords(banksy_embeddings),
+    colData(banksy_embeddings)[c(
+        'sample_id', 'cell_id', 'histology', 'pathology_annotation'
+    )]
+))
+
+graph_dt[, pathology_annotation := relevel(factor(ifelse(
+    !grepl('Compact', pathology_annotation), pathology_annotation,
+    gsub('\\.', ',', pathology_annotation)
+)), ref = 'Compact, fibrillary component')]
+
+pathology_color_scale = if (requireNamespace("ggthemes", quietly = TRUE)) {
+    ggthemes::scale_color_carto_d(
+        name = '',
+        palette = 'Safe'
+    )
+} else {
+    scale_color_brewer(
+        name = '',
+        palette = 'Set2'
+    )
+}
+
+ggplot(
+    graph_dt[grepl('pilo', histology) & !grepl('dominant', pathology_annotation)],
+    aes(x = sdimy, y = sdimx, color = pathology_annotation)
+) +
+    facet_wrap(~ sample_id, scales = 'free_x', nrow = 1) +
+    # all cells
+    geom_point(size = 0.00001, alpha = 0.7) +
+    pathology_color_scale +
+    theme_void(base_size = 40) +
+    theme(
+        legend.position = "bottom",
+        text = element_text(size = 40),
+        strip.text = element_text(size = 30),
+        strip.background = element_blank()
+    ) +
+    guides(
+        color = guide_legend(override.aes = list(size = 5, alpha = 1), nrow = 3, byrow = TRUE)
+    ) +
+    labs(
+        title = 'Pathology Annotations on H&E Overlaid on Cell Locations',
+        x = '',
+        y = ''
+    ) +
+    coord_flip()
+```
+
+# Modeling Data Manipulation
+
+We will then build the data for modeling from the spatial data. 
+
+First we will clean up the data. Then we will calculate the proportion of each cell type in each pathology region observation for each sample, where `region_id` defines the observation unit for annotated polygons and unannotated cells are pooled within sample.
+
+```{r}
+sparsity_threshold = 0.0025
+modeling_data_ct = as.data.table(merge(
+    colData(banksy_embeddings)[
+        c('cell_id','sample_id', 'histology','alteration', cell_clust_name, 'pathology_annotation', 'region_id', 'observation_id')
+    ], prelim_annotation_res1[, .(cluster, cell_type = get(cell_type_to_test))],
+    by.x = cell_clust_name, by.y = 'cluster', all.x = TRUE
+))[, `:=`(
+    cell_id = paste0(cell_id, '__', sample_id),
+    cell_type = fifelse(is.na(cell_type), 'Other', cell_type),
+    pathology_annotation = relevel(factor(pathology_annotation), ref = "unannotated"),
+    region_id = as.character(region_id),
+    observation_id = as.character(observation_id)
+)]
+# cleanup so that cells not annotated or really minority populations are noted as "Other"
+ct_prop_dt = dcast(
+    unique(modeling_data_ct[
+        , num_cells_per_sample := .N, .(sample_id)
+    ][
+        , num_cells_per_cell_type := .N, .(cell_type, sample_id)
+    ][
+        , .(prop_cells_per_cell_type = num_cells_per_cell_type / num_cells_per_sample), 
+        .(cell_type, sample_id, histology)
+    ]), sample_id + histology ~ cell_type, value.var = 'prop_cells_per_cell_type', fill = 0
+)
+melted_ct_prop_dt = melt(
+    ct_prop_dt, id.vars = c('sample_id', 'histology'),
+    variable.name = 'cell_type', value.name = 'prop_cells_per_cell_type'
+)
+
+# merging the cleaned up cell types back to the modeling data
+modeling_data_ct = merge(
+    modeling_data_ct, 
+    melted_ct_prop_dt[
+        # cleaned up cell type: if more than 1 sample has proportion < threshold, recode to Other
+        , .(cell_type_cleaned_up = fifelse(
+            sum(prop_cells_per_cell_type < sparsity_threshold)/.N >= 0.5, 
+            'Other', as.character(cell_type)
+        )), .(cell_type, histology)
+    ], 
+    by = c('cell_type', 'histology'), all.x = TRUE
+)[
+    , cell_type := cell_type_cleaned_up
+][
+    , cell_type_cleaned_up := NULL
+]
+
+# calculate the proportion of each cell type in each pathology region observation for each sample
+modeling_dt_ct = dcast(
+    unique(modeling_data_ct[
+        , num_cells_per_region_observation := .N, .(sample_id, observation_id, pathology_annotation)
+    ][
+        , .(prop_cell_type_per_region_observation = .N/num_cells_per_region_observation), .(
+            sample_id, observation_id, pathology_annotation, cell_type,
+            histology, alteration, num_cells_per_region_observation
+        )
+    ]), 
+    sample_id + observation_id + pathology_annotation + histology + alteration + num_cells_per_region_observation ~ cell_type,
+    value.var = 'prop_cell_type_per_region_observation', fill = 0
+)
+```
+
+Then we will do the same for niches
+
+```{r}
+sparsity_threshold = 0.0025
+modeling_data_niche = as.data.table(colData(banksy_embeddings)[
+    c('cell_id','sample_id', 'histology','alteration', niche_clust_name, 'pathology_annotation', 'region_id', 'observation_id')
+])[, `:=`(
+    cell_id = paste0(cell_id, '__', sample_id),
+    region_id = as.character(region_id),
+    observation_id = as.character(observation_id)
+)]
+setnames(modeling_data_niche, niche_clust_name, 'niche_type')
+# cleanup so that niches not annotated or really minority populations are noted as "Other"
+niche_prop_dt = dcast(
+    unique(modeling_data_niche[
+        , num_cells_per_sample := .N, .(sample_id)
+    ][
+        , num_cells_per_niche_type := .N, .(niche_type, sample_id)
+    ][
+        , .(prop_cells_per_niche_type = num_cells_per_niche_type / num_cells_per_sample), 
+        .(niche_type, sample_id, histology)
+    ]), sample_id + histology ~ niche_type, value.var = 'prop_cells_per_niche_type', fill = 0
+)
+melted_niche_prop_dt = melt(
+    niche_prop_dt, id.vars = c('sample_id', 'histology'),
+    variable.name = 'niche_type', value.name = 'prop_cells_per_niche_type'
+)
+# merging the cleaned up niche types back to the modeling data
+modeling_data_niche = merge(
+    modeling_data_niche, 
+    melted_niche_prop_dt[
+        # cleaned up niche type: if more than 1 sample has proportion < threshold, recode to Other
+        , .(niche_type_cleaned_up = fifelse(
+            sum(prop_cells_per_niche_type < sparsity_threshold)/.N >= 0.5, 
+            'Other', as.character(niche_type)
+        )), .(niche_type, histology)
+    ], 
+    by = c('niche_type', 'histology'), all.x = TRUE
+)[
+    , niche_type := niche_type_cleaned_up
+][
+    , niche_type_cleaned_up := NULL
+]
+
+# calculate the proportion of each niche type in each pathology region observation for each sample
+modeling_dt_niche = dcast(
+    unique(modeling_data_niche[
+        , num_cells_per_region_observation := .N, .(sample_id, observation_id, pathology_annotation)
+    ][
+        , .(prop_niche_type_per_region_observation = .N/num_cells_per_region_observation), .(
+            sample_id, observation_id, pathology_annotation, niche_type,
+            histology, alteration, num_cells_per_region_observation
+        )
+    ]), 
+    sample_id + observation_id + pathology_annotation + histology + alteration + num_cells_per_region_observation ~ niche_type,
+    value.var = 'prop_niche_type_per_region_observation', fill = 0
+)
+```
+
+## Overview of the Cell and Niche Types we are modeling
+
+```{r}
+kable(modeling_data_ct[
+    , .(
+        number_of_cell_types = length(unique(cell_type)),
+        number_of_region_observations = uniqueN(observation_id),
+        cell_types = paste(sort(unique(cell_type)), collapse = ', ')
+    ), .(sample_id, histology, alteration)
+][order(-histology)])
+kable(modeling_data_niche[
+    , .(
+        number_of_niche_types = length(unique(niche_type)),
+        number_of_region_observations = uniqueN(observation_id),
+        niche_types = paste(sort(unique(niche_type)), collapse = ', ')
+    ), .(sample_id, histology, alteration)
+][order(-histology)])
+```
+
+
+# Mixed-Effects Modeling Framework
+
+We now use a unified count-based beta-binomial mixed-effects pipeline with explicit QC gating. Pathology filtering rules are centralized below and reused for both modalities.
+
+```{r}
+pathology_rules = data.table(
+    analysis_id = c("PA", "CLN", "CN", "GG"),
+    ref_region = c("unannotated", "Cerebellum, molecular layer", "Neuropil zone", "unannotated"),
+    histology_regex = c("pilo", NA_character_, "central", NA_character_),
+    pathology_exclude_regex = c("dominant", NA_character_, "Lipid", NA_character_),
+    pathology_include_regex = c(NA_character_, NA_character_, NA_character_, NA_character_)
+)
+pathology_rules[, sample_ids_include := vector("list", .N)]
+pathology_rules[analysis_id == "PA", sample_ids_include := list(as.character(c(188570, 320784, 328368)))]
+pathology_rules[analysis_id == "CLN", sample_ids_include := list(as.character(c(67068, 42112, 87352)))]
+pathology_rules[analysis_id == "GG", sample_ids_include := list(as.character(240468))]
+
+cell_type_count_dt = build_feature_count_dt(
+    coldata_dt = modeling_data_ct,
+    feature_col = "cell_type",
+    observation_col = "observation_id"
+)
+
+niche_type_count_dt = build_feature_count_dt(
+    coldata_dt = modeling_data_niche,
+    feature_col = "niche_type",
+    observation_col = "observation_id"
+)
+
+stack_or_empty = function(x) {
+    if (length(x) == 0) return(data.table())
+    rbindlist(x, use.names = TRUE, fill = TRUE)
+}
+
+run_rule_set = function(count_dt, modality_label) {
+    all_results_list = list()
+    primary_results_list = list()
+    qc_summary_list = list()
+    qc_details_list = list()
+    filter_log_list = list()
+    feature_qc_list = list()
+    data_checks_list = list()
+
+    for (i in seq_len(nrow(pathology_rules))) {
+        rule = pathology_rules[i]
+
+        candidate_histologies = unique(count_dt$histology)
+
+        if (!is.na(rule$histology_regex)) {
+            candidate_histologies = candidate_histologies[
+                grepl(rule$histology_regex, candidate_histologies, ignore.case = TRUE)
+            ]
+        }
+
+        if (!is.null(rule$sample_ids_include[[1]])) {
+            candidate_histologies = intersect(
+                candidate_histologies,
+                unique(count_dt[sample_id %in% rule$sample_ids_include[[1]], histology])
+            )
+        }
+
+        if (length(candidate_histologies) == 0) next
+
+        for (histology_value in candidate_histologies) {
+            fit_obj = fit_feature_set(
+                count_dt = count_dt,
+                feature_col = "feature",
+                histology_value = histology_value,
+                ref_region = rule$ref_region,
+                filters = list(
+                    sample_ids_include = rule$sample_ids_include[[1]],
+                    pathology_exclude_regex = rule$pathology_exclude_regex,
+                    pathology_include_regex = rule$pathology_include_regex,
+                    modality_label = modality_label
+                ),
+                fdr_scope = "histology_modality"
+            )
+
+            if (nrow(fit_obj$all_results) > 0) {
+                fit_obj$all_results[
+                    , `:=`(analysis_id = rule$analysis_id, ref_region = rule$ref_region)
+                ]
+                all_results_list[[length(all_results_list) + 1]] = fit_obj$all_results
+            }
+
+            if (nrow(fit_obj$primary_results) > 0) {
+                fit_obj$primary_results[
+                    , `:=`(analysis_id = rule$analysis_id, ref_region = rule$ref_region)
+                ]
+                primary_results_list[[length(primary_results_list) + 1]] = fit_obj$primary_results
+            }
+
+            if (nrow(fit_obj$model_qc_summary) > 0) {
+                fit_obj$model_qc_summary[
+                    , analysis_id := rule$analysis_id
+                ]
+                qc_summary_list[[length(qc_summary_list) + 1]] = fit_obj$model_qc_summary
+            }
+
+            if (nrow(fit_obj$model_qc_details) > 0) {
+                fit_obj$model_qc_details[
+                    , analysis_id := rule$analysis_id
+                ]
+                qc_details_list[[length(qc_details_list) + 1]] = fit_obj$model_qc_details
+            }
+
+            if (nrow(fit_obj$filter_log) > 0) {
+                fit_obj$filter_log[
+                    , analysis_id := rule$analysis_id
+                ]
+                filter_log_list[[length(filter_log_list) + 1]] = fit_obj$filter_log
+            }
+
+            if (nrow(fit_obj$feature_qc) > 0) {
+                fit_obj$feature_qc[
+                    , `:=`(analysis_id = rule$analysis_id, histology = histology_value, modality = modality_label)
+                ]
+                feature_qc_list[[length(feature_qc_list) + 1]] = fit_obj$feature_qc
+            }
+
+            if (nrow(fit_obj$data_checks) > 0) {
+                fit_obj$data_checks[
+                    , analysis_id := rule$analysis_id
+                ]
+                data_checks_list[[length(data_checks_list) + 1]] = fit_obj$data_checks
+            }
+        }
+    }
+
+    list(
+        all_results = stack_or_empty(all_results_list),
+        primary_results = stack_or_empty(primary_results_list),
+        model_qc_summary = stack_or_empty(qc_summary_list),
+        model_qc_details = stack_or_empty(qc_details_list),
+        filter_log = stack_or_empty(filter_log_list),
+        feature_qc = stack_or_empty(feature_qc_list),
+        data_checks = stack_or_empty(data_checks_list)
+    )
+}
+
+cell_type_results = run_rule_set(
+    count_dt = cell_type_count_dt,
+    modality_label = "cell_type"
+)
+
+niche_type_results = run_rule_set(
+    count_dt = niche_type_count_dt,
+    modality_label = "niche_type"
+)
+```
+
+## QC Summary
+
+```{r}
+kable(cell_type_results$model_qc_summary)
+kable(niche_type_results$model_qc_summary)
+```
+
+```{r}
+kable(cell_type_results$data_checks)
+kable(niche_type_results$data_checks)
+```
+
+## Export Standardized Outputs
+
+```{r}
+out_dir = file.path("annotations", "model_outputs", "mixed_models")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+fwrite(cell_type_results$primary_results, file.path(out_dir, "linear_models_cell_type_primary_results.tsv"), sep = "\t")
+fwrite(cell_type_results$all_results, file.path(out_dir, "linear_models_cell_type_all_results_with_qc.tsv"), sep = "\t")
+fwrite(cell_type_results$model_qc_summary, file.path(out_dir, "linear_models_cell_type_model_qc_summary.tsv"), sep = "\t")
+
+fwrite(niche_type_results$primary_results, file.path(out_dir, "linear_models_niche_type_primary_results.tsv"), sep = "\t")
+fwrite(niche_type_results$all_results, file.path(out_dir, "linear_models_niche_type_all_results_with_qc.tsv"), sep = "\t")
+fwrite(niche_type_results$model_qc_summary, file.path(out_dir, "linear_models_niche_type_model_qc_summary.tsv"), sep = "\t")
+```
+
+# Visualize Primary-Pass Results
+
+## Cell Types
+
+```{r}
+plot_cell_primary = summarize_results_for_plot(
+    results_dt = cell_type_results$all_results,
+    primary_only = TRUE
+)
+
+if (nrow(plot_cell_primary) > 0) {
+    ggplot(plot_cell_primary, aes(
+        x = estimate_log_odds,
+        y = feature,
+        color = factor(sign_call, levels = c("enriched", "depleted", "not_significant"))
+    )) +
+        geom_point() +
+        geom_errorbarh(aes(
+            xmin = estimate_log_odds - 1.96 * se,
+            xmax = estimate_log_odds + 1.96 * se
+        ), height = 0.25) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+        facet_wrap(~ paste0(analysis_id, " | ", annotation_region), scales = "free_x") +
+        theme_bw(base_size = 12) +
+        theme(
+            legend.position = "bottom",
+            legend.title = element_blank(),
+            panel.grid.minor = element_blank()
+        ) +
+        labs(
+            title = "Cell Type Enrichment (Primary-Pass Mixed Models)",
+            x = "Log-odds estimate",
+            y = "Cell Type"
+        ) +
+        scale_color_brewer(palette = "Set1")
+} else {
+    message("No primary-pass cell-type models to plot.")
+}
+```
+
+## Niche Types
+
+```{r}
+plot_niche_primary = summarize_results_for_plot(
+    results_dt = niche_type_results$all_results,
+    primary_only = TRUE
+)
+
+if (nrow(plot_niche_primary) > 0) {
+    ggplot(plot_niche_primary, aes(
+        x = estimate_log_odds,
+        y = feature,
+        color = factor(sign_call, levels = c("enriched", "depleted", "not_significant"))
+    )) +
+        geom_point() +
+        geom_errorbarh(aes(
+            xmin = estimate_log_odds - 1.96 * se,
+            xmax = estimate_log_odds + 1.96 * se
+        ), height = 0.25) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+        facet_wrap(~ paste0(analysis_id, " | ", annotation_region), scales = "free_x") +
+        theme_bw(base_size = 12) +
+        theme(
+            legend.position = "bottom",
+            legend.title = element_blank(),
+            panel.grid.minor = element_blank()
+        ) +
+        labs(
+            title = "Niche Type Enrichment (Primary-Pass Mixed Models)",
+            x = "Log-odds estimate",
+            y = "Niche Type"
+        ) +
+        scale_color_brewer(palette = "Set1")
+} else {
+    message("No primary-pass niche-type models to plot.")
+}
+```
+
+# Flagged or Exploratory Results (Warn/Fail)
+
+```{r}
+plot_flagged = summarize_results_for_plot(
+    results_dt = rbindlist(list(cell_type_results$all_results, niche_type_results$all_results), use.names = TRUE, fill = TRUE),
+    primary_only = FALSE
+)[model_status != "pass"]
+
+if (nrow(plot_flagged) > 0) {
+    ggplot(plot_flagged, aes(
+        x = estimate_log_odds,
+        y = feature,
+        color = analysis_id,
+        shape = model_status
+    )) +
+        geom_point(size = 2) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
+        facet_wrap(~ modality, scales = "free_y") +
+        theme_bw(base_size = 12) +
+        labs(
+            title = "Flagged / Exploratory Results",
+            x = "Log-odds estimate",
+            y = "Feature"
+        )
+} else {
+    message("No warn/fail rows available for flagged view.")
+}
+```

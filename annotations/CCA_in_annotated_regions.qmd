@@ -1,0 +1,328 @@
+---
+title: "Cell Cell Adjacencies in Banksy Niches"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+Here we will use a neighborhood adjacency analysis to look at the adjacency of cell types within niches. 
+
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+library(Seurat)
+library(dbscan)
+library(circlize)
+library(Seurat)
+library(scales)
+library(htmlwidgets)
+
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else {
+    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+```
+
+
+# Preperations
+
+## Loading the data
+
+The objects are here:
+
+RDS object with Leiden Clusters: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds`
+
+    -   `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_embeddings/total_spatial_banksy_clusters_subset_20240719_092550.rds`
+
+
+Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
+
+
+```{r}
+# load the banksy embeddings
+banksy_embeddings = readRDS(ifelse(
+    workdir == '/xchip/beroukhimlab/',
+    paste0(workdir,'coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_20240719_092550.rds'),
+    '/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/total_spatial_banksy_clusters_subset_20240719_092550.rds'
+))
+colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+
+# Load the cell type clusters annotation
+prelim_annotation_res1 = fread(paste0(
+    workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
+))
+
+# specify the cluster names 
+# this is mainly to keep track of which resolution we are using
+cell_res = 1
+cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
+niche_res = 1
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
+
+# # filter the banksy object to only include the cells with annotated cell types
+# annotated_cell_clusters = sort(unique(prelim_annotation_res1$cluster))
+# banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)[,cell_clust_name] %in% annotated_cell_clusters]
+```
+
+
+## Build the color palette for all niches and cell types downstream
+
+```{r}
+set.seed(5555)
+cluster_classes = levels(colData(banksy_embeddings)[[niche_clust_name]])
+niche_color_manual = structure(
+    pals::polychrome()[c(1:length(cluster_classes))],
+    names = sample(cluster_classes)
+)
+# for niche resolution 0.5
+# niches_to_show = c(1:11, 13, 14, 16, 17)
+# for niche resolution 1
+niches_to_show = c(1:20, 22:25)
+
+cell_type_to_test = 'Coarse Cell Type'
+cell_type_to_test = 'Fine Cell Type'
+cell_type_to_test = 'Fine Cell Type UMAP'
+
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+```
+
+
+## Setting up Neighborhood Analysis
+
+Here we will look at the niches in the data and annotate them using the cell types of self and neighbors.
+
+```{r}
+banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)$sample_id %in% c(258482,240468)]
+table(colData(banksy_embeddings)$sample_id)
+k_geom = 30
+locs = spatialCoords(banksy_embeddings)
+knn = dbscan::kNN(x = locs, k = k_geom)
+knnDT <- data.table(
+    from = rep(seq_len(nrow(knn$id)), k_geom),
+    from_id = rep(rownames(knn$id), k_geom),
+    to = as.vector(knn$id),
+    to_id = rownames(knn$id)[as.vector(knn$id)],
+    distance = as.vector(knn$dist)
+)
+cell_cell_type_dt = data.table(
+    cell_id = rownames(colData(banksy_embeddings)),
+    cell_type = as.numeric(colData(banksy_embeddings)[,cell_clust_name]),
+    niche_type = as.factor(colData(banksy_embeddings)[,niche_clust_name]),
+    sample_id = colData(banksy_embeddings)$sample_id,
+    histology = colData(banksy_embeddings)$histology
+)
+```
+
+cell annotation 
+
+```{r}
+gg_annotation = fread('~/Downloads/pathology_GG240468_meta.csv')[
+    ,.(cell_id = paste0(cell_id,'__240468'), annotation)
+]
+pa_annotation = fread('~/Downloads/pathology_PA258482_meta.csv')[
+    ,.(cell_id = paste0(cell_id,'__258482'), annotation)
+]
+message(paste0(
+    'For GG: there are ', nrow(gg_annotation), ' cells with annotations, ',
+    'and ', nrow(cell_cell_type_dt[sample_id == '240468']), ' cells in the banksy object after QC.',
+    '\nTotal intersection: ', length(intersect(gg_annotation$cell_id, cell_cell_type_dt[sample_id == '240468']$cell_id)),
+    ' and setdiff: ', length(setdiff(gg_annotation$cell_id, cell_cell_type_dt[sample_id == '240468']$cell_id))
+))
+message(paste0(
+    'For PA: there are ', nrow(pa_annotation), ' cells with annotations, ',
+    'and ', nrow(cell_cell_type_dt[sample_id == '258482']), ' cells in the banksy object after QC.',
+    '\nTotal intersection: ', length(intersect(pa_annotation$cell_id, cell_cell_type_dt[sample_id == '258482']$cell_id)),
+    ' and setdiff: ', length(setdiff(pa_annotation$cell_id, cell_cell_type_dt[sample_id == '258482']$cell_id))
+))
+```
+
+# Cell Cell Adjacency Analysis in GG
+
+```{r}
+gg_knnDT = knnDT[from_id %in% cell_cell_type_dt[sample_id == '240468']$cell_id]
+gg_cell_cell_type_dt = cell_cell_type_dt[sample_id == '240468']
+gg_cel_type_prop = gg_cell_cell_type_dt[, .(prop = round(.N/nrow(gg_cell_cell_type_dt),4)), .(cell_type)][order(-prop)]
+kable(gg_cel_type_prop)
+gg_cell_cell_type_dt[
+    ,cell_type := ifelse(cell_type %in% gg_cel_type_prop[prop < 0.01]$cell_type, 'Other', cell_type)
+]
+
+gg_dt_to_wilcox_test = dcast(
+    gg_knnDT[,.(from_id,to_id,distance)][
+        gg_cell_cell_type_dt[,.(cell_id,cell_type_to = cell_type)], 
+        on = c('to_id' = 'cell_id'), nomatch = NULL
+    ][
+        gg_cell_cell_type_dt[,.(
+            cell_id, niche_type_from = niche_type, 
+            cell_type_from = cell_type, sample_id, histology
+        )], on = c('from_id' = 'cell_id'), nomatch = NULL
+    ][
+        gg_annotation, on = c('from_id' = 'cell_id'), nomatch = NULL
+    ][
+        ,.(neighbor_proportions = .N/k_geom), .(from_id, cell_type_from, cell_type_to, annotation)
+    ], from_id + cell_type_from + annotation ~ cell_type_to, 
+    value.var = 'neighbor_proportions', fill = 0
+)
+
+gg_cca_enrichment = rbindlist(lapply(
+    sort(unique(gg_dt_to_wilcox_test$cell_type_from)), function(x){
+        print(x)
+        pairwise_categorical_continuous_enrichment_wilcox_test(
+            gg_dt_to_wilcox_test[cell_type_from == x, -2], num_cores = 1
+        )[, cell_type_from := x]
+    }
+))
+
+cell_type_replacement = structure(
+    c(unlist(prelim_annotation_res1[, .(get(cell_type_to_test))]),'Other'),
+    names = c(prelim_annotation_res1$cluster,'Other')
+)
+gg_cca_enrichment$cell_type_name_from = cell_type_replacement[gg_cca_enrichment$cell_type_from]
+gg_cca_enrichment$cell_type_name_to = cell_type_replacement[gg_cca_enrichment$continuous_cols]
+gg_cca_enrichment$q_value = p.adjust(gg_cca_enrichment$p_value, method = 'fdr')
+
+ggplot(gg_cca_enrichment) +
+    geom_point(aes(
+        x = cell_type_name_from, y = cell_type_name_to, size = N_var2,
+        fill = delta, 
+        color = ifelse(q_value <= 0.05 & as.numeric(delta) > 0, 'significant','not significant')
+    ), shape = 21, stroke = 1) + 
+    facet_wrap(~annotation, nrow = 1) +
+    theme_linedraw() +
+    theme(
+        text = element_text(size = 15), 
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = 'right'
+    ) + scale_fill_viridis_c() +
+    scale_size_area(max_size = 10) +
+    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Enrichment of CCA By Annotation in GG 240468',
+        x = 'Cell Type (Self)',
+        y = 'Cell Type (Neighbor)',
+        size = '% of Cells',
+        fill = 'Delta',
+        color = 'Significance'
+    ) + guides(
+        fill = guide_legend(title = 'Delta'),
+        color = guide_legend(title = 'Significance')
+    )
+
+```
+
+# Cell Cell Adjacency Analysis in PA
+
+```{r}
+pa_knnDT = knnDT[from_id %in% cell_cell_type_dt[sample_id == '258482']$cell_id]
+pa_cell_cell_type_dt = cell_cell_type_dt[sample_id == '258482']
+pa_cel_type_prop = pa_cell_cell_type_dt[, .(prop = round(.N/nrow(pa_cell_cell_type_dt),4)), .(cell_type)][order(-prop)]
+kable(pa_cel_type_prop)
+pa_cell_cell_type_dt[
+    ,cell_type := ifelse(cell_type %in% pa_cel_type_prop[prop < 0.001]$cell_type, 'Other', cell_type)
+]
+
+pa_dt_to_wilcox_test = dcast(
+    pa_knnDT[,.(from_id,to_id,distance)][
+        pa_cell_cell_type_dt[,.(cell_id,cell_type_to = cell_type)], 
+        on = c('to_id' = 'cell_id'), nomatch = NULL
+    ][
+        pa_cell_cell_type_dt[,.(
+            cell_id, niche_type_from = niche_type, 
+            cell_type_from = cell_type, sample_id, histology
+        )], on = c('from_id' = 'cell_id'), nomatch = NULL
+    ][
+        pa_annotation, on = c('from_id' = 'cell_id'), nomatch = NULL
+    ][
+        ,.(neighbor_proportions = .N/k_geom), .(from_id, cell_type_from, cell_type_to, annotation)
+    ], from_id + cell_type_from + annotation ~ cell_type_to, 
+    value.var = 'neighbor_proportions', fill = 0
+)
+
+pa_cca_enrichment = rbindlist(lapply(
+    sort(unique(pa_dt_to_wilcox_test$cell_type_from)), function(x){
+        print(x)
+        pairwise_categorical_continuous_enrichment_wilcox_test(
+            pa_dt_to_wilcox_test[cell_type_from == x, -2], num_cores = 1
+        )[, cell_type_from := x]
+    }
+))
+
+cell_type_replacement = structure(
+    c(unlist(prelim_annotation_res1[, .(get(cell_type_to_test))]),'Other'),
+    names = c(prelim_annotation_res1$cluster,'Other')
+)
+pa_cca_enrichment$cell_type_name_from = cell_type_replacement[pa_cca_enrichment$cell_type_from]
+pa_cca_enrichment$cell_type_name_to = cell_type_replacement[pa_cca_enrichment$continuous_cols]
+pa_cca_enrichment$q_value = p.adjust(pa_cca_enrichment$p_value, method = 'fdr')
+
+ggplot(pa_cca_enrichment) +
+    geom_point(aes(
+        x = cell_type_name_from, y = cell_type_name_to, size = N_var2,
+        fill = delta, 
+        color = ifelse(q_value <= 0.05 & as.numeric(delta) > 0, 'significant','not significant')
+    ), shape = 21, stroke = 1) + 
+    facet_wrap(~annotation, nrow = 1) +
+    theme_linedraw() +
+    theme(
+        text = element_text(size = 15), 
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = 'right'
+    ) + scale_fill_viridis_c() +
+    scale_size_area(max_size = 10) +
+    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    labs(
+        title = 'Enrichment of CCA By Annotation in PA 258482',
+        x = 'Cell Type (Self)',
+        y = 'Cell Type (Neighbor)',
+        size = '% of Cells',
+        fill = 'Delta',
+        color = 'Significance'
+    ) + guides(
+        fill = guide_legend(title = 'Delta'),
+        color = guide_legend(title = 'Significance')
+    )
+
+
+
+```

@@ -1,0 +1,74 @@
+---
+title: ""
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+We are going to look at the cell coordinates from the raw xenium outputs here -- `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer`
+
+```{r}
+#| echo: FALSE
+library(data.table)
+library(ggplot2)
+library(knitr)
+# local vs UGER
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/youyun/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/youyun/"
+} else {
+    # in dipg or uger, the home directory is '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Load Data
+
+```{r}
+cell_position_files = paste0(
+    list.files(paste0(workdir, "coja/Spatial_PLGG/data/Xenium/Xenium_Analyzer/"), full.names = TRUE),
+    '/cells.csv.gz'
+)
+cell_position_files
+```
+
+# Position min max
+
+```{r}
+positions = rbindlist(lapply(
+    cell_position_files, function(x){
+        cells = fread(cmd = paste0('zcat < ',x))
+        return(data.table(
+            sample = basename(gsub('/cells.csv.gz', '', x)),
+            min_x = min(cells$x_centroid),
+            max_x = max(cells$x_centroid),
+            min_y = min(cells$y_centroid),
+            max_y = max(cells$y_centroid)
+        ))
+    }
+))
+kable(positions)
+```
