@@ -31,9 +31,16 @@ Two analysis stages:
 - **Stage 1**: healthy vs all tumor (maximum power).
 - **Stage 2**: healthy vs each tumor entity (IntDx), one coefficient per entity.
 
-Pseudobulk unit: `sample_ID × location_broad`. Each row is a sample (or a
-donor × region for multi-region BCA donors) with counts per cell type and total
-non-neoplastic cells.
+The primary analysis uses a non-neoplastic (TME) denominator. A **sensitivity
+analysis** at the end re-runs both stages with neoplastic cells kept in the
+denominator, so TME fractions stay comparable across entities that differ in how
+reliably neoplastic cells can be called.
+
+Pseudobulk unit: `donor_proxy × location_broad`. Each row is a biological
+donor (healthy) or patient sample (tumor) × brain region, with counts per cell
+type and total non-neoplastic cells. `donor_proxy` collapses multi-batch and
+per-cell-GSM healthy IDs to the biological-donor level; tumor `sample_ID`s are
+used as-is.
 
 ```{r setup}
 #| echo: FALSE
@@ -95,19 +102,19 @@ theme_nature = function(base_size = 9) {
 df = read_parquet(in_path)
 cat("Loaded:", nrow(df), "cells\n")
 
-# --- Pseudobulk: counts per sample_ID x location_broad x cell_type -----------
+# --- Pseudobulk: counts per donor_proxy x location_broad x cell_type ----------
 ct_counts = df |>
-    group_by(sample_ID, location_broad, cell_type_harmonised) |>
+    group_by(donor_proxy, location_broad, cell_type_harmonised) |>
     summarise(n_ct = n(), .groups = "drop")
 
 unit_totals = df |>
-    group_by(sample_ID, location_broad) |>
+    group_by(donor_proxy, location_broad) |>
     summarise(n_total = n(), .groups = "drop")
 
-# Sample-level covariates must be constant within sample_ID x location_broad.
+# Sample-level covariates must be constant within donor_proxy x location_broad.
 # Warn if any unit shows variation (e.g. mixed IntDx, which shouldn't occur).
 sample_meta = df |>
-    group_by(sample_ID, location_broad) |>
+    group_by(donor_proxy, location_broad) |>
     summarise(
         condition                    = first(condition),
         IntDx                        = first(IntDx),
@@ -117,24 +124,24 @@ sample_meta = df |>
         .groups = "drop"
     )
 
-# Verify IntDx is constant within each tumor sample
+# Verify IntDx is constant within each tumor donor_proxy x location unit
 intdx_check = df |>
     filter(condition == "tumor") |>
-    group_by(sample_ID, location_broad) |>
+    group_by(donor_proxy, location_broad) |>
     summarise(n_intdx = n_distinct(IntDx), .groups = "drop") |>
     filter(n_intdx > 1)
-if (nrow(intdx_check) > 0) warning("Some tumor units have mixed IntDx: ", paste(intdx_check$sample_ID, collapse = ", "))
+if (nrow(intdx_check) > 0) warning("Some tumor units have mixed IntDx: ", paste(intdx_check$donor_proxy, collapse = ", "))
 
-# Complete grid: all sample x location units x all cell types (fill zeros)
-all_units = sample_meta |> select(sample_ID, location_broad)
+# Complete grid: all donor_proxy x location units x all cell types (fill zeros)
+all_units = sample_meta |> select(donor_proxy, location_broad)
 all_ct    = df |> distinct(cell_type_harmonised)
 pseudobulk = cross_join(all_units, all_ct) |>
-    left_join(ct_counts,    by = c("sample_ID", "location_broad", "cell_type_harmonised")) |>
-    left_join(unit_totals,  by = c("sample_ID", "location_broad")) |>
-    left_join(sample_meta,  by = c("sample_ID", "location_broad")) |>
+    left_join(ct_counts,    by = c("donor_proxy", "location_broad", "cell_type_harmonised")) |>
+    left_join(unit_totals,  by = c("donor_proxy", "location_broad")) |>
+    left_join(sample_meta,  by = c("donor_proxy", "location_broad")) |>
     mutate(n_ct = replace_na(n_ct, 0))
 
-cat("Pseudobulk units:", nrow(all_units), "\n")
+cat("Pseudobulk units (donor_proxy x location):", nrow(all_units), "\n")
 cat("Pseudobulk rows (units x cell types):", nrow(pseudobulk), "\n")
 cat("Healthy units:", sum(sample_meta$condition == "healthy"), "\n")
 cat("Tumor units:", sum(sample_meta$condition == "tumor"), "\n")
@@ -274,7 +281,7 @@ MIN_SAMPLES_PER_ENTITY = 3
 
 entity_counts = pseudobulk |>
     filter(condition == "tumor") |>
-    distinct(sample_ID, location_broad, IntDx) |>
+    distinct(donor_proxy, location_broad, IntDx) |>
     count(IntDx, name = "n_units")
 
 entities_kept = entity_counts |> filter(n_units >= MIN_SAMPLES_PER_ENTITY) |> pull(IntDx)
@@ -487,6 +494,429 @@ plot_covar_heatmap(stage1_covars, "Stage 1: covariate effects on cell-type propo
 
 ```{r stage2-covariate-heatmap, fig.width=7, fig.height=5.5}
 plot_covar_heatmap(stage2_covars, "Stage 2: covariate effects on cell-type proportions")
+```
+
+---
+
+# Sensitivity: neoplastic cells kept in the denominator
+
+The primary analysis above excludes neoplastic cells, so cell-type fractions are
+expressed as a share of the **non-neoplastic (TME) compartment**. That choice is
+confounded across entities because neoplastic cells can only be *called* where
+tumor cells are aneuploid. Entities with strong aneuploidy (e.g. CN ~85%,
+DLGNT ~70% neoplastic-called) have most tumor cells removed from the
+denominator, inflating their TME fractions; entities with little detectable
+aneuploidy (PA ~6%, RGNT ~2%, PGNT 0%) keep their tumor cells in the
+denominator — mislabeled as OPC/Astrocyte — deflating the same TME fractions.
+Immune shares are therefore not comparable across entities in the primary
+analysis.
+
+This section re-expresses every cell type as a **fraction of all cells**
+(neoplastic included in the denominator) so the denominator is the whole tumor
+for every entity, regardless of call rate.
+
+The centerpiece is the **descriptive composition heatmap** below: mean per-donor
+cell-type fraction for every cell type — including Neoplastic — across entities
+and healthy, all on the common all-cell denominator. This is where the immune
+signal the user asked about is actually readable and comparable across entities.
+The beta-binomial "vs healthy" models that follow are supporting, and carry three
+important caveats:
+
+1. **"Vs healthy" odds ratios cannot carry the immune signal.** Healthy brain
+   has zero B/T/NK cells, macrophages, monocytes, neutrophils, cDCs, and zero
+   neoplastic cells. For those cell types the "vs healthy" comparison is complete
+   separation (no denominator on the healthy side), so the model returns a huge
+   positive coefficient that is a structural artifact, not enrichment. Read
+   immune and neoplastic differences from the descriptive composition heatmap,
+   not from the model odds ratios. The vs-healthy heatmap is therefore restricted
+   to cell types actually present in healthy brain.
+2. **This fixes only half the confound.** Putting neoplastic back in the
+   denominator restores cross-entity comparability for immune/vascular/etc.
+   fractions. It does **not** un-mislabel the uncalled tumor cells: in
+   low-aneuploidy entities those cells remain counted as OPC/Astrocyte, so
+   OPC and Astrocyte fractions there stay contaminated upward. Read OPC/
+   Astrocyte in low-call entities (PA, RGNT, PGNT, MYXGNT) with caution.
+3. **Effect sizes are not comparable to the primary analysis.** Cell types
+   present in both arms (neurons, oligodendrocytes, astrocytes) shift toward
+   "depleted in tumor" here because tumor units now spend denominator space on
+   neoplastic cells that healthy units lack; types absent in healthy stay as
+   complete-separation artifacts (see caveat 1). This is a denominator effect,
+   not new biology: this section answers "fraction of *all* cells" while the
+   primary analysis answers "fraction of the *TME*". `fraction_neoplastic_detected`
+   is deliberately omitted as a covariate here — it is collinear with the
+   denominator once neoplastic cells are counted.
+
+```{r load-pseudobulk-neo}
+# All-cell-denominator parquet (Neoplastic retained; see prepare_metadata.R)
+in_path_neo = file.path(sc_dir, "combined_healthyTumor_obs_metadata_withneoplastic.parquet")
+df_neo = read_parquet(in_path_neo)
+cat("Loaded (with neoplastic):", nrow(df_neo), "cells\n")
+
+# Denominator = ALL cells per unit (this is the correction — neoplastic counted)
+unit_totals_neo = df_neo |>
+    group_by(donor_proxy, location_broad) |>
+    summarise(n_total = n(), .groups = "drop")
+
+# Per-type counts, including Neoplastic (used for the descriptive barplot)
+ct_counts_neo = df_neo |>
+    group_by(donor_proxy, location_broad, cell_type_harmonised) |>
+    summarise(n_ct = n(), .groups = "drop")
+
+# Sample-level covariates, constant within donor_proxy x location_broad
+sample_meta_neo = df_neo |>
+    group_by(donor_proxy, location_broad) |>
+    summarise(
+        condition    = first(condition),
+        IntDx        = first(IntDx),
+        age_yr       = first(age_yr),
+        sex_combined = first(sex_combined),
+        .groups = "drop"
+    )
+
+# Modeled types = non-neoplastic TME (Neoplastic is degenerate vs healthy, shown
+# descriptively). n_total still includes neoplastic, so these are all-cell shares.
+cell_types_neo = setdiff(sort(unique(df_neo$cell_type_harmonised)), "Neoplastic")
+
+# Cell types with ANY healthy cells — only these give a meaningful "vs healthy"
+# odds ratio. Types absent in healthy (peripheral immune, neoplastic) are shown
+# in the descriptive composition heatmap instead of the model heatmaps.
+healthy_present = df_neo |>
+    filter(condition == "healthy") |>
+    distinct(cell_type_harmonised) |>
+    pull(cell_type_harmonised)
+
+all_units_neo = sample_meta_neo |> select(donor_proxy, location_broad)
+all_ct_neo    = tibble(cell_type_harmonised = cell_types_neo)
+pseudobulk_neo = cross_join(all_units_neo, all_ct_neo) |>
+    left_join(ct_counts_neo,   by = c("donor_proxy", "location_broad", "cell_type_harmonised")) |>
+    left_join(unit_totals_neo, by = c("donor_proxy", "location_broad")) |>
+    left_join(sample_meta_neo, by = c("donor_proxy", "location_broad")) |>
+    mutate(n_ct = replace_na(n_ct, 0))
+
+# Full grid INCLUDING Neoplastic, with per-donor fractions, for the descriptive
+# composition heatmap (the models below use the non-neoplastic subset).
+all_ct_full = tibble(cell_type_harmonised = sort(unique(df_neo$cell_type_harmonised)))
+pseudobulk_full = cross_join(all_units_neo, all_ct_full) |>
+    left_join(ct_counts_neo,   by = c("donor_proxy", "location_broad", "cell_type_harmonised")) |>
+    left_join(unit_totals_neo, by = c("donor_proxy", "location_broad")) |>
+    left_join(sample_meta_neo, by = c("donor_proxy", "location_broad")) |>
+    mutate(n_ct = replace_na(n_ct, 0), frac = n_ct / n_total)
+
+# Entity filter (shared by the descriptive heatmap and Stage 2): same tumor units
+# as the primary analysis, so the same entities pass the min-sample threshold.
+entity_counts_neo = pseudobulk_neo |>
+    filter(condition == "tumor") |>
+    distinct(donor_proxy, location_broad, IntDx) |>
+    count(IntDx, name = "n_units")
+entities_kept_neo = entity_counts_neo |> filter(n_units >= MIN_SAMPLES_PER_ENTITY) |>
+    pull(IntDx) |> as.character()
+
+cat("Pseudobulk units (with-neoplastic):", nrow(all_units_neo), "\n")
+cat("Modeled cell types:", paste(cell_types_neo, collapse = ", "), "\n")
+cat("Present in healthy (modelable vs healthy):", paste(sort(healthy_present), collapse = ", "), "\n")
+```
+
+```{r pseudobulk-neo-verify}
+#| echo: FALSE
+# Sanity checks: only tumor denominators should change relative to the primary
+# analysis; the unit set and healthy denominators must be identical.
+denom_cmp = unit_totals |>
+    rename(n_total_main = n_total) |>
+    full_join(unit_totals_neo |> rename(n_total_neo = n_total),
+              by = c("donor_proxy", "location_broad")) |>
+    left_join(sample_meta_neo |> select(donor_proxy, location_broad, condition),
+              by = c("donor_proxy", "location_broad"))
+
+cat("Healthy units with changed denominator (expect 0):",
+    sum(denom_cmp$condition == "healthy" &
+        denom_cmp$n_total_main != denom_cmp$n_total_neo, na.rm = TRUE), "\n")
+cat("Tumor units whose denominator grew (neoplastic added):",
+    sum(denom_cmp$condition == "tumor" &
+        denom_cmp$n_total_neo > denom_cmp$n_total_main, na.rm = TRUE), "\n")
+cat("Units present in one parquet only (expect 0):",
+    sum(is.na(denom_cmp$n_total_main) | is.na(denom_cmp$n_total_neo)), "\n")
+cat("Tumor unit count — main:", sum(sample_meta$condition == "tumor"),
+    " | with-neoplastic:", sum(sample_meta_neo$condition == "tumor"), "\n")
+```
+
+## Neoplastic proportion per entity (descriptive)
+
+Fraction of all sequenced cells called Neoplastic, per entity. This is the
+call-rate variable that drives the primary-analysis confound; it is shown
+descriptively because a model coefficient vs healthy (structural zero) is
+uninformative.
+
+```{r neoplastic-fraction-barplot, fig.width=6, fig.height=4}
+neo_frac_entity = df_neo |>
+    filter(condition == "tumor") |>
+    group_by(IntDx) |>
+    summarise(
+        n_cells = n(),
+        n_neo   = sum(cell_type_harmonised == "Neoplastic"),
+        frac    = n_neo / n_cells,
+        .groups = "drop"
+    ) |>
+    arrange(desc(frac))
+
+ggplot(neo_frac_entity, aes(x = reorder(IntDx, frac), y = frac)) +
+    geom_col(fill = "#8E44AD", width = 0.7) +
+    geom_text(aes(label = scales::percent(frac, accuracy = 1)),
+              hjust = -0.15, size = 2.8) +
+    coord_flip(ylim = c(0, 1)) +
+    labs(
+        x = NULL, y = "Fraction of cells called Neoplastic",
+        title = "Neoplastic call rate varies widely across entities",
+        subtitle = "Low-call entities keep tumor cells mislabeled in the denominator"
+    ) +
+    theme_nature(base_size = 9)
+```
+
+## Cell-type composition per entity (all-cell denominator, descriptive)
+
+The core view. Each cell is counted against the whole-tumor denominator, so
+fractions are directly comparable across entities and healthy — **Neoplastic
+included as its own category**. Cells are the mean per-donor fraction within each
+group (donor-weighted, matching the pseudobulk unit). Text is the actual mean
+percentage; color is row-scaled (z-score across columns) so relative differences
+are visible even for rare types like lymphocytes. This is the figure to read for
+immune and neoplastic differences across entities.
+
+```{r composition-heatmap-neo, fig.width=9, fig.height=7}
+# Mean per-donor fraction per (group x cell type). group = Healthy or IntDx.
+group_frac = pseudobulk_full |>
+    mutate(group = if_else(condition == "healthy", "Healthy", as.character(IntDx))) |>
+    filter(group == "Healthy" | group %in% entities_kept_neo) |>
+    group_by(group, cell_type_harmonised) |>
+    summarise(mean_frac = mean(frac), .groups = "drop")
+
+# Fraction matrix: rows = cell types, cols = Healthy + entities.
+frac_mat = group_frac |>
+    mutate(cell_type_harmonised = str_replace_all(cell_type_harmonised, "_", " ")) |>
+    pivot_wider(names_from = group, values_from = mean_frac) |>
+    tibble::column_to_rownames("cell_type_harmonised") |>
+    as.matrix()
+
+# Column order: Healthy first, then entities by descending neoplastic fraction
+# (so the call-rate gradient driving the confound reads left-to-right).
+# IntDx is a factor (arrow dictionary) — coerce to character before c() with
+# "Healthy", else the factor collapses to integer codes.
+entity_order = neo_frac_entity |> filter(IntDx %in% entities_kept_neo) |>
+    pull(IntDx) |> as.character()
+col_order    = c("Healthy", entity_order)
+frac_mat     = frac_mat[, col_order[col_order %in% colnames(frac_mat)], drop = FALSE]
+
+# Row-scale (z-score across columns) for color; zero-variance rows -> 0.
+frac_z = t(scale(t(frac_mat)))
+frac_z[is.nan(frac_z)] = 0
+
+z_col = colorRamp2(c(-1.5, 0, 1.5), c("#2166AC", "white", "#B2182B"))
+
+Heatmap(
+    frac_z,
+    name             = "row z-score\n(fraction)",
+    col              = z_col,
+    cell_fun         = function(j, i, x, y, width, height, fill) {
+        grid.text(scales::percent(frac_mat[i, j], accuracy = 0.1), x, y,
+                  gp = gpar(fontsize = 6, col = "black"))
+    },
+    row_names_gp     = gpar(fontsize = 8),
+    column_names_gp  = gpar(fontsize = 8, fontface = "bold"),
+    column_names_rot = 45,
+    cluster_rows     = TRUE,
+    cluster_columns  = FALSE,   # keep Healthy-first, call-rate-ordered columns
+    show_row_dend    = TRUE,
+    show_column_dend = FALSE,
+    heatmap_legend_param = list(
+        title_gp      = gpar(fontsize = 8, fontface = "bold"),
+        labels_gp     = gpar(fontsize = 7),
+        legend_height = unit(3, "cm")
+    ),
+    column_title     = "Mean per-donor cell-type fraction (all cells) — Neoplastic included",
+    column_title_gp  = gpar(fontsize = 10, fontface = "bold"),
+    row_title_gp     = gpar(fontsize = 9)
+)
+```
+
+## Stage 1 (all-cell denominator): tumor vs healthy
+
+```{r stage1-neo-model}
+# Same formula/reference as the primary Stage 1, but n_total now includes
+# neoplastic cells. Reuses the fit_betabin helper.
+pseudobulk_neo_s1 = pseudobulk_neo |>
+    mutate(condition = relevel(factor(condition), ref = "healthy"))
+
+stage1_neo_raw = map_dfr(cell_types_neo, \(ct)
+    fit_betabin(
+        ct          = ct,
+        formula_str = "cbind(n_ct, n_other) ~ condition + age_yr + location_broad + sex_combined",
+        dat         = pseudobulk_neo_s1
+    )
+)
+
+stage1_neo = stage1_neo_raw |>
+    filter(converged, !is.na(p.value), term == "conditiontumor") |>
+    mutate(
+        q.value   = p.adjust(p.value, method = "BH"),
+        sig       = q.value < 0.1,
+        direction = if_else(estimate > 0, "Enriched in tumor", "Depleted in tumor")
+    )
+
+cat("Stage 1 (neo) convergence failures:",
+    sum(!stage1_neo_raw$converged | is.na(stage1_neo_raw$p.value)), "/", length(cell_types_neo), "\n")
+print(stage1_neo |> select(cell_type, estimate, std.error, p.value, q.value, sig) |>
+      arrange(q.value))
+
+write.table(stage1_neo, file.path(code_dir, "results_stage1_tumor_vs_healthy_withneoplastic.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+```{r stage1-neo-plot, fig.width=5, fig.height=5}
+# Forest plot mirrors the primary Stage 1; note the shift toward "depleted in
+# tumor" is expected (denominator now includes neoplastic cells).
+sig_colors = c("Enriched in tumor" = "#C0392B", "Depleted in tumor" = "#2980B9", "n.s." = "gray60")
+
+stage1_neo_plot = stage1_neo |>
+    mutate(
+        sig_label = if_else(sig, direction, "n.s."),
+        cell_type = str_replace_all(cell_type, "_", " "),
+        cell_type = reorder(cell_type, estimate)
+    )
+
+ggplot(stage1_neo_plot, aes(x = estimate, y = cell_type, color = sig_label)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.4) +
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                   height = 0.25, linewidth = 0.5, alpha = 0.7) +
+    geom_point(size = 2.2) +
+    scale_color_manual(values = sig_colors, name = NULL) +
+    scale_x_continuous(expand = expansion(mult = 0.05)) +
+    coord_cartesian(xlim = c(-30, 30)) +
+    labs(
+        x        = "Log odds-ratio vs. healthy (beta-binomial)",
+        y        = NULL,
+        title    = "Cell-type proportions of ALL cells: tumor vs. healthy",
+        subtitle = "Denominator includes neoplastic  |  adjusted for age, sex, location  |  BH q < 0.1"
+    ) +
+    theme_nature(base_size = 9) +
+    theme(legend.position = "bottom")
+```
+
+## Stage 2 (all-cell denominator): each entity vs healthy
+
+Formal per-entity odds ratios vs healthy, on the all-cell denominator. **Restricted
+to cell types present in healthy brain** — peripheral-immune and neoplastic types
+are structural zeros in healthy (complete separation) and belong to the
+descriptive composition heatmap above, not here. OPC/Astrocyte rows in low-call
+entities (see barplot) remain contaminated upward and should not be over-interpreted.
+
+```{r stage2-neo-model}
+# entities_kept_neo / entity_counts_neo computed in the load chunk above.
+pseudobulk_neo_s2 = pseudobulk_neo |>
+    filter(is.na(IntDx) | IntDx %in% entities_kept_neo) |>
+    mutate(
+        group = if_else(condition == "healthy", "Healthy", as.character(IntDx)),
+        group = relevel(factor(group), ref = "Healthy")
+    )
+
+stage2_neo_raw = map_dfr(cell_types_neo, \(ct)
+    fit_betabin(
+        ct          = ct,
+        formula_str = "cbind(n_ct, n_other) ~ group + age_yr + location_broad + sex_combined",
+        dat         = pseudobulk_neo_s2
+    )
+)
+
+stage2_neo = stage2_neo_raw |>
+    filter(converged, !is.na(p.value),
+           str_detect(term, "^group"), term != "groupHealthy") |>
+    mutate(
+        entity  = str_remove(term, "^group"),
+        q.value = p.adjust(p.value, method = "BH"),
+        sig     = q.value < 0.1
+    )
+
+cat("Stage 2 (neo) convergence failures:",
+    sum(!stage2_neo_raw$converged | is.na(stage2_neo_raw$p.value)),
+    "/", length(cell_types_neo) * length(entities_kept_neo), "\n")
+
+write.table(stage2_neo, file.path(code_dir, "results_stage2_by_entity_withneoplastic.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+```{r stage2-neo-heatmap, fig.width=8, fig.height=6}
+# Heatmap mirrors the primary Stage 2 (log-OR per cell_type x entity, capped ±3),
+# but restricted to cell types present in healthy so ORs are not complete-
+# separation artifacts. Immune / neoplastic are in the composition heatmap above.
+hm_data_neo = stage2_neo |>
+    filter(cell_type %in% healthy_present) |>
+    select(cell_type, entity, estimate, q.value) |>
+    mutate(cell_type = str_replace_all(cell_type, "_", " "))
+
+est_mat_neo = hm_data_neo |>
+    select(cell_type, entity, estimate) |>
+    pivot_wider(names_from = entity, values_from = estimate) |>
+    tibble::column_to_rownames("cell_type") |>
+    as.matrix()
+
+# Drop any all-NA row/column (a cell type that failed to converge everywhere)
+# so ComplexHeatmap's row clustering has a valid distance matrix.
+est_mat_neo = est_mat_neo[rowSums(!is.na(est_mat_neo)) > 0,
+                          colSums(!is.na(est_mat_neo)) > 0, drop = FALSE]
+
+sig_mat_neo = hm_data_neo |>
+    select(cell_type, entity, q.value) |>
+    pivot_wider(names_from = entity, values_from = q.value) |>
+    tibble::column_to_rownames("cell_type") |>
+    as.matrix()
+sig_mat_neo = sig_mat_neo[rownames(est_mat_neo), colnames(est_mat_neo)]
+
+sig_annot_neo = matrix("", nrow = nrow(sig_mat_neo), ncol = ncol(sig_mat_neo),
+                       dimnames = dimnames(sig_mat_neo))
+sig_annot_neo[!is.na(sig_mat_neo) & sig_mat_neo < 0.01] = "**"
+sig_annot_neo[!is.na(sig_mat_neo) & sig_mat_neo >= 0.01 & sig_mat_neo < 0.1] = "*"
+
+cap_val = 3
+col_fun = colorRamp2(c(-cap_val, 0, cap_val), c("#2166AC", "white", "#B2182B"))
+
+n_entity_neo = entity_counts_neo |>
+    filter(IntDx %in% colnames(est_mat_neo)) |>
+    arrange(match(IntDx, colnames(est_mat_neo)))
+
+col_annot_neo = HeatmapAnnotation(
+    "n units" = anno_barplot(
+        n_entity_neo$n_units,
+        gp         = gpar(fill = "gray40", col = NA),
+        height     = unit(1.5, "cm"),
+        axis_param = list(gp = gpar(fontsize = 7))
+    ),
+    annotation_name_gp = gpar(fontsize = 8)
+)
+
+Heatmap(
+    est_mat_neo,
+    name             = "log-OR\nvs. healthy",
+    col              = col_fun,
+    na_col           = "gray90",
+    cell_fun         = function(j, i, x, y, width, height, fill) {
+        grid.text(sig_annot_neo[i, j], x, y,
+                  gp = gpar(fontsize = 9, col = "black", fontface = "bold"))
+    },
+    top_annotation   = col_annot_neo,
+    row_names_gp     = gpar(fontsize = 8),
+    column_names_gp  = gpar(fontsize = 8, fontface = "bold"),
+    column_names_rot = 45,
+    cluster_rows     = TRUE,
+    cluster_columns  = TRUE,
+    show_row_dend    = TRUE,
+    show_column_dend = FALSE,
+    heatmap_legend_param = list(
+        title_gp      = gpar(fontsize = 8, fontface = "bold"),
+        labels_gp     = gpar(fontsize = 7),
+        legend_height = unit(3, "cm")
+    ),
+    column_title     = "All-cell-denominator enrichment per entity vs. healthy",
+    column_title_gp  = gpar(fontsize = 10, fontface = "bold"),
+    row_title_gp     = gpar(fontsize = 9)
+)
 ```
 
 ---
