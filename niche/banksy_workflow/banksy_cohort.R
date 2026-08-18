@@ -38,21 +38,21 @@ if(!interactive()) {
             metavar = 'npc'
         ),
         make_option(
-            c('--kc1'), type = 'integer', default = 30,
-            help = 'lower k neighbors for leiden clustering',
+            c('--k_leiden_lam1'), type = 'character', default = '30,50',
+            help = 'comma-separated k neighbors for leiden clustering on lam1 (cell typing)',
         ),
         make_option(
-            c('--kc2'), type = 'integer', default = 50,
-            help = 'higher k neighbors for leiden clustering',
+            c('--k_leiden_lam2'), type = 'character', default = '30,50',
+            help = 'comma-separated k neighbors for leiden clustering on lam2 (niche calling)',
         ),
         make_option(
-            c('--res1'), type = 'numeric', default = 0.75,
-            help = 'lower resolution for BANKSY to do clustering', 
+            c('--res_lam1'), type = 'character', default = '0.75,1',
+            help = 'comma-separated Leiden resolutions to try for lam1 (cell typing)',
             metavar = 'resolution'
         ),
         make_option(
-            c('--res2'), type = 'numeric', default = 1,
-            help = 'higher resolution for BANKSY to do clustering', 
+            c('--res_lam2'), type = 'character', default = '0.75,1',
+            help = 'comma-separated Leiden resolutions to try for lam2 (niche calling)',
             metavar = 'resolution'
         ),
         make_option(
@@ -72,8 +72,17 @@ if(!interactive()) {
     k_geom = c(opt$k1, opt$k2)
     lambda = c(opt$lam1, opt$lam2)
     npc = opt$npc
-    k_leiden = c(opt$kc1, opt$kc2)
-    res = c(opt$res1, opt$res2)
+    # One Leiden k_neighbors / resolution vector per lambda, in the same
+    # order as `lambda` (lam1 = cell typing, lam2 = niche calling) -- these
+    # no longer have to share one grid across both lambdas.
+    k_leiden_list = list(
+        as.numeric(strsplit(opt$k_leiden_lam1, ',')[[1]]),
+        as.numeric(strsplit(opt$k_leiden_lam2, ',')[[1]])
+    )
+    resolution_list = list(
+        as.numeric(strsplit(opt$res_lam1, ',')[[1]]),
+        as.numeric(strsplit(opt$res_lam2, ',')[[1]])
+    )
     seed = opt$seed
     output_dir = opt$outputdir
 
@@ -112,9 +121,9 @@ if(!interactive()) {
     print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Running clustering on BANKSY output...'))
     total_se_staggered = banksy_clustering(
         total_se_staggered,
-        aname = 'normcounts', seed_val = seed, 
+        aname = 'normcounts', seed_val = seed,
         k_geom_vec = k_geom, lambda_vec = lambda, pc_val = npc,
-        k_leiden_vec = k_leiden, resolution_vec = res,
+        k_leiden_list = k_leiden_list, resolution_list = resolution_list,
         output_dir, current_timestamp
     )
 
@@ -122,9 +131,28 @@ if(!interactive()) {
     print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Finding cell type markers...'))
     cell_type_marker_ident(
         total_se_staggered,
-        aname = 'normcounts', seed_val = seed, 
+        aname = 'normcounts', seed_val = seed,
         k_geom_vec = k_geom, lambda_vec = lambda, pc_val = npc,
         output_dir, current_timestamp
+    )
+
+    # Automated Cell Type Annotation ==========================================
+    print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Annotating cell types...'))
+    total_se_staggered = annotate_cell_types(
+        total_se_staggered,
+        aname = 'normcounts',
+        k_geom_vec = k_geom, lambda_vec = lambda, pc_val = npc,
+        k_leiden_list = k_leiden_list, resolution_list = resolution_list,
+        output_dir, current_timestamp
+    )
+
+    # QC Plots =================================================================
+    print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Generating QC plots...'))
+    generate_qc_plots(
+        total_se_staggered,
+        k_geom_vec = k_geom, lambda_vec = lambda, pc_val = npc,
+        k_leiden_list = k_leiden_list, resolution_list = resolution_list,
+        output_dir, current_timestamp, seed_val = seed
     )
 
     print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Done!'))

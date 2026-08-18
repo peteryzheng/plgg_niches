@@ -13,6 +13,8 @@ suppressPackageStartupMessages({
     library(harmony)
     library(scran)
     library(Seurat)
+    library(presto)  # wilcoxauc(): single-cell Wilcoxon-AUC, used in annotate_cell_types()/generate_qc_plots()
+    library(pals)    # polychrome()/alphabet() categorical palettes, used in generate_qc_plots()
 })
 
 
@@ -156,6 +158,70 @@ QC_and_normalize = function(spe){
     return(spe)
 }
 
+# PLGG marker panel for automated cell-type calling, ported from
+# evaluate_leiden_sweep.qmd's validated setup chunk (2026-08-17) -- see that
+# qmd for the full curation rationale (panel-coverage checks, why radial_glia
+# is trimmed to PAX6+SOX2, etc). Kept as a separate copy rather than shared
+# code so this production path doesn't depend on the exploratory qmd; if one
+# changes, check whether the other should too.
+marker_panel = list(
+    astro_glial   = c("AQP4", "APOE", "GJA1"),
+    radial_glia   = c("PAX6", "SOX2"),
+    opc           = c("OLIG1", "OLIG2", "PDGFRA", "CSPG4", "SOX10", "BCAN", "PTPRZ1"),
+    oligo_mature  = c("MOG", "MOBP", "CLDN11", "MAG", "ST18"),
+    neuronal      = c("SLC17A7", "SLC17A6", "RORB", "GAD1", "GAD2", "SOX11"),
+    myeloid       = c("P2RY12", "CX3CR1", "AIF1", "CD68", "ITGAM", "CD163"),
+    t_cell        = c("CD4", "CD2", "TRAC", "IL7R"),
+    endothelial   = c("PECAM1", "FLT1"),
+    proliferation = c("MKI67", "TOP2A", "PCNA", "CENPF")
+)
+
+# Per-cluster top lineage for one cluster column: single-cell Wilcoxon AUC
+# (one-vs-rest) -> mean(auc - 0.5) within each lineage's panel-present
+# markers -> argmax, ties broken by marker_panel list order. Mirrors
+# evaluate_leiden_sweep.qmd's validated 2c.5 logic (plain mean-AUC, no
+# single-marker gating).
+score_lineages = function(expr_matrix, cluster_vec, panel = marker_panel) {
+    genes_all = unlist(panel, use.names = FALSE)
+    genes_present = intersect(genes_all, rownames(expr_matrix))
+    lineage_of = setNames(rep(names(panel), lengths(panel)), genes_all)
+
+    auc_res = as.data.table(presto::wilcoxauc(
+        expr_matrix[genes_present, , drop = FALSE], factor(cluster_vec)
+    ))
+    setnames(auc_res, c('feature', 'group'), c('gene', 'cluster'))
+    auc_res[, lineage := lineage_of[gene]]
+
+    sig_long = auc_res[, .(score = mean(auc - 0.5)), by = .(cluster, lineage)]
+    sig_wide = dcast(sig_long, cluster ~ lineage, value.var = 'score')
+    lineage_names = names(panel)
+    m = as.matrix(sig_wide[, ..lineage_names])
+    top = lineage_names[max.col(replace(m, is.na(m), -Inf), ties.method = 'first')]
+    data.table(cluster = sig_wide$cluster, top_lineage = top)
+}
+
+# Shared filename-building logic between banksy_clustering(),
+# annotate_cell_types(), and generate_qc_plots() so their output filenames
+# encode identical params without banksy_clustering() needing to return
+# param_string.
+cluster_param_string = function(k_geom_vec, lambda_vec, pc_val, k_leiden_list, resolution_list) {
+    per_lambda_string = paste(
+        vapply(seq_along(lambda_vec), function(i) {
+            paste0(
+                'lam', lambda_vec[i],
+                '_kleiden_', paste0(k_leiden_list[[i]], collapse = '_'),
+                '_res_', paste0(resolution_list[[i]], collapse = '_')
+            )
+        }, character(1)),
+        collapse = '_'
+    )
+    paste0(
+        'k_geom_', paste0(k_geom_vec, collapse = '_'), '_',
+        'pc_', pc_val, '_',
+        per_lambda_string
+    )
+}
+
 banksy_workflow = function(
     banksy_spe, aname, seed_val, 
     k_geom_vec, lambda_vec, pc_val,
@@ -220,36 +286,34 @@ banksy_workflow = function(
 
 
 banksy_clustering = function(
-    banksy_spe, aname, seed_val, 
+    banksy_spe, aname, seed_val,
     # not a clustering hyperparameter, but we need it for the output file name
     k_geom_vec, lambda_vec, pc_val,
-    k_leiden_vec, resolution_vec,
+    # k_leiden_list / resolution_list: one numeric vector per lambda (same
+    # length/order as lambda_vec), since cell typing (lam1) and niche calling
+    # (lam2) can each need their own Leiden neighbors/resolution candidates
+    # rather than sharing one grid across both lambdas.
+    k_leiden_list, resolution_list,
     output_dir, current_time
 ){
     set.seed(seed_val)
     subset_indices = sample(1:ncol(banksy_spe), ncol(banksy_spe) * 0.05)
     # current_time <- format(Sys.time(), "%Y%m%d_%H%M%S")
-    param_string = paste0(
-        'k_geom_', paste0(k_geom_vec,collapse = '_'), '_',
-        'pc_', pc_val, '_',
-        'lam_', paste0(lambda_vec,collapse = '_'), '_',
-        'k_leiden_', paste0(k_leiden_vec,collapse = '_'), '_',
-        'res_', paste0(resolution_vec,collapse = '_')
-    )
+    param_string = cluster_param_string(k_geom_vec, lambda_vec, pc_val, k_leiden_list, resolution_list)
     # Leiden clustering ===================================================
     print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Clustering...'))
-    lapply(lambda_vec, function(x){
+    Map(function(x, k_leiden_vec, resolution_vec){
         print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Clustering lam', x, ' ...'))
         # running Leiden clustering on the Harmony corrected PCA loadings
         banksy_spe <<- Banksy::clusterBanksy(
-            banksy_spe, dimred = paste0("Harmony_BANKSY_lam", x), 
+            banksy_spe, dimred = paste0("Harmony_BANKSY_lam", x),
             k_neighbors = k_leiden_vec,
-            resolution = resolution_vec, 
+            resolution = resolution_vec,
             algo = 'leiden',
             seed = seed_val
         )
         print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Finished clustering lam', x, ' ...'))
-    })
+    }, lambda_vec, k_leiden_list, resolution_list)
     saveRDS(banksy_spe, paste0(
         output_dir,'/banksy_clusters_',
         param_string,'_',current_time,'.rds'
@@ -284,6 +348,36 @@ banksy_clustering = function(
     return(banksy_spe)
 }
 
+# Writes an automated cell-type call directly into colData, replacing the
+# manual hand-curated lookup-table annotation previously done per-run in
+# banksy_clusters_proseg.qmd. Only annotates lam1 (cell-typing) cluster
+# columns -- there can be more than one now that lam1 gets multiple
+# candidate resolutions -- not lam2/niche columns, matching
+# cell_type_marker_ident()'s lowest-lambda convention.
+annotate_cell_types = function(
+    banksy_spe, aname, k_geom_vec, lambda_vec, pc_val,
+    k_leiden_list, resolution_list,
+    output_dir, current_time
+){
+    print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Annotating cell types...'))
+    param_string = cluster_param_string(k_geom_vec, lambda_vec, pc_val, k_leiden_list, resolution_list)
+    cell_type_clusters = grep(
+        paste0('lam', min(as.numeric(lambda_vec))),
+        clusterNames(banksy_spe), value = TRUE
+    )
+    expr = assay(banksy_spe, aname)
+    for (cc in cell_type_clusters) {
+        top_lineage_dt = score_lineages(expr, colData(banksy_spe)[[cc]])
+        lin_map = setNames(top_lineage_dt$top_lineage, top_lineage_dt$cluster)
+        colData(banksy_spe)[[paste0('cell_type_', cc)]] = lin_map[as.character(colData(banksy_spe)[[cc]])]
+    }
+    saveRDS(banksy_spe, paste0(
+        output_dir,'/banksy_clusters_connected_annotated_',
+        param_string,'_',current_time,'.rds'
+    ))
+    return(banksy_spe)
+}
+
 cell_type_marker_ident = function(
     banksy_spe, aname, seed_val, 
     # not a clustering hyperparameter, but we need it for the output file name
@@ -304,7 +398,7 @@ cell_type_marker_ident = function(
     lapply(cell_type_clusters, function(x){
         # lam lowest
         cell_type_markers = findMarkers(
-            assay(banksy_spe, "counts"),
+            assay(banksy_spe, aname),
             groups = banksy_spe[[x]],
             test.type="wilcox"
         )
@@ -314,4 +408,144 @@ cell_type_marker_ident = function(
             current_time,'.rds'
         ))
     })
+}
+
+# Verification plots for a clustering run, saved directly as PNGs (this
+# runs inside the same non-interactive qsub job that produced the clustered
+# object, so there's no benefit to a separate rendered notebook -- avoids a
+# second load of the multi-million-cell object). Replaces
+# banksy_clusters_proseg.qmd's manual verification workflow with the
+# equivalent automated views from evaluate_leiden_sweep.qmd: per cluster
+# column (both lambdas), a cluster/sample UMAP pair over a sample-mixing
+# entropy barchart; for lam1 (cell-typing) columns only, a UMAP of the
+# annotate_cell_types() call and the marker AUC heatmap that drives it.
+# UMAP scatters are downsampled via plot_frac for render time/file size on
+# the full multi-million-cell object; entropy/AUC computations use all cells.
+generate_qc_plots = function(
+    banksy_spe, k_geom_vec, lambda_vec, pc_val,
+    k_leiden_list, resolution_list,
+    output_dir, current_time, plot_frac = 0.1, seed_val = 55555
+){
+    print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Generating QC plots...'))
+    param_string = cluster_param_string(k_geom_vec, lambda_vec, pc_val, k_leiden_list, resolution_list)
+    qc_dir = paste0(output_dir, '/qc_plots_', param_string, '_', current_time)
+    dir.create(qc_dir, showWarnings = FALSE, recursive = TRUE)
+
+    set.seed(seed_val)
+    plot_idx = sort(sample(ncol(banksy_spe), round(ncol(banksy_spe) * plot_frac)))
+
+    n_samples = length(unique(colData(banksy_spe)$sample_id))
+    entropy_norm = function(x) {
+        p = prop.table(table(x))
+        p = p[p > 0]
+        -sum(p * log(p)) / log(n_samples)
+    }
+
+    samp_levels = sort(unique(as.character(colData(banksy_spe)$sample_id)))
+    sample_pal  = structure(pals::polychrome(length(samp_levels)), names = samp_levels)
+
+    umap_scatter = function(coords_dt, vals, title, palette, show_labels = TRUE) {
+        d = copy(coords_dt)[, grp := factor(vals[plot_idx])]
+        p = ggplot(d, aes(umap_1, umap_2, colour = grp)) +
+            geom_point(size = 0.1, alpha = 0.5) +
+            scale_colour_manual(values = palette, name = NULL, na.value = "grey80") +
+            guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+            labs(title = title, x = "UMAP 1", y = "UMAP 2") +
+            theme_bw()
+        if (show_labels) {
+            cent = d[, .(x = median(umap_1), y = median(umap_2)), by = grp]
+            p = p + geom_text(data = cent, aes(x = x, y = y, label = grp),
+                              inherit.aes = FALSE, colour = "black", size = 3.2)
+        }
+        p
+    }
+
+    # Cluster/sample UMAP pair + entropy barchart, per cluster column, both lambdas.
+    for (lam in lambda_vec) {
+        umap_name = paste0("UMAP_Harmony_BANKSY_lam", lam)
+        if (!umap_name %in% reducedDimNames(banksy_spe)) next
+        coords = as.data.table(reducedDim(banksy_spe, umap_name))[plot_idx, 1:2]
+        setnames(coords, c("umap_1", "umap_2"))
+
+        lam_cluster_cols = grep(paste0('lam', lam), clusterNames(banksy_spe), value = TRUE)
+        for (cc in lam_cluster_cols) {
+            cl = as.character(colData(banksy_spe)[[cc]])
+            cl_levels = sort(unique(cl))
+            clpal = structure(pals::polychrome(length(cl_levels)), names = cl_levels)
+            p_cluster = umap_scatter(coords, cl, paste0(cc, "\nclusters"), clpal)
+            p_sample = umap_scatter(coords, as.character(colData(banksy_spe)$sample_id),
+                                    "sample_id", sample_pal, show_labels = FALSE)
+
+            by_clust = split(colData(banksy_spe)$sample_id, colData(banksy_spe)[[cc]])
+            ent = vapply(by_clust, entropy_norm, numeric(1))
+            eb = data.table(cluster = names(ent), entropy = ent)[order(entropy)]
+            eb[, cluster := factor(cluster, levels = cluster)]
+            p_entropy = ggplot(eb, aes(cluster, entropy, fill = entropy < 0.30)) +
+                geom_col() +
+                geom_hline(yintercept = 0.30, linetype = "dashed") +
+                scale_fill_manual(values = c(`FALSE` = "grey70", `TRUE` = "firebrick"),
+                                  name = "entropy < 0.30") +
+                labs(x = "cluster", y = "normalized entropy",
+                     title = "per-cluster sample-mixing entropy") +
+                theme_bw()
+
+            ggsave(
+                paste0(qc_dir, '/umap_sample_entropy_', gsub('clust_Harmony_BANKSY_', '', cc), '.png'),
+                cowplot::plot_grid(
+                    cowplot::plot_grid(p_cluster, p_sample, nrow = 1),
+                    p_entropy, ncol = 1, rel_heights = c(2, 1)
+                ),
+                width = 13, height = 9, dpi = 150
+            )
+        }
+    }
+
+    # Cell-type UMAP + marker AUC heatmap: lam1 (cell-typing) columns only.
+    lam1 = min(as.numeric(lambda_vec))
+    cell_type_clusters = grep(paste0('lam', lam1), clusterNames(banksy_spe), value = TRUE)
+    umap_name = paste0("UMAP_Harmony_BANKSY_lam", lam1)
+    coords = as.data.table(reducedDim(banksy_spe, umap_name))[plot_idx, 1:2]
+    setnames(coords, c("umap_1", "umap_2"))
+
+    lineage_pal = structure(pals::alphabet(length(marker_panel)), names = names(marker_panel))
+    lineage_umaps = Filter(Negate(is.null), lapply(cell_type_clusters, function(cc) {
+        ct_col = paste0('cell_type_', cc)
+        if (!ct_col %in% colnames(colData(banksy_spe))) return(NULL)
+        umap_scatter(coords, colData(banksy_spe)[[ct_col]],
+                    gsub('clust_Harmony_BANKSY_', '', cc), lineage_pal, show_labels = FALSE)
+    }))
+    if (length(lineage_umaps) > 0) {
+        ggsave(
+            paste0(qc_dir, '/celltype_umap.png'),
+            cowplot::plot_grid(plotlist = lineage_umaps, nrow = 1),
+            width = 6 * length(lineage_umaps), height = 5.5, dpi = 150
+        )
+    }
+
+    genes_all = unlist(marker_panel, use.names = FALSE)
+    genes_present = intersect(genes_all, rownames(banksy_spe))
+    lineage_of = setNames(rep(names(marker_panel), lengths(marker_panel)), genes_all)
+    expr_all = assay(banksy_spe, "normcounts")[genes_present, , drop = FALSE]
+    auc_long = rbindlist(lapply(cell_type_clusters, function(cc) {
+        res = as.data.table(presto::wilcoxauc(expr_all, factor(colData(banksy_spe)[[cc]])))
+        res[, cluster_col := cc]
+        res
+    }))
+    setnames(auc_long, c("feature", "group"), c("gene", "cluster"))
+    auc_long[, lineage := lineage_of[gene]]
+    auc_long[, gene := factor(gene, levels = genes_all)]
+    auc_long[, cluster_col_short := sub("clust_Harmony_BANKSY_", "", cluster_col)]
+
+    p_auc = ggplot(auc_long, aes(x = cluster, y = gene, fill = auc)) +
+        geom_tile() +
+        facet_grid(lineage ~ cluster_col_short, scales = "free", space = "free") +
+        scale_fill_gradient2(low = "steelblue", mid = "white", high = "firebrick",
+                             midpoint = 0.5, limits = c(0, 1), name = "AUC\n(one-vs-rest)") +
+        labs(title = "Marker specificity per cluster (single-cell Wilcoxon AUC)",
+             x = "cluster", y = NULL) +
+        theme_bw() +
+        theme(axis.text.x = element_text(size = 6), strip.text.y = element_text(angle = 0))
+    ggsave(paste0(qc_dir, '/marker_auc_heatmap.png'), p_auc, width = 10, height = 5, dpi = 150)
+
+    print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','QC plots saved to: ', qc_dir))
 }
