@@ -1,0 +1,460 @@
+---
+title: "DLGNT_1 vs DLGNT_2: stress-adjustment comparison across 4 runs"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 14
+        fig-height: 7
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk:
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+This notebook compares four configurations of the DLGNT_1 vs DLGNT_2 pseudobulk DE + Hallmark fgsea
+pipeline to quantify the impact of (a) dropping sample 267134 and (b) adding a per-pseudobulk IEG
+dissociation stress score as a covariate.
+
+Render command:
+```bash
+conda run -n spatial quarto render sample_comparisons/dlgnt12_expression/dlgnt12_expression_stress_comparison.qmd
+```
+
+The four runs compared here are:
+
+| Label | `--drop-samples` | `--no-stress-covariate` | `--keep-iegs-in-gsea` |
+|---|---|---|---|
+| Baseline | — | yes | yes |
+| Drop 267134 | 267134 | yes | yes |
+| Stress-adjusted | — | — | — |
+| Stress-adj + Drop 267134 | 267134 | — | — |
+
+The baseline is equivalent to the original `results/` pipeline (apart from floating-point non-determinism
+at the 14th decimal place from MKL threading). All four runs read the same `handoff/` TSVs produced by
+`dlgnt12_prepare.py`; no re-aggregation is needed.
+
+**Interpretation caveat**: DLGNT_1 = 100% spinal and DLGNT_2 = mixed location, so subtype and location
+remain confounded in every run. Stress adjustment removes one nuisance axis (per-sample handling
+artifact), not the location axis.
+
+```{r setup}
+#| echo: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+analysis_dir <- normalizePath(dirname(knitr::current_input()), mustWork = TRUE)
+
+# Run configurations in the order they should appear in all comparison plots.
+run_configs <- list(
+    list(
+        label  = "Baseline",
+        short  = "baseline",
+        dir    = file.path(analysis_dir, "results_sanity_baseline"),
+        color  = "#888888"
+    ),
+    list(
+        label  = "Drop 267134",
+        short  = "drop_267134",
+        dir    = file.path(analysis_dir, "results_drop_267134"),
+        color  = "#4daf4a"
+    ),
+    list(
+        label  = "Stress-adjusted",
+        short  = "stress_adj",
+        dir    = file.path(analysis_dir, "results_stress_adjusted"),
+        color  = "#e41a1c"
+    ),
+    list(
+        label  = "Stress-adj + Drop 267134",
+        short  = "stress_drop",
+        dir    = file.path(analysis_dir, "results_stress_adjusted_drop_267134"),
+        color  = "#984ea3"
+    )
+)
+
+run_labels  <- sapply(run_configs, `[[`, "label")
+run_colors  <- setNames(sapply(run_configs, `[[`, "color"), run_labels)
+
+# Verify all result directories exist before loading.
+missing_dirs <- sapply(run_configs, function(cfg) !dir.exists(cfg$dir))
+if (any(missing_dirs)) {
+    stop(
+        "Missing result directories. Run dlgnt12_limma_fgsea_stress_adjusted.R for each configuration first.\n",
+        paste(sapply(run_configs[missing_dirs], `[[`, "dir"), collapse = "\n")
+    )
+}
+
+# Helper: read a TSV from a results directory; returns an empty data.table on miss.
+load_tsv <- function(results_dir, filename) {
+    path <- file.path(results_dir, filename)
+    if (!file.exists(path)) return(data.table())
+    fread(path)
+}
+
+clean_hallmark_label <- function(x) {
+    label <- gsub("^HALLMARK_", "", x)
+    label <- gsub("_", " ", label)
+    tools::toTitleCase(tolower(label))
+}
+
+# Cell-type roster comes from the baseline run; all four runs use the same cell types.
+ct_map <- load_tsv(run_configs[[1]]$dir, "cell_type_analysis_summary.tsv")[
+    , .(cell_type, cell_type_safe)
+]
+cell_types <- ct_map$cell_type
+
+# Load analysis summaries for all runs and stack with a run label.
+summary_dt <- rbindlist(lapply(run_configs, function(cfg) {
+    dt <- load_tsv(cfg$dir, "cell_type_analysis_summary.tsv")
+    if (nrow(dt) > 0) dt[, run := cfg$label]
+    dt
+}), fill = TRUE)
+summary_dt[, run := factor(run, levels = run_labels)]
+
+# Load GSEA results for all runs across all cell types.
+gsea_dt <- rbindlist(lapply(run_configs, function(cfg) {
+    per_ct <- rbindlist(lapply(ct_map$cell_type_safe, function(cts) {
+        load_tsv(cfg$dir, paste0(cts, "_gsea.tsv"))
+    }), fill = TRUE)
+    if (nrow(per_ct) > 0) per_ct[, run := cfg$label]
+    per_ct
+}), fill = TRUE)
+gsea_dt[, run           := factor(run, levels = run_labels)]
+gsea_dt[, set_name_clean := clean_hallmark_label(set_name)]
+
+# Load DE results for all runs across all cell types.
+de_dt <- rbindlist(lapply(run_configs, function(cfg) {
+    per_ct <- rbindlist(lapply(ct_map$cell_type_safe, function(cts) {
+        load_tsv(cfg$dir, paste0(cts, "_de.tsv"))
+    }), fill = TRUE)
+    if (nrow(per_ct) > 0) per_ct[, run := cfg$label]
+    per_ct
+}), fill = TRUE)
+de_dt[, run := factor(run, levels = run_labels)]
+
+# Per-pseudobulk stress diagnostics come from the stress-adjusted run only.
+# The baseline and drop-only runs write the same columns but with stress_score = NA
+# when --no-stress-covariate is set, so we read the canonical stress-adjusted version.
+stress_diag <- load_tsv(
+    run_configs[[which(sapply(run_configs, `[[`, "short") == "stress_adj")]]$dir,
+    "stress_adjustment_diagnostics.tsv"
+)
+```
+
+# Run metadata
+
+```{r run-meta}
+meta_dt <- rbindlist(lapply(run_configs, function(cfg) {
+    dt <- load_tsv(cfg$dir, "results_metadata.tsv")
+    if (nrow(dt) > 0) dt[, run := cfg$label]
+    dt
+}), fill = TRUE)
+
+# Pivot to wide so each row is a metadata key and each column is a run.
+meta_wide <- dcast(meta_dt, key ~ run, value.var = "value")
+kable(meta_wide, caption = "Key metadata fields across all four runs")
+```
+
+# Stress score diagnostics
+
+These plots use the per-pseudobulk data from the stress-adjusted run to establish whether the
+IEG stress signal is real and how collinear it is with the DLGNT subtype label.
+
+## Per-pseudobulk IEG stress score by subtype
+
+DLGNT_1 pseudobulks should sit at a higher (less negative) stress score than DLGNT_2 pseudobulks
+if sample-level handling/dissociation is the driver. Cell types where the two groups overlap
+are less interpretable.
+
+```{r stress-scatter}
+#| fig-height: 8
+ggplot(stress_diag, aes(x = IntDx, y = stress_score, color = IntDx)) +
+    geom_jitter(width = 0.12, size = 2.8, alpha = 0.85) +
+    facet_wrap(~ cell_type, ncol = 3) +
+    scale_color_manual(
+        values = c("DLGNT_1" = "#1f77b4", "DLGNT_2" = "#d62728"),
+        guide  = "none"
+    ) +
+    theme_minimal(base_size = 13) +
+    labs(
+        x     = "Subtype",
+        y     = "Stress score [log10(IEG fraction + 1e-9)]",
+        title = "Per-pseudobulk IEG stress score by subtype"
+    )
+```
+
+## Stress–subtype correlation per cell type
+
+|Pearson r| > 0.9 (flagged as `adjustment_unstable = TRUE`) means stress and IntDx are too collinear
+for the model to reliably separate them; adjusted GSEA results for those cell types should be treated
+with extra scepticism.
+
+```{r stress-corr-table}
+# Correlation metrics repeat per-row within a cell type, so take one row per cell type.
+diag_summary <- stress_diag[
+    , .(
+        pearson_r          = unique(stress_intdx_pearson),
+        t_test_p           = unique(stress_intdx_t_pvalue),
+        adjustment_unstable = unique(adjustment_unstable)
+    ),
+    by = cell_type
+][order(-abs(pearson_r))]
+
+kable(diag_summary, digits = 4, caption = "Stress–IntDx correlation per cell type")
+```
+
+## IEG fraction by subtype per cell type
+
+The raw fraction (not log-scaled) shows the magnitude of the processing difference more intuitively.
+
+```{r ieg-fraction-box}
+#| fig-height: 7
+ggplot(stress_diag, aes(x = IntDx, y = ieg_fraction, color = IntDx)) +
+    geom_boxplot(outlier.shape = NA, width = 0.4) +
+    geom_jitter(width = 0.1, size = 2.2, alpha = 0.7) +
+    facet_wrap(~ cell_type, ncol = 3, scales = "free_y") +
+    scale_color_manual(
+        values = c("DLGNT_1" = "#1f77b4", "DLGNT_2" = "#d62728"),
+        guide  = "none"
+    ) +
+    theme_minimal(base_size = 13) +
+    labs(
+        x     = "Subtype",
+        y     = "IEG fraction (IEG counts / total counts)",
+        title = "Per-pseudobulk IEG fraction by subtype"
+    )
+```
+
+# Significant pathway counts across runs
+
+The heatmap below shows how many Hallmark pathways reach padj < 0.05 in the DLGNT_2 > DLGNT_1 contrast
+for each cell type × run combination. Large drops from left to right indicate stress-driven inflation
+in the baseline.
+
+```{r sig-count-heatmap}
+sig_counts <- gsea_dt[
+    contrast == "DLGNT_2 > DLGNT_1" & !is.na(padj) & padj < 0.05,
+    .N,
+    by = .(cell_type, run)
+]
+
+# Fill zeros for cell-type × run combinations with no significant pathways.
+all_combos <- CJ(
+    cell_type = cell_types,
+    run       = factor(run_labels, levels = run_labels)
+)
+sig_counts <- merge(all_combos, sig_counts, by = c("cell_type", "run"), all.x = TRUE)
+sig_counts[is.na(N), N := 0L]
+
+ggplot(sig_counts, aes(x = run, y = cell_type, fill = N)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = N), size = 5.5, fontface = "bold") +
+    scale_fill_gradient(low = "#f7fbff", high = "#08306b") +
+    theme_minimal(base_size = 14) +
+    theme(
+        axis.text.x     = element_text(angle = 20, hjust = 1),
+        panel.grid      = element_blank(),
+        legend.position = "right"
+    ) +
+    labs(
+        x    = NULL,
+        y    = "Cell type",
+        fill = "# sig\npathways",
+        title = "Significant Hallmark pathways per cell type × run (padj < 0.05, DLGNT_2 > DLGNT_1)"
+    )
+```
+
+# Per-cell-type pathway dot grid
+
+Each panel shows all Hallmark pathways that are significant (padj < 0.05) in **at least one run**.
+Dot size = −log10(padj); grey dots = pathway not significant in that run; color = enrichment direction.
+This makes it easy to see which pathways are robust vs artifacts.
+
+```{r dot-grid}
+#| results: asis
+#| fig-height: 9
+for (ct in cell_types) {
+    # Union of significant pathways for this cell type across all runs.
+    sig_union <- gsea_dt[
+        contrast == "DLGNT_2 > DLGNT_1" & cell_type == ct &
+            !is.na(padj) & padj < 0.05,
+        unique(set_name_clean)
+    ]
+
+    cat("## ", ct, "\n\n", sep = "")
+
+    if (length(sig_union) == 0) {
+        cat("No significant Hallmark pathways in any run.\n\n")
+        next
+    }
+
+    # Pull GSEA rows for those pathways in all runs (even if not significant).
+    plot_dt <- gsea_dt[
+        contrast == "DLGNT_2 > DLGNT_1" & cell_type == ct &
+            set_name_clean %in% sig_union
+    ]
+
+    # For pathways present in the union but absent in a run, there will simply be
+    # no row -- that is fine; ggplot omits them, leaving a visual gap.
+    plot_dt[, is_sig := !is.na(padj) & padj < 0.05]
+    # Replace NA neg_log10_padj with 0 so scale_size_continuous works without na.value
+    # (not supported in older ggplot2); size=0 points are still drawn via color to show presence.
+    plot_dt[, neg_log10_padj := fifelse(is_sig, -log10(padj), 0)]
+    plot_dt[, direction := fcase(
+        is_sig & NES > 0,  "DLGNT_2 up",
+        is_sig & NES <= 0, "DLGNT_2 down",
+        default            = "not sig (padj ≥ 0.05)"
+    )]
+
+    # Order pathways by mean NES across all runs so the plot reads DLGNT_2-down
+    # at the bottom and DLGNT_2-up at the top.
+    path_order <- plot_dt[
+        , .(mean_nes = mean(NES, na.rm = TRUE)),
+        by = set_name_clean
+    ][order(mean_nes), set_name_clean]
+    plot_dt[, pathway_ord := factor(set_name_clean, levels = path_order)]
+
+    n_pathways <- length(sig_union)
+
+    print(
+        ggplot(
+            plot_dt,
+            aes(x = run, y = pathway_ord, size = neg_log10_padj, color = direction)
+        ) +
+            geom_point(alpha = 0.85) +
+            scale_color_manual(
+                values = c(
+                    "DLGNT_2 up"            = "#d62728",
+                    "DLGNT_2 down"          = "#1f77b4",
+                    "not sig (padj ≥ 0.05)" = "#cccccc"
+                )
+            ) +
+            scale_size_continuous(range = c(1.5, 8)) +
+            theme_minimal(base_size = 12) +
+            theme(
+                panel.grid.major.y = element_blank(),
+                axis.text.x        = element_text(angle = 20, hjust = 1),
+                axis.text.y        = element_text(size = 9),
+                legend.position    = "bottom"
+            ) +
+            labs(
+                x     = NULL,
+                y     = "Hallmark pathway",
+                size  = "−log10(padj)\n(0 = not sig)",
+                color = "Direction",
+                title = paste0(ct, ": pathway significance across runs")
+            )
+    )
+    cat("\n\n")
+}
+```
+
+# Top DE genes: baseline vs stress-adjusted
+
+For each cell type, the top 8 genes by FDR (union across both runs) are shown. Genes whose ranking
+or direction changes substantially between the two runs are likely stress-collinear.
+
+```{r de-comparison}
+#| results: asis
+#| fig-height: 6
+for (ct in cell_types) {
+    ct_de <- de_dt[
+        cell_type == ct & run %in% c("Baseline", "Stress-adjusted")
+    ]
+
+    # Top 8 within each run; take the union across both runs for a shared gene set.
+    top8 <- ct_de[
+        order(run, fdr, -abs(t_stat)),
+        head(.SD, 8),
+        by = run
+    ]
+    union_genes <- unique(top8$gene)
+
+    plot_de <- ct_de[gene %in% union_genes]
+    plot_de[, direction := fifelse(t_stat > 0, "DLGNT_2 up", "DLGNT_2 down")]
+
+    # Order genes by t_stat in the stress-adjusted run so both panels share the same y-axis order.
+    gene_ord <- plot_de[
+        run == "Stress-adjusted", .(mean_t = mean(t_stat)), by = gene
+    ][order(mean_t), gene]
+    # Append any genes only in baseline (not in stress-adjusted) at the bottom.
+    gene_ord <- c(setdiff(union_genes, gene_ord), gene_ord)
+    plot_de[, gene_ord := factor(gene, levels = gene_ord)]
+
+    cat("## ", ct, "\n\n", sep = "")
+    print(
+        ggplot(plot_de, aes(x = t_stat, y = gene_ord, fill = direction)) +
+            geom_col() +
+            facet_wrap(~ run, ncol = 2) +
+            scale_fill_manual(
+                values = c("DLGNT_2 down" = "#1f77b4", "DLGNT_2 up" = "#d62728"),
+                guide  = "none"
+            ) +
+            theme_minimal(base_size = 12) +
+            theme(axis.text.y = element_text(size = 9)) +
+            labs(
+                x     = "Moderated t statistic",
+                y     = "Gene",
+                title = paste0(ct, ": top DE genes — baseline vs stress-adjusted")
+            )
+    )
+    cat("\n\n")
+}
+```
+
+# Pathway persistence table
+
+Pathways significant in all 4 runs are the most robust (surviving every intervention). Pathways
+only significant in the baseline are the most likely to be stress-driven artifacts.
+
+```{r persistence-table}
+persistence <- gsea_dt[
+    contrast == "DLGNT_2 > DLGNT_1" & !is.na(padj) & padj < 0.05,
+    .(
+        n_runs_sig = uniqueN(run),
+        runs_sig   = paste(sort(unique(as.character(run))), collapse = " | "),
+        # Mean NES and mean -log10(padj) summarise direction and strength.
+        mean_NES      = round(mean(NES), 3),
+        mean_neg_logp = round(mean(-log10(padj)), 2)
+    ),
+    by = .(cell_type, set_name_clean)
+][order(cell_type, -n_runs_sig, -mean_neg_logp)]
+
+setnames(persistence, "set_name_clean", "hallmark_pathway")
+kable(
+    persistence,
+    caption = "Hallmark pathway persistence across runs (DLGNT_2 > DLGNT_1, padj < 0.05)"
+)
+```
+
+```{r persistence-summary}
+# Quick summary: how many pathways survive 4 / 3 / 2 / 1 runs per cell type.
+pers_summary <- persistence[
+    , .N, by = .(cell_type, n_runs_sig)
+][order(cell_type, -n_runs_sig)]
+setnames(pers_summary, "N", "n_pathways")
+
+ggplot(pers_summary, aes(x = factor(n_runs_sig), y = n_pathways, fill = factor(n_runs_sig))) +
+    geom_col() +
+    facet_wrap(~ cell_type, ncol = 3) +
+    scale_fill_brewer(palette = "Blues", direction = 1) +
+    theme_minimal(base_size = 13) +
+    theme(legend.position = "none") +
+    labs(
+        x     = "Number of runs pathway is significant in",
+        y     = "Number of Hallmark pathways",
+        title = "Pathway persistence by cell type"
+    )
+```

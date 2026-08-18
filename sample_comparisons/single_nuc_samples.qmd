@@ -1,0 +1,661 @@
+---
+title: ""
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk:
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+In this notebook we systematically analyze the single nucleus RNA-seq data in terms of cell type composition.
+
+The data is here on terra google bucket:
+
+```
+gcloud storage cp 'gs://fc-secure-351a0c20-e431-4bd2-aa5f-7cfeb0216d9a/data/sc_sn/Extended_sn/harmony_lambda2_t1.rds' /mnt/storage/dept/medonc/beroukhim/youyun/plgg/data/single_cell/harmony_lambda2_t1.rds
+```
+
+The single cell object is here -- `/data/beroukhim1/youyun/plgg/data/single_cell/harmony_lambda2_t1.rds`
+
+Metadata is extracted from the Seurat object and saved as a tsv file here -- `/data/beroukhim1/youyun/plgg/data/single_cell/sn_cohort_cell_metadata.tsv`
+
+```{r}
+#| echo: FALSE
+library(data.table)
+library(emmeans)
+library(ggalluvial)
+library(ggplot2)
+library(glmmTMB)
+library(knitr)
+library(rcartocolor)
+
+# local vs remote
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usually at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762") {
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762") {
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    # in dipg or uger, the home directory is '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Load Data
+
+```{r}
+# sn <- readRDS(paste0(workdir, "youyun/plgg/data/single_cell/harmony_lambda2_t1.rds"))
+# metadata = sn[[c(
+#     'orig.ident', 'age', 'Sex', 'IntDx', 'type',
+#     'Location_standard', 'Location_specific',
+#     'annot_v2', 'annot_v1', 'annot_v0'
+# )]]
+# setnames(metadata, c('Location_standard'), c('Location'))
+# write.table(
+#     metadata, paste0(workdir, "youyun/plgg/data/single_cell/sn_cohort_cell_metadata.tsv"),
+#     sep = "\t", quote = FALSE, row.names = TRUE, col.names = TRUE
+# )
+```
+
+```{r}
+# The TSV was written with row names, so the first column is the cell barcode
+# and the true sample ID is the second column.
+metadata <- fread(
+    paste0(workdir, "youyun/plgg/data/single_cell/sn_cohort_cell_metadata.tsv"),
+    skip = 1,
+    header = FALSE,
+    col.names = c(
+        "barcode", "orig.ident", "age", "Sex", "IntDx", "type", "Location",
+        "Location_specific", "annot_v2", "annot_v1", "annot_v0"
+    )
+)
+metadata[, age := suppressWarnings(as.numeric(age))]
+metadata[Location == "NA", Location := ""]
+```
+
+```{r}
+#| layout-nrow: 1
+kable(table(metadata$annot_v0))
+kable(table(metadata$annot_v1))
+kable(table(metadata$annot_v2))
+```
+
+# Visualize the cohort metadata
+
+```{r}
+cohort_dt <- unique(metadata[, .(orig.ident, age, Sex, Location, IntDx, type)])
+cohort_dt[is.na(Location) | !nzchar(Location), Location := "Missing"]
+
+ggplot(
+    cohort_dt,
+    aes(axis1 = Location, axis2 = IntDx, axis3 = Sex, axis4 = type, axis5 = as.character(age))
+) +
+    geom_alluvium(aes(fill = IntDx)) +
+    geom_stratum() +
+    geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+    theme_minimal() +
+    theme(panel.grid = element_blank(), axis.text.x = element_blank()) +
+    scale_fill_carto_d(palette = "Safe") +
+    scale_y_continuous(breaks = seq(0, nrow(cohort_dt), by = 5))
+```
+
+# Modeling cell type proportions
+
+We fit sample-level beta-binomial models. Sex is the only adjustment term in the two primary models because finer adjustment is not supportable in this cohort.
+
+## Data cleanup
+
+Options for analysis
+
+```{r}
+cell_type_column <- "annot_v0"   # one of: annot_v0, annot_v1, annot_v2
+min_total_cells_per_type <- 50
+min_samples_with_cells <- 3
+rare_fraction_threshold <- 0.005
+min_group_samples <- 3L
+min_samples_per_sex <- 2L
+alpha <- 0.25
+```
+
+```{r}
+setDT(metadata)
+metadata <- metadata[
+    !is.na(orig.ident) & !is.na(IntDx) & !is.na(Sex) & Sex %in% c("Female", "Male")
+]
+
+metadata[, cell_type := as.character(get(cell_type_column))]
+metadata <- metadata[!is.na(cell_type) & nzchar(cell_type)]
+
+global_ct <- metadata[, .N, by = cell_type][order(-N)]
+global_ct[, frac := N / sum(N)]
+rare_ct <- unique(c(
+    global_ct[N < min_total_cells_per_type, cell_type],
+    global_ct[frac < rare_fraction_threshold, cell_type]
+))
+
+metadata_f <- copy(metadata)
+metadata_f[cell_type %in% rare_ct, cell_type := "Other"]
+
+# Build the sample x cell-type table once so every model uses the same counts.
+sample_dt <- unique(metadata_f[, .(orig.ident, IntDx, type, Location, Sex)])
+total_dt <- metadata_f[, .(total = .N), by = orig.ident]
+counts_dt <- metadata_f[, .(n_type = .N), by = .(orig.ident, cell_type)]
+all_cell_types <- sort(unique(metadata_f$cell_type))
+
+dat <- CJ(orig.ident = sample_dt$orig.ident, cell_type = all_cell_types, unique = TRUE)
+dat <- dat[sample_dt, on = "orig.ident"]
+dat <- counts_dt[dat, on = .(orig.ident, cell_type)]
+dat[is.na(n_type), n_type := 0L]
+dat <- total_dt[dat, on = "orig.ident"]
+
+ct_presence <- dat[, .(
+    samples_present = sum(n_type > 0L),
+    total_cells = sum(n_type)
+), by = cell_type]
+keep_ct <- ct_presence[
+    samples_present >= min_samples_with_cells & total_cells >= min_total_cells_per_type,
+    cell_type
+]
+keep_ct <- union(setdiff(keep_ct, "Other"), "Other")
+dat <- dat[cell_type %in% keep_ct]
+dat[, prop := n_type / pmax(total, 1L)]
+
+cat("Unique samples:", sample_dt[, uniqueN(orig.ident)], "\n")
+cat("Cell types kept for modeling:", length(setdiff(keep_ct, "Other")), "\n")
+```
+
+## Analysis support
+
+```{r}
+make_support_table <- function(sample_dt, group_var) {
+    out <- copy(sample_dt)
+    out[, level := as.character(get(group_var))]
+    out[is.na(level) | !nzchar(level), level := "(blank)"]
+    out <- out[, .(
+        n_samples = .N,
+        n_female = sum(Sex == "Female"),
+        n_male = sum(Sex == "Male")
+    ), by = level][order(level)]
+    out[, included := n_samples >= min_group_samples &
+        n_female >= min_samples_per_sex &
+        n_male >= min_samples_per_sex]
+    out[, reason := fifelse(
+        included,
+        sprintf("included: >=%d samples and >=%d per sex", min_group_samples, min_samples_per_sex),
+        fifelse(
+            n_samples < min_group_samples,
+            sprintf("excluded: fewer than %d samples", min_group_samples),
+            sprintf("excluded: fewer than %d female and %d male samples", min_samples_per_sex, min_samples_per_sex)
+        )
+    )]
+    out
+}
+
+support_intdx <- make_support_table(sample_dt, "IntDx")
+keep_intdx <- support_intdx[included == TRUE, level]
+
+support_location <- make_support_table(sample_dt, "Location")
+keep_location <- support_location[included == TRUE, level]
+```
+
+Model 1 keeps only diagnosis levels with at least 3 samples and at least 2 female plus 2 male samples.
+
+```{r}
+kable(setnames(copy(support_intdx), "level", "IntDx"))
+```
+
+Model 2 uses the same sex-support rule for location levels.
+
+```{r}
+kable(setnames(copy(support_location), "level", "Location"))
+```
+
+## Model details
+
+For cell type $j$ in sample $i$, we model the count $n_{ij}$ out of $N_i$ total cells with a beta-binomial model:
+
+$$
+    n_{ij} \sim \mathrm{BetaBinomial}(N_i, p_{ij}, \phi_j), \qquad
+    \mathrm{logit}(p_{ij}) = \beta_{0j} + x_i^\top \beta_j.
+$$
+
+The primary models adjust only for sex. Model 1 is interpreted as diagnosis-associated composition. Model 2 is interpreted as location-associated composition. The omnibus row is a global likelihood-ratio test for whether the focal predictor matters for a cell type at all after sex adjustment. The `emmeans` estimated proportions are the level-specific quantities to interpret biologically. In the estimate plots, the y-axis is the adjusted marginal proportion, and the point color indicates whether that level is higher or lower than the equal-weight model-wide mean for that cell type on the response scale. For Models 1 and 2, only cell types with omnibus BH-adjusted `p < 0.25` are highlighted in the main `emmeans` plots; the rest are treated as weaker or noisier evidence. The DLGNT subtype comparison is exploratory because subtype and location are strongly confounded in this cohort.
+
+```{r}
+# Keep the result-shaping logic in one place because emmeans uses slightly
+# different column names across model families.
+pick_col <- function(x, candidates) {
+    hit <- intersect(candidates, names(x))
+    if (length(hit)) hit[[1]] else NA_character_
+}
+
+bind_rows <- function(x) {
+    x <- Filter(function(y) !is.null(y) && nrow(y), x)
+    if (!length(x)) return(data.table())
+    rbindlist(x, use.names = TRUE, fill = TRUE)
+}
+
+tidy_emmeans <- function(emm_sum, predictor, model_name, cell_type, n_samples) {
+    level_col <- names(emm_sum)[1]
+    est_col <- pick_col(emm_sum, c("prob", "response", "rate", "emmean"))
+    lower_col <- pick_col(emm_sum, c("lower.CL", "asymp.LCL"))
+    upper_col <- pick_col(emm_sum, c("upper.CL", "asymp.UCL"))
+    data.table(
+        model = model_name,
+        result_type = "emmeans",
+        cell_type = cell_type,
+        predictor = predictor,
+        term_or_contrast = as.character(emm_sum[[level_col]]),
+        estimate = if (!is.na(est_col)) as.numeric(emm_sum[[est_col]]) else NA_real_,
+        std.error = if ("SE" %in% names(emm_sum)) as.numeric(emm_sum[["SE"]]) else NA_real_,
+        lower.CL = if (!is.na(lower_col)) as.numeric(emm_sum[[lower_col]]) else NA_real_,
+        upper.CL = if (!is.na(upper_col)) as.numeric(emm_sum[[upper_col]]) else NA_real_,
+        p.value = NA_real_,
+        p_adj = NA_real_,
+        n_samples = n_samples
+    )
+}
+
+clean_effect_label <- function(x) {
+    sub(" effect$", "", as.character(x))
+}
+
+tidy_effects <- function(eff_raw_sum, eff_bh_sum, predictor, model_name, cell_type, n_samples) {
+    label_col <- names(eff_raw_sum)[1]
+    lower_col <- pick_col(eff_raw_sum, c("lower.CL", "asymp.LCL"))
+    upper_col <- pick_col(eff_raw_sum, c("upper.CL", "asymp.UCL"))
+
+    out <- data.table(
+        model = model_name,
+        result_type = "eff_vs_mean",
+        cell_type = cell_type,
+        predictor = predictor,
+        term_or_contrast = clean_effect_label(eff_raw_sum[[label_col]]),
+        estimate = if ("estimate" %in% names(eff_raw_sum)) as.numeric(eff_raw_sum[["estimate"]]) else NA_real_,
+        std.error = if ("SE" %in% names(eff_raw_sum)) as.numeric(eff_raw_sum[["SE"]]) else NA_real_,
+        lower.CL = if (!is.na(lower_col)) as.numeric(eff_raw_sum[[lower_col]]) else NA_real_,
+        upper.CL = if (!is.na(upper_col)) as.numeric(eff_raw_sum[[upper_col]]) else NA_real_,
+        p.value = if ("p.value" %in% names(eff_raw_sum)) as.numeric(eff_raw_sum[["p.value"]]) else NA_real_,
+        p_adj = NA_real_,
+        n_samples = n_samples
+    )
+
+    bh_dt <- data.table(
+        term_or_contrast = clean_effect_label(eff_bh_sum[[label_col]]),
+        p_adj = if ("p.value" %in% names(eff_bh_sum)) as.numeric(eff_bh_sum[["p.value"]]) else NA_real_
+    )
+    out[bh_dt, on = "term_or_contrast", p_adj := i.p_adj]
+    out
+}
+
+fit_beta_model <- function(dd, predictor, model_name, adjust_sex = TRUE, do_omnibus = TRUE) {
+    cell_id <- dd$cell_type[[1]]
+    dd <- copy(dd[total > 0])
+    dd[, (predictor) := droplevels(factor(get(predictor)))]
+    if (adjust_sex) dd[, Sex := droplevels(factor(Sex))]
+
+    if (dd[, uniqueN(get(predictor))] < 2L) {
+        return(list(
+            log = data.table(model = model_name, cell_type = cell_id, status = "skipped: fewer than 2 predictor levels"),
+            omnibus = NULL, emmeans = NULL, effects = NULL
+        ))
+    }
+
+    full_terms <- c(predictor, if (adjust_sex) "Sex")
+    full_form <- as.formula(paste0("cbind(n_type, total - n_type) ~ ", paste(full_terms, collapse = " + ")))
+    reduced_form <- as.formula(paste0("cbind(n_type, total - n_type) ~ ", if (adjust_sex) "Sex" else "1"))
+
+    full_fit <- tryCatch(
+        glmmTMB(full_form, data = dd, family = betabinomial(link = "logit")),
+        error = function(e) e
+    )
+    if (inherits(full_fit, "error")) {
+        return(list(
+            log = data.table(model = model_name, cell_type = cell_id, status = paste("fit failed:", full_fit$message)),
+            omnibus = NULL, emmeans = NULL, effects = NULL
+        ))
+    }
+
+    omnibus_dt <- NULL
+    if (do_omnibus) {
+        reduced_fit <- tryCatch(
+            glmmTMB(reduced_form, data = dd, family = betabinomial(link = "logit")),
+            error = function(e) e
+        )
+        if (inherits(reduced_fit, "error")) {
+            return(list(
+                log = data.table(model = model_name, cell_type = cell_id, status = paste("reduced fit failed:", reduced_fit$message)),
+                omnibus = NULL, emmeans = NULL, effects = NULL
+            ))
+        }
+        lr_tab <- tryCatch(as.data.table(anova(reduced_fit, full_fit)), error = function(e) NULL)
+        p_col <- if (!is.null(lr_tab)) grep("^Pr\\(>Chisq\\)$", names(lr_tab), value = TRUE) else character()
+        chisq_col <- if (!is.null(lr_tab)) grep("Chisq", names(lr_tab), value = TRUE) else character()
+        omnibus_dt <- data.table(
+            model = model_name,
+            result_type = "omnibus",
+            cell_type = cell_id,
+            predictor = predictor,
+            term_or_contrast = predictor,
+            estimate = if (length(chisq_col)) as.numeric(lr_tab[[chisq_col[[1]]]][nrow(lr_tab)]) else NA_real_,
+            std.error = NA_real_,
+            lower.CL = NA_real_,
+            upper.CL = NA_real_,
+            p.value = if (length(p_col)) as.numeric(lr_tab[[p_col[[1]]]][nrow(lr_tab)]) else NA_real_,
+            p_adj = NA_real_,
+            n_samples = uniqueN(dd$orig.ident)
+        )
+    }
+
+    emm <- tryCatch(emmeans(full_fit, specs = as.formula(paste0("~ ", predictor))), error = function(e) NULL)
+    if (is.null(emm)) {
+        return(list(
+            log = data.table(model = model_name, cell_type = cell_id, status = "fit complete; emmeans failed"),
+            omnibus = omnibus_dt, emmeans = NULL, effects = NULL
+        ))
+    }
+
+    emm_sum <- tryCatch(as.data.table(summary(emm, type = "response", infer = TRUE)), error = function(e) NULL)
+    if (is.null(emm_sum)) {
+        return(list(
+            log = data.table(model = model_name, cell_type = cell_id, status = "fit complete; emmeans summary failed"),
+            omnibus = omnibus_dt, emmeans = NULL, effects = NULL
+        ))
+    }
+
+    emm_dt <- tidy_emmeans(emm_sum, predictor, model_name, cell_id, uniqueN(dd$orig.ident))
+    eff_dt <- NULL
+    eff_obj <- tryCatch(contrast(regrid(emm, transform = "response"), "eff", by = NULL), error = function(e) NULL)
+    if (!is.null(eff_obj)) {
+        eff_raw_sum <- tryCatch(as.data.table(summary(eff_obj, infer = TRUE, adjust = "none")), error = function(e) NULL)
+        eff_bh_sum <- tryCatch(as.data.table(summary(eff_obj, infer = TRUE, adjust = "BH")), error = function(e) NULL)
+        if (!is.null(eff_raw_sum) && !is.null(eff_bh_sum)) {
+            eff_dt <- tidy_effects(eff_raw_sum, eff_bh_sum, predictor, model_name, cell_id, uniqueN(dd$orig.ident))
+        }
+    }
+
+    list(
+        log = data.table(model = model_name, cell_type = cell_id, status = "fit"),
+        omnibus = omnibus_dt,
+        emmeans = emm_dt,
+        effects = eff_dt
+    )
+}
+
+run_model <- function(dat, predictor, keep_levels, model_name, adjust_sex = TRUE, do_omnibus = TRUE) {
+    model_dt <- copy(dat[cell_type != "Other" & get(predictor) %in% keep_levels])
+    fits <- lapply(
+        split(model_dt, by = "cell_type", keep.by = TRUE),
+        fit_beta_model,
+        predictor = predictor,
+        model_name = model_name,
+        adjust_sex = adjust_sex,
+        do_omnibus = do_omnibus
+    )
+
+    out <- list(
+        log = bind_rows(lapply(fits, `[[`, "log")),
+        omnibus = bind_rows(lapply(fits, `[[`, "omnibus")),
+        emmeans = bind_rows(lapply(fits, `[[`, "emmeans")),
+        effects = bind_rows(lapply(fits, `[[`, "effects"))
+    )
+
+    if (nrow(out$omnibus)) out$omnibus[, p_adj := p.adjust(p.value, method = "BH")]
+    out
+}
+
+plot_emmeans_hits <- function(res, predictor_levels, predictor_name, plot_title) {
+    sig_ct <- character()
+    if (nrow(res$omnibus) && "cell_type" %in% names(res$omnibus)) {
+        sig_ct <- res$omnibus[!is.na(p_adj) & p_adj < alpha, unique(cell_type)]
+    }
+
+    if (!length(sig_ct)) {
+        cat("No omnibus-significant", predictor_name, "hits at BH <", alpha, "\n")
+        return(invisible(NULL))
+    }
+
+    plot_dt <- copy(res$emmeans[cell_type %in% sig_ct])
+    eff_dt <- copy(res$effects[cell_type %in% sig_ct, .(
+        cell_type,
+        term_or_contrast,
+        eff_estimate = estimate,
+        eff_p_adj = p_adj
+    )])
+    plot_dt[eff_dt, on = .(cell_type, term_or_contrast), `:=`(
+        eff_estimate = i.eff_estimate,
+        eff_p_adj = i.eff_p_adj
+    )]
+    plot_dt[, effect_class := fifelse(
+        !is.na(eff_p_adj) & eff_p_adj < alpha & eff_estimate > 0,
+        "higher",
+        fifelse(
+            !is.na(eff_p_adj) & eff_p_adj < alpha & eff_estimate < 0,
+            "lower",
+            "not_significant"
+        )
+    )]
+    plot_dt[, effect_class := factor(effect_class, levels = c("higher", "lower", "not_significant"))]
+    plot_dt[, term_or_contrast := factor(term_or_contrast, levels = predictor_levels)]
+
+    ggplot(
+        plot_dt,
+        aes(
+            x = term_or_contrast,
+            y = estimate,
+            ymin = lower.CL,
+            ymax = upper.CL,
+            color = effect_class
+        )
+    ) +
+        geom_pointrange() +
+        facet_wrap(~ cell_type, scales = "free_y") +
+        theme_minimal(base_size = 18) +
+        scale_color_manual(
+            values = c(higher = "firebrick4", lower = "steelblue4", not_significant = "grey70"),
+            labels = c(higher = "Higher than mean", lower = "Lower than mean", not_significant = "Not significant"),
+            name = "Effect vs mean"
+        ) +
+        labs(
+            x = predictor_name,
+            y = "Estimated proportion",
+            title = plot_title,
+            subtitle = paste0(
+                "Only cell types with omnibus BH-adjusted p < ", alpha,
+                " are shown; color marks response-scale deviation from the equal-weight model mean"
+            )
+        ) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+## Model 1: `IntDx + Sex`
+
+Included IntDx levels: `r paste(keep_intdx, collapse = ", ")`
+
+Model formula: `cbind(n_type, total - n_type) ~ IntDx + Sex`
+
+```{r}
+intdx_results <- run_model(dat, predictor = "IntDx", keep_levels = keep_intdx, model_name = "intdx")
+kable(intdx_results$log[, .N, by = status][order(-N)])
+if (nrow(intdx_results$omnibus)) {
+    kable(intdx_results$omnibus[order(p_adj)])
+} else {
+    cat("No diagnosis models completed.\n")
+}
+```
+
+```{r}
+#| fig-height: 10
+plot_emmeans_hits(
+    intdx_results,
+    predictor_levels = keep_intdx,
+    predictor_name = "Diagnosis",
+    plot_title = "Model 1: estimated cell-type proportions by diagnosis"
+)
+```
+
+## Model 2: `Location + Sex`
+
+Included location levels: `r paste(keep_location, collapse = ", ")`
+
+Model formula: `cbind(n_type, total - n_type) ~ Location + Sex`
+
+```{r}
+location_results <- run_model(dat, predictor = "Location", keep_levels = keep_location, model_name = "location")
+kable(location_results$log[, .N, by = status][order(-N)])
+if (nrow(location_results$omnibus)) {
+    kable(location_results$omnibus[order(p_adj)])
+} else {
+    cat("No location models completed.\n")
+}
+```
+
+```{r}
+#| fig-height: 10
+plot_emmeans_hits(
+    location_results,
+    predictor_levels = keep_location,
+    predictor_name = "Location",
+    plot_title = "Model 2: estimated cell-type proportions by location"
+)
+```
+
+## Model 3: Exploratory `DLGNT_1` vs `DLGNT_2`
+
+This comparison is reported separately because subtype and location are strongly confounded in this cohort, so it should be interpreted as exploratory rather than adjusted.
+
+Model formula: `cbind(n_type, total - n_type) ~ IntDx`
+
+```{r}
+dlgnt_levels <- c("DLGNT_1", "DLGNT_2")
+dlgnt_results <- run_model(
+    dat,
+    predictor = "IntDx",
+    keep_levels = dlgnt_levels,
+    model_name = "dlgnt12",
+    adjust_sex = FALSE,
+    do_omnibus = TRUE
+)
+kable(dlgnt_results$log[, .N, by = status][order(-N)])
+```
+
+### `DLGNT_1` vs `DLGNT_2` omnibus results
+
+For this two-level exploratory model, the omnibus likelihood-ratio test asks whether the cell-type proportion differs at all between `DLGNT_1` and `DLGNT_2`.
+
+```{r}
+if (nrow(dlgnt_results$omnibus)) {
+    kable(dlgnt_results$omnibus[order(p_adj)])
+    dlgnt_sig <- dlgnt_results$omnibus[!is.na(p_adj) & p_adj < alpha, cell_type]
+    if (length(dlgnt_sig)) {
+        cat("BH-adjusted p <", alpha, ":", paste(dlgnt_sig, collapse = ", "), "\n")
+    } else {
+        cat("No DLGNT cell-type models were BH-significant at", alpha, ".\n")
+    }
+} else {
+    cat("No DLGNT subtype models completed.\n")
+}
+```
+
+### Estimated DLGNT subtype proportions
+
+```{r}
+if (nrow(dlgnt_results$emmeans)) {
+    kable(dlgnt_results$emmeans[order(cell_type, term_or_contrast)])
+} else {
+    cat("No DLGNT subtype estimates completed.\n")
+}
+```
+
+```{r}
+#| fig-height: 10
+plot_emmeans_hits(
+    dlgnt_results,
+    predictor_levels = dlgnt_levels,
+    predictor_name = "DLGNT subtype",
+    plot_title = "Model 3: estimated cell-type proportions by DLGNT subtype"
+)
+```
+
+### Observed sample proportions
+
+```{r}
+#| fig-height: 10
+if (nrow(dlgnt_results$emmeans)) {
+    plot_ct <- unique(dlgnt_results$emmeans$cell_type)
+    plot_dt <- dat[
+        cell_type %in% plot_ct & IntDx %in% dlgnt_levels,
+        .(orig.ident, cell_type, IntDx, Location, Sex, prop)
+    ]
+    plot_dt[is.na(Location) | !nzchar(Location), Location := "(blank)"]
+    plot_dt[, IntDx := factor(IntDx, levels = dlgnt_levels)]
+
+    ggplot(
+        plot_dt,
+        aes(
+            x = IntDx,
+            y = prop,
+            color = Sex,
+            shape = Location
+        )
+    ) +
+        geom_point(
+            position = position_jitter(width = 0.08, height = 0),
+            size = 2.8,
+            alpha = 0.9
+        ) +
+        facet_wrap(~ cell_type, scales = "free_y") +
+        theme_minimal(base_size = 18) +
+        labs(
+            x = "DLGNT subtype",
+            y = "Observed sample proportion",
+            title = "Exploratory DLGNT_1 vs DLGNT_2 observed proportions",
+            subtitle = "Points are individual samples; color shows sex and shape shows location"
+        )
+} else {
+    cat("No DLGNT subtype estimates to plot.\n")
+}
+```
+
+## Save results
+
+```{r}
+combine_results <- function(res) {
+    bind_rows(list(res$omnibus, res$emmeans, res$effects))
+}
+
+outdir <- paste0(workdir, "youyun/plgg/code/sample_comparisons/")
+if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+
+intdx_out <- file.path(outdir, paste0("betabinom_intdx_", cell_type_column, "_results.tsv"))
+location_out <- file.path(outdir, paste0("betabinom_location_", cell_type_column, "_results.tsv"))
+dlgnt_out <- file.path(outdir, paste0("betabinom_dlgnt12_", cell_type_column, "_results.tsv"))
+
+fwrite(combine_results(intdx_results), intdx_out, sep = "\t")
+fwrite(combine_results(location_results), location_out, sep = "\t")
+fwrite(combine_results(dlgnt_results), dlgnt_out, sep = "\t")
+
+cat("Wrote:", intdx_out, "\n")
+cat("Wrote:", location_out, "\n")
+cat("Wrote:", dlgnt_out, "\n")
+```
