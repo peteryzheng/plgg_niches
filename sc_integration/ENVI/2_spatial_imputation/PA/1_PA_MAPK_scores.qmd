@@ -1,0 +1,285 @@
+---
+title: "Imputed MAPK scores in PA"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+jupyter: python3
+---
+
+# Introduction
+
+This notebook is intended to visualize the difference in MAPK scores among different cell types in the PA single nuc dataset. 
+
+Then we will see if the same trends are observed in the imputed MAPK scores in the spatial dataset. If there are any spatially segregated niches by MAPK. 
+
+The MAPK scores are here: `/data/beroukhim1/youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/MAPK_signatures.csv`
+
+The ENVI objects are here: `/data/beroukhim1/youyun/plgg/data/sc_integration/ENVI_results`
+
+```{python}
+import os
+import pandas as pd
+import numpy as np
+import scanpy as sc
+import matplotlib.pyplot as plt
+import anndata as ad
+import glob
+import re
+import seaborn as sns
+
+# local vs eristwo
+if os.path.expanduser('~') in ["/Users/youyun", "/Users/youyunzheng"]:
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir = os.path.expanduser('~')+"/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+elif os.path.expanduser('~') == "/home/yz762":
+    # on the new server, the home directory is /home/yz762
+    workdir = "/mnt/storage/dept/medonc/beroukhim/"
+else:
+    # in eristwo, the home directory is usuaully at '/home/unix/[username]'
+    workdir = "/data/beroukhim1/"
+```
+
+# Load Data
+
+## Load the MAPK scores
+
+```{python}
+gene_list = pd.read_csv(workdir+"youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/MAPK_signatures.csv")
+```
+
+## Load the AnnData object
+
+```{python}
+# List all files matching the pattern
+sn_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results/*astrocytoma_sn_envi.h5ad"))
+spatial_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results/*astrocytoma_spatial_envi.h5ad"))
+```
+
+# Looking at all MAPK scores
+
+```{python}
+for i in range(len(sn_data)):
+    sample_name = re.sub('_',' ',re.sub('.*/|_sn_envi.*','',sn_data[i]))
+    print('Processing Sample: ', sample_name)
+    sn_adata = sc.read(sn_data[i])
+    spatial_adata = sc.read(spatial_data[i])
+    # create a new anndata object based on the imputed layer
+    impute_adata = ad.AnnData(
+        X=spatial_adata.obsm['imputation'],
+        obs=spatial_adata.obs
+    )
+
+    # Assume gene_list is your DataFrame and sn_adata is your AnnData object
+    for signature in gene_list['Signature'].unique():
+        genes = gene_list.loc[gene_list['Signature'] == signature, 'Gene'].tolist()
+        # Only keep genes present in the AnnData object
+        genes_present = [g for g in genes if g in sn_adata.var_names]
+        sc.tl.score_genes(sn_adata, gene_list=genes_present, score_name=f"{signature}_score", use_raw=False)
+        sc.tl.score_genes(impute_adata, gene_list=genes_present, score_name=f"{signature}_imputed_score", use_raw=False)
+        spatial_adata.obs[f"{signature}_imputed_score"] = impute_adata.obs[f"{signature}_imputed_score"]
+
+    # plot the scores 
+    with plt.rc_context({"figure.figsize": (6,3), "figure.dpi": (100)}):
+        sc.pl.embedding(
+            sn_adata, basis = 'latent_umap',
+            color=[f"{signature}_score" for signature in gene_list['Signature'].unique()], 
+            ncols=3, title = sample_name + " Single Nuclei UMAP: MAPK scores"
+        )
+
+    with plt.rc_context({"figure.figsize": (3,6), "figure.dpi": (100)}):
+        sc.pl.stacked_violin(
+            sn_adata, 
+            var_names=[f"{signature}_score" for signature in gene_list['Signature'].unique()], 
+            groupby='annot_v1', 
+            title = sample_name + " Single Nuclei MAPK scores by Cell Type"
+        )
+
+    with plt.rc_context({"figure.figsize": (6,3), "figure.dpi": (100)}):
+        sc.pl.embedding(
+            spatial_adata, basis = 'latent_umap',
+            color=[f"{signature}_imputed_score" for signature in gene_list['Signature'].unique()], 
+            ncols=3, title = sample_name + " Spatial UMAP: Imputed MAPK scores"
+        )
+
+    with plt.rc_context({"figure.figsize": (3,6), "figure.dpi": (100)}):
+        sc.pl.stacked_violin(
+            spatial_adata, 
+            var_names=[f"{signature}_imputed_score" for signature in gene_list['Signature'].unique()], 
+            groupby='Fine.Cell.Type.UMAP', 
+            title = sample_name + " Spatial Imputed MAPK scores by Cell Type"
+        )
+
+    with plt.rc_context({"figure.figsize": (6,3), "figure.dpi": (100)}):
+        sc.pl.embedding(
+            spatial_adata, basis = 'spatial',
+            color=[f"{signature}_imputed_score" for signature in gene_list['Signature'].unique()], 
+            ncols=3, title = sample_name + " Spatial Plot of Imputed MAPK scores"
+        )
+
+```
+
+
+# Focusing on only the MAPK overlap score
+
+```{python}
+def visualize_results(st_data, sc_data, sample_name):
+    
+    # ========== ENVI embedding ==========
+    lim_arr = np.concatenate([st_data.obsm['latent_umap'], sc_data.obsm['latent_umap']], axis = 0)
+
+    delta = 1
+    pre = 0.1
+    xmin = np.percentile(lim_arr[:, 0], pre) - delta
+    xmax = np.percentile(lim_arr[:, 0], 100 - pre) + delta
+    ymin = np.percentile(lim_arr[:, 1], pre) - delta
+    ymax = np.percentile(lim_arr[:, 1], 100 - pre) + delta
+    
+    fig = plt.figure(figsize = (13,8))
+    plt.subplot(121)
+    sns.scatterplot(x = sc_data.obsm['latent_umap'][:, 0], y = sc_data.obsm['latent_umap'][:, 1], 
+                    hue = sc_data.obs['annot_v1'], palette = 'tab20', s = 8,
+                    legend = True)
+    legend = plt.legend(title = 'Cell Type', prop={'size': 12}, fontsize = '12',  markerscale = 3, ncol = 1, bbox_to_anchor = (1, 1))#, loc = 'lower left')
+    plt.title("scRNA-seq Latent")
+    plt.xlim([xmin, xmax])
+    plt.ylim([ymin, ymax])
+    plt.axis('off')
+
+    plt.subplot(122)
+    sns.scatterplot(x = st_data.obsm['latent_umap'][:, 0], y = st_data.obsm['latent_umap'][:, 1],  
+                    hue = st_data.obs['cell_type'], palette = 'tab20', s = 8, 
+                    legend = True)
+
+    legend = plt.legend(title = 'Cell Type', prop={'size': 12}, fontsize = '12',  markerscale = 3, ncol = 1, bbox_to_anchor = (1, 1))#, loc = 'lower left')
+
+    plt.setp(legend.get_title(),fontsize='12')
+    plt.title("Xenium Latent")
+    plt.axis('off')
+    plt.tight_layout()
+    plt.xlim([xmin, xmax])
+    plt.ylim([ymin, ymax])
+    # total plot title
+    plt.suptitle("ENVI Latent UMAP " + sample_name, fontsize=16, y=1.02)
+    plt.subplots_adjust(top=0.85)  # Adjust the top margin to make room for the title
+    plt.show()
+    
+    # ========== spatial sample vis =========
+    fig = plt.figure(figsize = (13,8))
+    sns.scatterplot(x = st_data.obsm['spatial'][:, 0], y = st_data.obsm['spatial'][:, 1],  
+                    hue = st_data.obs['cell_type'], palette = 'tab20', s = 8, 
+                    legend = True)
+
+    legend = plt.legend(title = 'Cell Type', prop={'size': 12}, fontsize = '12',  markerscale = 3, ncol = 1, bbox_to_anchor = (1, 1))#, loc = 'lower left')
+
+    plt.setp(legend.get_title(),fontsize='12')
+    plt.title("Xenium Spatial " + sample_name)
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+```
+
+```{python}
+# set up a data frame of columns: sample, cell id, single nuc or spatial, cell types, MAPK_overlap_score
+mapk_scores = pd.DataFrame(columns=['sample', 'type', 'cell_type', 'MAPK_overlap_score'])
+for i in range(len(sn_data)):
+    sample_name = re.sub('_',' ',re.sub('.*/|_sn_envi.*','',sn_data[i]))
+    print('Processing Sample: ', sample_name)
+    sn_adata = sc.read(sn_data[i])
+    spatial_adata = sc.read(spatial_data[i])
+    # calculate the frequency of each cell type within the spatial data
+    cell_type_counts = spatial_adata.obs['Fine.Cell.Type.UMAP'].value_counts(normalize=True)
+    # Identify categories that are less than 1% or are NA
+    low_frequency_types = cell_type_counts[cell_type_counts < 0.01].index
+    # Replace these categories with 'other'
+    spatial_adata.obs['cell_type'] = spatial_adata.obs['Fine.Cell.Type.UMAP'].apply(
+        lambda x: 'other' if pd.isna(x) or x in low_frequency_types else x
+    )
+    spatial_adata.obs['cell_type'] = spatial_adata.obs['cell_type'].fillna('other')
+
+    # plot out the joint embedding space and color by cell type
+    visualize_results(spatial_adata, sn_adata, sample_name)
+    
+    # create a new anndata object based on the imputed layer
+    impute_adata = ad.AnnData(
+        X=spatial_adata.obsm['imputation']
+    )
+
+    # MAPK_overlap
+    genes = gene_list.loc[gene_list['Signature'] == 'MAPK_overlap', 'Gene'].tolist()
+    genes_present = [g for g in genes if g in sn_adata.var_names]
+    sc.tl.score_genes(sn_adata, gene_list=genes_present, score_name=f"MAPK_overlap_score", use_raw=False)
+    sc.tl.score_genes(impute_adata, gene_list=genes_present, score_name=f"MAPK_overlap_imputed_score", use_raw=False)
+    spatial_adata.obs[f"MAPK_overlap_imputed_score"] = impute_adata.obs[f"MAPK_overlap_imputed_score"]
+
+    # plot the scores on the umap
+    with plt.rc_context({"figure.figsize": (6,4), "figure.dpi": (100)}):
+        sc.pl.embedding(
+            sn_adata, basis = 'latent_umap',
+            color=["MAPK_overlap_score"], 
+            title = sample_name + " Single Nuclei UMAP: MAPK Overlap Score"
+        )
+
+    with plt.rc_context({"figure.figsize": (6,4), "figure.dpi": (100)}):
+        sc.pl.embedding(
+            spatial_adata, basis = 'latent_umap',
+            color=["MAPK_overlap_imputed_score"], 
+            title = sample_name + " Spatial UMAP: Imputed MAPK Overlap Score"
+        )
+
+    # plot the scores by cell type on the x axis 
+    with plt.rc_context({"figure.figsize": (10,3), "figure.dpi": (100)}):
+        ax = sc.pl.violin(
+            sn_adata, keys=["MAPK_overlap_score"], 
+            groupby='annot_v1', rotation=90, show = False
+        ) 
+        plt.title(sample_name + " Single Nuclei MAPK Overlap Score by Cell Type")
+        plt.show()
+
+    with plt.rc_context({"figure.figsize": (10,3), "figure.dpi": (100)}):
+        ax = sc.pl.violin(
+            spatial_adata, keys=["MAPK_overlap_imputed_score"],
+            groupby='cell_type', rotation=90, show = False
+        )
+        plt.title(sample_name + " Spatial Imputed MAPK Overlap Score by Cell Type")
+        plt.show()
+
+    # plot the scores on the spatial plot
+    with plt.rc_context({"figure.figsize": (6,4), "figure.dpi": (100)}):
+        sc.pl.embedding(
+            spatial_adata, basis = 'spatial',
+            color=["MAPK_overlap_imputed_score"], 
+            title = sample_name + " Spatial Plot of Imputed MAPK Overlap Score"
+        )
+
+    # append the scores to the data frame
+    mapk_scores = pd.concat([
+        mapk_scores, 
+        pd.DataFrame({
+            'sample': sample_name, 'type': 'spatial',
+            'cell_id': spatial_adata.obs_names,
+            'cell_type': spatial_adata.obs['Fine.Cell.Type.UMAP'],
+            'MAPK_overlap_score': spatial_adata.obs['MAPK_overlap_imputed_score']
+        })
+    ], ignore_index=True)
+    mapk_scores = pd.concat([
+        mapk_scores, 
+        pd.DataFrame({
+            'sample': sample_name, 'type': 'sn',
+            'cell_id': sn_adata.obs_names,
+            'cell_type': sn_adata.obs['annot_v1'],
+            'MAPK_overlap_score': sn_adata.obs['MAPK_overlap_score']
+        })
+    ], ignore_index=True)
+
+# Save the MAPK scores
+mapk_scores.to_csv(workdir + "youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/MAPK_overlap_scores.csv", index=False)
+```

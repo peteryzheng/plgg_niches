@@ -1,0 +1,116 @@
+---
+title: "Imputed NKX2-1 Expression in CN"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+jupyter: python3
+---
+
+# Introduction
+
+This notebook is intended to visualize the expression of NKX2-1 Expression in CN. 
+
+Then we will see if the same trends are observed in the imputed NKX2-1 expression in the spatial dataset. If there are any spatially segregated niches by MAPK. 
+
+The ENVI objects are here: `/data/beroukhim1/youyun/plgg/data/sc_integration/ENVI_results`
+
+```{python}
+import os
+import pandas as pd
+import numpy as np
+import scanpy as sc
+import matplotlib.pyplot as plt
+import anndata as ad
+import glob
+import re
+
+# local vs eristwo
+if os.path.expanduser('~') in ["/Users/youyun", "/Users/youyunzheng"]:
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir = os.path.expanduser('~')+"/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+elif os.path.expanduser('~') == "/home/yz762":
+    # on the new server, the home directory is /home/yz762
+    workdir = "/mnt/storage/dept/medonc/beroukhim/"
+else:
+    # in eristwo, the home directory is usuaully at '/home/unix/[username]'
+    workdir = "/data/beroukhim1/"
+```
+
+# Load Data
+
+## Load the AnnData object
+
+```{python}
+# List all files matching the pattern
+sn_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results/*central neurocytoma_sn_envi.h5ad"))
+spatial_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results/*central neurocytoma_spatial_envi.h5ad"))
+```
+
+## Load the MAPK scores
+
+```{python}
+gene_list = pd.read_csv(workdir+"youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/MAPK_signatures.csv")
+```
+
+# NKX2-1 scores
+
+```{python}
+for i in range(len(sn_data)):
+    sample_name = re.sub('_',' ',re.sub('.*/|_sn_envi.*','',sn_data[i]))
+    print('Processing Sample: ', sample_name)
+    sn_adata = sc.read(sn_data[i])
+    spatial_adata = sc.read(spatial_data[i])
+    spatial_adata.obs['NKX2-1'] = spatial_adata.obsm['imputation']['NKX2-1']
+
+    # plot the scores 
+    with plt.rc_context({"figure.figsize": (6,3), "figure.dpi": (200)}):
+        sc.pl.embedding(
+            sn_adata, basis = 'latent_umap', color=['NKX2-1'], 
+            title = sample_name + " Single Nuclei UMAP: NKX2-1 Expression"
+        )
+
+    with plt.rc_context({"figure.figsize": (10,3), "figure.dpi": (100)}):
+        ax = sc.pl.violin(
+            sn_adata, keys=['NKX2-1'], groupby='annot_v1', 
+            rotation=90, show = False
+        )
+        plt.title(sample_name + " Single Nuclei NKX2-1 by Cell Type")
+        plt.show()
+        
+
+    with plt.rc_context({"figure.figsize": (6,3), "figure.dpi": (200)}):
+        sc.pl.embedding(
+            spatial_adata, basis = 'latent_umap', color=['NKX2-1'], 
+            title = sample_name + " Spatial UMAP: Imputed NKX2-1 Expression"
+        )
+
+    with plt.rc_context({"figure.figsize": (10,3), "figure.dpi": (100)}):
+        ax = sc.pl.violin(
+            spatial_adata, keys=['NKX2-1'], groupby='Fine.Cell.Type.UMAP', 
+            rotation=90, show = False
+        )
+        plt.gca().get_legend().remove()
+        plt.title(sample_name + " Spatial Imputed NKX2-1 by Cell Type")
+        plt.show()
+
+    spatial_adata.obs['NKX2-1_binary'] = np.where(spatial_adata.obs['NKX2-1'] > 0.5, 'NKX2-1+', 'NKX2-1-')
+    col_palette = {'NKX2-1-': 'gray', 'NKX2-1+': 'red'}
+    with plt.rc_context({"figure.figsize": (6,3), "figure.dpi": (200)}):
+        sc.pl.embedding(
+            spatial_adata, basis = 'spatial',
+            color=['NKX2-1_binary'], 
+            palette = col_palette,
+            title = sample_name + " Spatial Plot of Imputed NKX2-1 Expression"
+        )
+
+```
+

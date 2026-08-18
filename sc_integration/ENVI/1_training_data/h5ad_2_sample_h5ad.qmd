@@ -1,0 +1,264 @@
+---
+title: ""
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk:
+        results: hold
+        R.options:
+            width: 120
+---
+
+```{r}
+#| echo: FALSE
+library(SingleCellExperiment)
+library(data.table)
+library(reticulate)
+library(knitr)
+
+# local vs remote
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usually at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    # in dipg or uger, the home directory is '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Introduction
+
+- Input single-nucleus AnnData: `youyun/plgg/data/single_cell/Extended_sndata_filtered.h5ad`
+- Sample-to-histology mapping source:
+  `youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds`
+- Output directory: `youyun/plgg/data/sc_integration/`
+
+This notebook reads one input h5ad, uses BANKSY metadata to map `sample_id -> histology`,
+and writes one sample-specific h5ad per mapping row with filename:
+`<sample_id>_<histology_with_underscores>_sn.h5ad`.
+
+# Parameters
+
+```{r}
+input_h5ad <- paste0(workdir, "youyun/plgg/data/single_cell/Extended_sndata_filtered.h5ad")
+output_dir <- paste0(workdir, "youyun/plgg/data/sc_integration/")
+output_log_tsv <- paste0(output_dir, "h5ad_2_sample_h5ad_log.tsv")
+
+banksy_rds <- ifelse(
+    basename(workdir) != "dfci_mount",
+    paste0(
+        workdir,
+        "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/",
+        "banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+    ),
+    paste0(
+        "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/",
+        "banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+    )
+)
+```
+
+# Load sample-histology mapping
+
+```{r}
+stopifnot(file.exists(input_h5ad))
+stopifnot(file.exists(banksy_rds))
+
+banksy_embeddings <- readRDS(banksy_rds)
+
+sample_histology <- as.data.table(unique(colData(banksy_embeddings)[, c("sample_id", "histology")]))
+sample_histology[, sample_id := as.character(sample_id)]
+sample_histology[, histology := as.character(histology)]
+sample_histology <- unique(sample_histology[, .(sample_id, histology)])
+
+# Ensure 1:1 sample_id -> histology mapping
+conflicting <- sample_histology[, .(n_histology = uniqueN(histology)), by = sample_id][n_histology > 1]
+if (nrow(conflicting) > 0) {
+    stop(
+        "Found sample_id values with multiple histology labels: ",
+        paste(conflicting$sample_id, collapse = ", ")
+    )
+}
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Samples in mapping:", nrow(sample_histology), "\n")
+kable(sample_histology[order(sample_id)])
+
+use_condaenv("/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/envs/spatial/", required = TRUE)
+```
+
+# Split h5ad by sample and write outputs
+
+```{python}
+import anndata as ad
+import pandas as pd
+from pathlib import Path
+
+input_h5ad = Path(r.input_h5ad)
+output_dir = Path(r.output_dir)
+output_log_tsv = Path(r.output_log_tsv)
+
+sample_histology = r.sample_histology.copy()
+sample_histology["sample_id"] = sample_histology["sample_id"].astype(str)
+sample_histology["histology"] = sample_histology["histology"].astype(str)
+
+adata = ad.read_h5ad(input_h5ad, backed="r")
+if "orig.ident" not in adata.obs.columns:
+    raise KeyError("Column 'orig.ident' not found in input h5ad obs.")
+
+orig_ident = adata.obs["orig.ident"].astype(str).to_numpy()
+logs = []
+
+# try:
+#     for row in sample_histology.itertuples(index=False):
+#         sid = str(row.sample_id)
+#         hist = str(row.histology)
+#         hist_safe = hist.replace(" ", "_")
+#         out_file = output_dir / f"{sid}_{hist_safe}_sn.h5ad"
+
+#         mask = (orig_ident == sid)
+#         n_cells = int(mask.sum())
+
+#         if n_cells == 0:
+#             logs.append({
+#                 "sample_id": sid,
+#                 "histology": hist,
+#                 "n_cells": n_cells,
+#                 "status": "missing_in_h5ad",
+#                 "outfile": str(out_file),
+#             })
+#             continue
+
+#         sub = adata[mask].to_memory()
+#         sub_sample_ids = pd.Index(sub.obs["orig.ident"].astype(str).unique())
+#         if len(sub_sample_ids) != 1 or sub_sample_ids[0] != sid:
+#             logs.append({
+#                 "sample_id": sid,
+#                 "histology": hist,
+#                 "n_cells": n_cells,
+#                 "status": "sample_mismatch",
+#                 "outfile": str(out_file),
+#             })
+#             continue
+
+#         sub.write_h5ad(out_file, compression="gzip")
+#         logs.append({
+#             "sample_id": sid,
+#             "histology": hist,
+#             "n_cells": n_cells,
+#             "status": "written",
+#             "outfile": str(out_file),
+#         })
+# finally:
+#     if hasattr(adata, "file") and adata.file is not None:
+#         adata.file.close()
+
+# log_df = pd.DataFrame(logs)
+# log_df.to_csv(output_log_tsv, sep="\t", index=False)
+
+# print(log_df)
+# print("\nStatus counts:")
+# print(log_df["status"].value_counts(dropna=False))
+```
+
+# Quick compatibility check (first 3 written files)
+
+```{python}
+# check_rows = []
+# written = log_df.loc[log_df["status"] == "written", "outfile"].head(3).tolist()
+
+# for f in written:
+#     adx = ad.read_h5ad(f, backed="r")
+#     try:
+#         check_rows.append({
+#             "outfile": f,
+#             "n_obs": int(adx.n_obs),
+#             "n_vars": int(adx.n_vars),
+#             "n_obs_orig_ident": int(adx.obs["orig.ident"].astype(str).nunique()),
+#             "n_layers": len(adx.layers.keys()),
+#             "n_obsm": len(adx.obsm.keys()),
+#         })
+#     finally:
+#         if hasattr(adx, "file") and adx.file is not None:
+#             adx.file.close()
+
+# pd.DataFrame(check_rows)
+```
+
+# Come up with a list of 2048 HVGs for PA Samples Together
+
+we will subset the object to all PA samples together, and then use `scanpy.pp.highly_variable_genes` to get the top 2048 HVGs across all PA samples. This will be used for the PA spatial imputation step later on, where we will subset the object to only the PA samples and only these 2048 HVGs before running the imputation.
+
+```{python}
+import scanpy as sc
+
+# Identify pilocytic astrocytoma (PA) sample IDs from BANKSY-derived mapping
+sample_histology_pa = sample_histology.copy()
+sample_histology_pa["histology"] = sample_histology_pa["histology"].astype(str)
+sample_histology_pa["sample_id"] = sample_histology_pa["sample_id"].astype(str)
+
+pa_sample_ids = (
+    sample_histology_pa.loc[
+        sample_histology_pa["histology"].str.contains("pilocytic astrocytoma", case=False, na=False),
+        "sample_id"
+    ]
+    .drop_duplicates()
+    .tolist()
+)
+
+if len(pa_sample_ids) == 0:
+    raise ValueError("No PA samples found in sample_histology mapping.")
+
+adata = ad.read_h5ad(input_h5ad, backed="r")
+try:
+    orig_ident = adata.obs["orig.ident"].astype(str).to_numpy()
+    pa_mask = pd.Series(orig_ident).isin(pa_sample_ids).to_numpy()
+    n_pa_cells = int(pa_mask.sum())
+    if n_pa_cells == 0:
+        raise ValueError("No PA cells found in input_h5ad after filtering with PA sample IDs.")
+
+    adata_pa = adata[pa_mask].to_memory()
+finally:
+    if hasattr(adata, "file") and adata.file is not None:
+        adata.file.close()
+
+adata_pa.var_names_make_unique()
+sc.pp.highly_variable_genes(adata_pa, n_top_genes=2048, inplace=True)
+
+if "highly_variable_rank" in adata_pa.var.columns:
+    pa_hvg_df = adata_pa.var.sort_values("highly_variable_rank")
+else:
+    pa_hvg_df = adata_pa.var.sort_index()
+
+if pa_hvg_df.shape[0] != 2048:
+    print(f"Warning: expected 2048 HVGs but got {pa_hvg_df.shape[0]}.")
+
+pa_hvg_df.insert(0, "gene", pa_hvg_df.index.astype(str))
+
+pa_hvg_tsv = output_dir / "PA_top2048_HVGs.tsv"
+
+pa_hvg_df.to_csv(pa_hvg_tsv, sep="\t", index=False)
+
+print(f"PA samples: {len(pa_sample_ids)}")
+print(f"PA cells: {n_pa_cells}")
+print(f"HVG list written: {pa_hvg_tsv}")
+print(pa_hvg_df.head())
+```

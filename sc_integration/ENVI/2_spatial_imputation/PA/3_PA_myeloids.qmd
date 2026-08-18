@@ -1,0 +1,727 @@
+---
+title: "Myeloids in PA"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+jupyter: python3
+---
+
+# Introduction
+
+The ENVI objects are here: `/data/beroukhim1/youyun/plgg/data/sc_integration/ENVI_results`
+
+Goal: identify pathways specifically enriched in `Myeloid 1` versus `Myeloid 2` using both spatial-imputation and SN label-transfer analyses.
+
+```{python}
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import glob
+import re
+import seaborn as sns
+import subprocess
+import shutil
+import sys
+import anndata as ad
+from pathlib import Path
+
+# local vs eristwo
+if os.path.expanduser('~') in ["/Users/youyun", "/Users/youyunzheng"]:
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir = os.path.expanduser('~')+"/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+elif os.path.expanduser('~') == "/home/yz762":
+    # on the new server, the home directory is /home/yz762
+    workdir = "/mnt/storage/dept/medonc/beroukhim/"
+else:
+    # in eristwo, the home directory is usuaully at '/home/unix/[username]'
+    workdir = "/data/beroukhim1/"
+```
+
+# Load Data
+
+## Load the AnnData object
+
+```{python}
+# List all files matching the pattern
+sn_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results_022626/*astrocytoma_sn_envi.h5ad"))
+spatial_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results_022626/*astrocytoma_spatial_envi.h5ad"))
+
+sn_by_sample = {
+    re.sub('_sn_envi.h5ad$', '', Path(x).name): x
+    for x in sn_data
+}
+spatial_by_sample = {
+    re.sub('_spatial_envi.h5ad$', '', Path(x).name): x
+    for x in spatial_data
+}
+
+sample_ids = sorted(set(sn_by_sample.keys()) & set(spatial_by_sample.keys()))
+print(f"Matched samples: {len(sample_ids)}")
+print(sample_ids)
+```
+
+# Spatial Imputation GSEA
+
+```{python}
+# Keep each pathway self-contained in its own subdirectory.
+pa_dir = Path(workdir) / "youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA"
+spatial_output_dir = pa_dir / "spatial_imputation_gsea"
+spatial_output_dir.mkdir(parents=True, exist_ok=True)
+
+spatial_prepare_path = spatial_output_dir / "myeloid_spatial_imputation_prepare.py"
+spatial_script_path = spatial_output_dir / "myeloid_spatial_imputation.R"
+for p in [spatial_prepare_path, spatial_script_path]:
+    if not p.exists():
+        raise FileNotFoundError(f"Missing spatial-imputation script: {p}")
+
+cmd_prepare = [sys.executable, str(spatial_prepare_path)]
+print("Running:", " ".join(cmd_prepare))
+run_prepare = subprocess.run(cmd_prepare, capture_output=True, text=True)
+print(run_prepare.stdout)
+if run_prepare.returncode != 0:
+    print(run_prepare.stderr)
+    raise RuntimeError("Spatial-imputation Python prepare step failed.")
+
+if shutil.which("Rscript") is not None:
+    cmd_r = [shutil.which("Rscript"), str(spatial_script_path)]
+elif shutil.which("conda") is not None:
+    cmd_r = ["conda", "run", "-n", "spatial", "Rscript", str(spatial_script_path)]
+else:
+    raise RuntimeError("Neither Rscript nor conda executable is available.")
+
+print("Running:", " ".join(cmd_r))
+run_r = subprocess.run(cmd_r, capture_output=True, text=True)
+print(run_r.stdout)
+if run_r.returncode != 0:
+    print(run_r.stderr)
+    raise RuntimeError("Spatial-imputation R limma/fgsea step failed.")
+```
+
+```{python}
+# Expected final outputs from the spatial-imputation R stage.
+spatial_paths = {
+    "coverage": spatial_output_dir / "myeloid_spatial_imputation_coverage_summary.csv",
+    "pairwise_overlap": spatial_output_dir / "myeloid_spatial_imputation_pairwise_gene_overlap.csv",
+    "shared_universe": spatial_output_dir / "myeloid_spatial_imputation_shared_universe.csv",
+    "limma_de": spatial_output_dir / "myeloid_spatial_imputation_limma_de.csv",
+    "genesets_filtered": spatial_output_dir / "myeloid_spatial_imputation_gene_sets_filtered.csv",
+    "gsea_results": spatial_output_dir / "myeloid_spatial_imputation_gsea_results.csv",
+    "sample_diagnostics": spatial_output_dir / "myeloid_spatial_imputation_sample_diagnostics.csv"
+}
+
+missing_spatial = [name for name, path in spatial_paths.items() if not path.exists()]
+if missing_spatial:
+    raise FileNotFoundError(f"Missing spatial-imputation outputs: {missing_spatial}")
+
+spatial_coverage = pd.read_csv(spatial_paths["coverage"])
+spatial_pairwise_overlap = pd.read_csv(spatial_paths["pairwise_overlap"])
+spatial_shared_universe = pd.read_csv(spatial_paths["shared_universe"])
+spatial_limma_de = pd.read_csv(spatial_paths["limma_de"])
+spatial_genesets_filtered = pd.read_csv(spatial_paths["genesets_filtered"])
+spatial_gsea_results = pd.read_csv(spatial_paths["gsea_results"])
+spatial_sample_diag = pd.read_csv(spatial_paths["sample_diagnostics"])
+
+print(f"Shared-universe size: {spatial_shared_universe.shape[0]}")
+print(f"DE rows: {spatial_limma_de.shape[0]}")
+print(f"Filtered gene sets: {spatial_genesets_filtered.shape[0]}")
+print(f"GSEA rows: {spatial_gsea_results.shape[0]}")
+```
+
+## Spatial-Imputation Sample Diagnostics
+
+```{python}
+spatial_sample_diag
+```
+
+```{python}
+plt.figure(figsize=(8, 4))
+plot_cov = spatial_coverage.sort_values("n_tested_genes", ascending=False)
+sns.barplot(data=plot_cov, x="sample", y="n_tested_genes", color="#3b7ea1")
+plt.xticks(rotation=45, ha="right")
+plt.title("Spatial-imputation: tested genes per sample")
+plt.xlabel("")
+plt.ylabel("Number of tested genes")
+plt.tight_layout()
+plt.show()
+```
+
+## Spatial-Imputation Top GSEA Terms
+
+```{python}
+gsea_sig = spatial_gsea_results[spatial_gsea_results["padj"] < 0.05].copy()
+if gsea_sig.empty:
+    print("No significant GSEA terms at FDR < 0.05.")
+else:
+    gsea_sig["abs_nes"] = gsea_sig["NES"].abs()
+    top_gsea = (
+        gsea_sig
+        .sort_values(["contrast", "source", "padj", "abs_nes"], ascending=[True, True, True, False])
+        .groupby(["contrast", "source"], as_index=False)
+        .head(5)
+        .copy()
+    )
+    top_gsea[["contrast", "source", "set_name", "NES", "padj"]]
+```
+
+```{python}
+if gsea_sig.empty:
+    print("Skipping GSEA plot because no significant terms were found.")
+else:
+    gsea_plot = top_gsea.copy()
+    gsea_plot["set_label"] = gsea_plot["set_name"].str.slice(0, 65)
+    plt.figure(figsize=(11, max(5, 0.25 * gsea_plot.shape[0])))
+    sns.scatterplot(
+        data=gsea_plot,
+        x="NES",
+        y="set_label",
+        hue="source",
+        style="contrast",
+        size=-np.log10(np.clip(gsea_plot["padj"], 1e-300, None)),
+        sizes=(50, 220)
+    )
+    plt.axvline(0, color="gray", linewidth=1)
+    plt.title("Spatial-imputation top significant GSEA pathways")
+    plt.xlabel("Normalized Enrichment Score (NES)")
+    plt.ylabel("")
+    plt.tight_layout()
+    plt.show()
+```
+
+## Spatial-Imputation Hallmark GSEA Results
+
+```{python}
+hallmark_all = spatial_gsea_results[spatial_gsea_results["source"] == "H"].copy()
+hallmark_sig = hallmark_all[hallmark_all["padj"] < 0.05].copy()
+
+print(f"Hallmark sets tested: {hallmark_all.shape[0]}")
+print(f"Significant hallmark sets (FDR < 0.05): {hallmark_sig.shape[0]}")
+
+if hallmark_sig.empty:
+    print("No significant hallmark terms.")
+else:
+    hallmark_sig = hallmark_sig.sort_values(["padj", "NES"], ascending=[True, False])
+    hallmark_sig[["contrast", "set_name", "NES", "pval", "padj"]].head(30)
+```
+
+```{python}
+if not hallmark_sig.empty:
+    plt.figure(figsize=(9, max(3, 0.4 * hallmark_sig.shape[0])))
+    hs_plot = hallmark_sig.copy()
+    hs_plot["set_label"] = hs_plot["set_name"].str.replace("HALLMARK_", "", regex=False)
+    sns.barplot(data=hs_plot, x="NES", y="set_label", hue="contrast", orient="h")
+    plt.axvline(0, color="gray", linewidth=1)
+    plt.title("Significant Hallmark GSEA Terms")
+    plt.xlabel("NES")
+    plt.ylabel("")
+    plt.tight_layout()
+    plt.show()
+```
+
+## Spatial-Imputation Leading-Edge ECM/Glycosylation Expression
+
+```{python}
+ecm_glyco_pattern = r"ECM|EXTRACELLULAR|GLYCOSYL|GLYCAN"
+gsea_thematic = spatial_gsea_results[
+    (spatial_gsea_results["padj"] < 0.05)
+    & (spatial_gsea_results["contrast"] == "Myeloid 2 > Myeloid 1")
+    & (spatial_gsea_results["set_name"].str.contains(ecm_glyco_pattern, case=False, na=False))
+].copy()
+
+if gsea_thematic.empty:
+    print("No significant ECM/glycosylation terms at FDR < 0.05 for Myeloid 2 > Myeloid 1.")
+    gsea_thematic_top = pd.DataFrame()
+else:
+    gsea_thematic["abs_nes"] = gsea_thematic["NES"].abs()
+    gsea_thematic_top = (
+        gsea_thematic
+        .sort_values(["padj", "abs_nes"], ascending=[True, False])
+        .head(10)
+        .copy()
+    )
+
+    def parse_leading_edge(x):
+        if pd.isna(x) or str(x).strip() == "":
+            return []
+        genes = [g.strip().upper() for g in str(x).split(";") if g.strip()]
+        return list(dict.fromkeys(genes))
+
+    gsea_thematic_top["leading_edge_genes"] = gsea_thematic_top["leading_edge"].map(parse_leading_edge)
+    gsea_thematic_top["n_leading_edge_genes"] = gsea_thematic_top["leading_edge_genes"].map(len)
+    gsea_thematic_top[["set_name", "source", "NES", "padj", "n_leading_edge_genes"]]
+```
+
+```{python}
+leading_edge_expr_long = pd.DataFrame(
+    columns=["set_name", "gene", "sample", "group", "sample_group", "mean_expr", "frac_expr", "mean_expr_z"]
+)
+
+if gsea_thematic_top.empty:
+    print("Skipping leading-edge expression panel because no thematic sets were selected.")
+else:
+    target_groups = ("Myeloid 1", "Myeloid 2")
+
+    def format_sample_label(sample_id):
+        return sample_id.replace("_", " ").replace(" pilocytic astrocytoma", "")
+
+    set_to_genes = {
+        row.set_name: row.leading_edge_genes
+        for row in gsea_thematic_top[["set_name", "leading_edge_genes"]].itertuples(index=False)
+    }
+    selected_genes = sorted({g for genes in set_to_genes.values() for g in genes})
+
+    expr_rows = []
+    warn_msgs = []
+    sample_gene_presence = []
+
+    for sample_id in sample_ids:
+        spatial_path = spatial_by_sample.get(sample_id)
+        sample_label = format_sample_label(sample_id)
+        if spatial_path is None:
+            warn_msgs.append(f"{sample_label}: missing spatial file path.")
+            continue
+
+        try:
+            adata = ad.read_h5ad(spatial_path)
+        except Exception as err:
+            warn_msgs.append(f"{sample_label}: failed to read h5ad ({err}).")
+            continue
+
+        if "Fine.Cell.Type.UMAP" not in adata.obs.columns:
+            warn_msgs.append(f"{sample_label}: missing obs['Fine.Cell.Type.UMAP']; skipped.")
+            continue
+        if "imputation" not in adata.obsm_keys():
+            warn_msgs.append(f"{sample_label}: missing obsm['imputation']; skipped.")
+            continue
+
+        imp = adata.obsm["imputation"]
+        if isinstance(imp, pd.DataFrame):
+            imp_df = imp.copy()
+            imp_df.columns = pd.Index(imp_df.columns).astype(str).str.upper()
+            imp_df = imp_df.loc[:, ~imp_df.columns.duplicated(keep="first")]
+        else:
+            if hasattr(imp, "toarray"):
+                imp_arr = imp.toarray()
+            else:
+                imp_arr = np.asarray(imp)
+            if imp_arr.ndim != 2:
+                warn_msgs.append(f"{sample_label}: obsm['imputation'] is not 2D; skipped.")
+                continue
+            if adata.n_vars != imp_arr.shape[1]:
+                warn_msgs.append(f"{sample_label}: cannot map imputation columns to var_names; skipped.")
+                continue
+            imp_genes = pd.Index(adata.var_names).astype(str).str.upper()
+            keep_cols = ~imp_genes.duplicated(keep="first")
+            imp_df = pd.DataFrame(imp_arr[:, keep_cols], columns=imp_genes[keep_cols])
+
+        groups = adata.obs["Fine.Cell.Type.UMAP"].astype("string")
+        keep_cells = groups.isin(target_groups).fillna(False).to_numpy()
+        if keep_cells.sum() == 0:
+            warn_msgs.append(f"{sample_label}: no Myeloid 1/2 cells; skipped.")
+            continue
+
+        imp_df = imp_df.loc[keep_cells, :]
+        groups = groups[keep_cells].reset_index(drop=True)
+
+        available_genes = [g for g in selected_genes if g in imp_df.columns]
+        sample_gene_presence.append({
+            "sample": sample_label,
+            "n_selected_genes_present": len(available_genes),
+            "n_selected_genes_total": len(selected_genes)
+        })
+
+        if len(available_genes) == 0:
+            warn_msgs.append(f"{sample_label}: none of the selected genes are present in imputation.")
+            continue
+
+        imp_df = imp_df[available_genes]
+        for group in target_groups:
+            group_mask = (groups == group).to_numpy()
+            if group_mask.sum() == 0:
+                warn_msgs.append(f"{sample_label}: {group} has zero cells.")
+                continue
+            group_expr = imp_df.loc[group_mask, :]
+            group_means = group_expr.mean(axis=0)
+            group_frac = (group_expr > 0).mean(axis=0)
+            for gene, value in group_means.items():
+                expr_rows.append({
+                    "sample": sample_label,
+                    "group": group,
+                    "gene": gene,
+                    "mean_expr": float(value),
+                    "frac_expr": float(group_frac[gene])
+                })
+
+    if warn_msgs:
+        print("Warnings during cell-level aggregation:")
+        for msg in warn_msgs:
+            print("-", msg)
+
+    sample_gene_presence_df = pd.DataFrame(sample_gene_presence)
+    if not sample_gene_presence_df.empty:
+        sample_gene_presence_df
+
+    if len(expr_rows) == 0:
+        print("No expression values available for selected leading-edge genes.")
+    else:
+        expr_df = pd.DataFrame(expr_rows)
+        sample_order = [format_sample_label(sid) for sid in sample_ids]
+        sample_group_order = (
+            [f"{sample}__Myeloid 1" for sample in sample_order] +
+            [f"{sample}__Myeloid 2" for sample in sample_order]
+        )
+        expr_df["sample_group"] = expr_df["sample"] + "__" + expr_df["group"]
+
+        mean_mat = (
+            expr_df
+            .pivot_table(index="gene", columns="sample_group", values="mean_expr", aggfunc="mean")
+            .reindex(index=selected_genes, columns=sample_group_order)
+        )
+        frac_mat = (
+            expr_df
+            .pivot_table(index="gene", columns="sample_group", values="frac_expr", aggfunc="mean")
+            .reindex(index=selected_genes, columns=sample_group_order)
+        )
+
+        row_mean = mean_mat.mean(axis=1)
+        row_std = mean_mat.std(axis=1, ddof=0).replace(0, np.nan)
+        mean_z_mat = mean_mat.sub(row_mean, axis=0).div(row_std, axis=0).fillna(0)
+
+        panel_rows = []
+        set_coverage_rows = []
+        for set_name, genes in set_to_genes.items():
+            present_genes = [
+                g for g in genes
+                if g in mean_mat.index and not mean_mat.loc[g].isna().all()
+            ]
+            set_coverage_rows.append({
+                "set_name": set_name,
+                "n_leading_edge_genes": len(genes),
+                "n_genes_in_plot": len(present_genes)
+            })
+            if len(present_genes) == 0:
+                continue
+
+            mean_part = mean_mat.loc[present_genes].copy()
+            frac_part = frac_mat.loc[present_genes].copy()
+            z_part = mean_z_mat.loc[present_genes].copy()
+            mean_part.index.name = "gene"
+            mean_part.columns.name = "sample_group"
+            frac_part.index.name = "gene"
+            frac_part.columns.name = "sample_group"
+            z_part.index.name = "gene"
+            z_part.columns.name = "sample_group"
+
+            set_long = mean_part.stack(dropna=False).rename("mean_expr").to_frame()
+            set_long = set_long.join(frac_part.stack(dropna=False).rename("frac_expr"))
+            set_long = set_long.join(z_part.stack(dropna=False).rename("mean_expr_z"))
+            set_long = set_long.reset_index()
+            set_long[["sample", "group"]] = set_long["sample_group"].str.rsplit("__", n=1, expand=True)
+            set_long["set_name"] = set_name
+            panel_rows.append(set_long[["set_name", "gene", "sample", "group", "sample_group", "mean_expr", "frac_expr", "mean_expr_z"]])
+
+        if len(panel_rows) == 0:
+            print("No thematic leading-edge sets had plottable genes in cohort data.")
+        else:
+            leading_edge_expr_long = pd.concat(panel_rows, ignore_index=True)
+            set_coverage = pd.DataFrame(set_coverage_rows)
+            set_summary = (
+                gsea_thematic_top[["set_name", "source", "NES", "padj", "n_leading_edge_genes"]]
+                .merge(set_coverage[["set_name", "n_genes_in_plot"]], on="set_name", how="left")
+                .sort_values(["padj", "NES"], ascending=[True, False])
+                .reset_index(drop=True)
+            )
+            set_summary
+
+            set_order = [
+                s for s in gsea_thematic_top["set_name"].tolist()
+                if s in set(leading_edge_expr_long["set_name"])
+            ]
+            n_sets = len(set_order)
+            vmax = np.nanmax(np.abs(leading_edge_expr_long["mean_expr_z"].to_numpy()))
+            if not np.isfinite(vmax) or vmax == 0:
+                vmax = 1.0
+
+            if n_sets == 0:
+                print("No thematic leading-edge sets had plottable genes in cohort data.")
+            else:
+                ncols = 2
+                nrows = int(np.ceil(n_sets / ncols))
+                fig, axes = plt.subplots(
+                    nrows=nrows,
+                    ncols=ncols,
+                    figsize=(max(12, 0.85 * len(sample_group_order)), max(4, 2.6 * nrows + 1.2)),
+                    squeeze=False
+                )
+                first_mesh = None
+
+                for idx, set_name in enumerate(set_order):
+                    ax = axes[idx // ncols][idx % ncols]
+                    set_df = leading_edge_expr_long[leading_edge_expr_long["set_name"] == set_name].copy()
+                    gene_order = [g for g in set_to_genes[set_name] if g in set_df["gene"].unique()]
+                    heat_df = (
+                        set_df
+                        .pivot_table(index="gene", columns="sample_group", values="mean_expr_z", aggfunc="mean")
+                        .reindex(index=gene_order, columns=sample_group_order)
+                    )
+                    sns.heatmap(
+                        heat_df,
+                        ax=ax,
+                        cmap="vlag",
+                        center=0,
+                        vmin=-vmax,
+                        vmax=vmax,
+                        cbar=False
+                    )
+                    split_x = len(sample_order)
+                    ax.axvline(split_x, color="gray", linestyle="--", linewidth=0.8, alpha=0.8)
+                    ax.set_title(set_name[:75])
+                    ax.set_xlabel("")
+                    ax.set_ylabel("")
+                    ax.set_xticks(np.arange(len(sample_group_order)) + 0.5)
+                    ax.set_xticklabels(sample_group_order)
+                    ax.tick_params(axis="x", labelrotation=45, labelsize=8)
+                    ax.tick_params(axis="y", labelsize=7)
+                    for label in ax.get_xticklabels():
+                        label.set_ha("right")
+                        label.set_rotation_mode("anchor")
+                    if first_mesh is None and len(ax.collections) > 0:
+                        first_mesh = ax.collections[0]
+
+                for idx in range(n_sets, nrows * ncols):
+                    axes[idx // ncols][idx % ncols].axis("off")
+
+                if first_mesh is not None:
+                    cbar = fig.colorbar(first_mesh, ax=axes.ravel().tolist(), shrink=0.65)
+                    cbar.set_label("Gene-wise z-score")
+
+                fig.suptitle(
+                    "Top 10 significant ECM/glycosylation pathways\n"
+                    "Leading-edge genes from Myeloid 2 > Myeloid 1, cell-level ENVI imputation",
+                    y=1.02
+                )
+                plt.tight_layout()
+                plt.show()
+```
+
+## Spatial-Imputation Output Manifest
+
+```{python}
+spatial_manifest = pd.DataFrame({
+    "file": [p.name for p in spatial_paths.values()],
+    "path": [str(p) for p in spatial_paths.values()],
+    "exists": [p.exists() for p in spatial_paths.values()]
+})
+spatial_manifest
+```
+
+# SN Label-Transfer GSEA
+
+```{python}
+# Run the SN label-transfer branch from its dedicated folder.
+sn_output_dir = pa_dir / "sn_label_transfer_gsea"
+sn_output_dir.mkdir(parents=True, exist_ok=True)
+
+sn_prepare_path = sn_output_dir / "myeloid_sn_label_transfer_prepare.py"
+sn_script_path = sn_output_dir / "myeloid_sn_label_transfer.R"
+for p in [sn_prepare_path, sn_script_path]:
+    if not p.exists():
+        raise FileNotFoundError(f"Missing SN label-transfer script: {p}")
+
+cmd_prepare = [sys.executable, str(sn_prepare_path)]
+print("Running:", " ".join(cmd_prepare))
+run_prepare = subprocess.run(cmd_prepare, capture_output=True, text=True)
+print(run_prepare.stdout)
+if run_prepare.returncode != 0:
+    print(run_prepare.stderr)
+    raise RuntimeError("SN label-transfer Python prepare step failed.")
+
+if shutil.which("Rscript") is not None:
+    cmd_r = [shutil.which("Rscript"), str(sn_script_path)]
+elif shutil.which("conda") is not None:
+    cmd_r = ["conda", "run", "-n", "spatial", "Rscript", str(sn_script_path)]
+else:
+    raise RuntimeError("Neither Rscript nor conda executable is available.")
+
+print("Running:", " ".join(cmd_r))
+run_r = subprocess.run(cmd_r, capture_output=True, text=True)
+print(run_r.stdout)
+if run_r.returncode != 0:
+    print(run_r.stderr)
+    raise RuntimeError("SN label-transfer R limma/fgsea step failed.")
+```
+
+```{python}
+# Expected final outputs from the SN label-transfer R stage.
+sn_paths = {
+    "coverage": sn_output_dir / "myeloid_sn_label_transfer_coverage_summary.csv",
+    "pairwise_overlap": sn_output_dir / "myeloid_sn_label_transfer_pairwise_gene_overlap.csv",
+    "shared_universe": sn_output_dir / "myeloid_sn_label_transfer_shared_universe.csv",
+    "limma_de": sn_output_dir / "myeloid_sn_label_transfer_limma_de.csv",
+    "genesets_filtered": sn_output_dir / "myeloid_sn_label_transfer_gene_sets_filtered.csv",
+    "gsea_results": sn_output_dir / "myeloid_sn_label_transfer_gsea_results.csv",
+    "sample_diagnostics": sn_output_dir / "myeloid_sn_label_transfer_sample_diagnostics.csv",
+    "transfer_diagnostics": sn_output_dir / "myeloid_sn_label_transfer_py_transfer_diagnostics.csv",
+    "metadata": sn_output_dir / "myeloid_sn_label_transfer_metadata.txt",
+}
+
+missing_sn = [name for name, path in sn_paths.items() if not path.exists()]
+if missing_sn:
+    raise FileNotFoundError(f"Missing SN label-transfer outputs: {missing_sn}")
+
+sn_coverage = pd.read_csv(sn_paths["coverage"])
+sn_pairwise_overlap = pd.read_csv(sn_paths["pairwise_overlap"])
+sn_shared_universe = pd.read_csv(sn_paths["shared_universe"])
+sn_limma_de = pd.read_csv(sn_paths["limma_de"])
+sn_genesets_filtered = pd.read_csv(sn_paths["genesets_filtered"])
+sn_gsea_results = pd.read_csv(sn_paths["gsea_results"])
+sn_sample_diag = pd.read_csv(sn_paths["sample_diagnostics"])
+sn_transfer_diag = pd.read_csv(sn_paths["transfer_diagnostics"])
+
+print(f"Shared-universe size: {sn_shared_universe.shape[0]}")
+print(f"DE rows: {sn_limma_de.shape[0]}")
+print(f"Filtered gene sets: {sn_genesets_filtered.shape[0]}")
+print(f"GSEA rows: {sn_gsea_results.shape[0]}")
+```
+
+## SN Label-Transfer Diagnostics
+
+```{python}
+sn_transfer_diag
+```
+
+```{python}
+plt.figure(figsize=(8, 4))
+sn_plot = sn_transfer_diag.sort_values("n_sn_myeloid_candidates", ascending=False).copy()
+sn_plot = sn_plot.melt(
+    id_vars=["sample"],
+    value_vars=["n_pred_m1", "n_pred_m2"],
+    var_name="group",
+    value_name="n_cells"
+)
+sn_plot["group"] = sn_plot["group"].map({"n_pred_m1": "Myeloid 1", "n_pred_m2": "Myeloid 2"})
+sns.barplot(data=sn_plot, x="sample", y="n_cells", hue="group")
+plt.xticks(rotation=45, ha="right")
+plt.title("SN label-transfer: transferred cell counts per sample")
+plt.xlabel("")
+plt.ylabel("Cell count")
+plt.tight_layout()
+plt.show()
+```
+
+## SN Co-Embedding Plots
+
+```{python}
+# Co-embedding PNGs are generated by the Python prepare step, one per sample.
+coembed_dir = sn_output_dir / "coembedding"
+coembed_files = sorted(coembed_dir.glob("*_coembedding_post_transfer.png"))
+coembed_manifest = pd.DataFrame({
+    "sample": [p.name.replace("_coembedding_post_transfer.png", "") for p in coembed_files],
+    "path": [str(p) for p in coembed_files],
+    "exists": [p.exists() for p in coembed_files],
+})
+coembed_manifest
+```
+
+```{python}
+if len(coembed_files) == 0:
+    print("No co-embedding PNGs found.")
+else:
+    n_show = min(4, len(coembed_files))
+    fig, axes = plt.subplots(n_show, 1, figsize=(12, 5 * n_show))
+    if n_show == 1:
+        axes = [axes]
+    for ax, p in zip(axes, coembed_files[:n_show]):
+        img = plt.imread(p)
+        ax.imshow(img)
+        ax.set_title(p.name)
+        ax.axis("off")
+    plt.tight_layout()
+    plt.show()
+```
+
+## SN Label-Transfer Top GSEA Terms
+
+```{python}
+sn_gsea_sig = sn_gsea_results[sn_gsea_results["padj"] < 0.05].copy()
+if sn_gsea_sig.empty:
+    print("No significant GSEA terms at FDR < 0.05.")
+else:
+    sn_gsea_sig["abs_nes"] = sn_gsea_sig["NES"].abs()
+    sn_top_gsea = (
+        sn_gsea_sig
+        .sort_values(["contrast", "source", "padj", "abs_nes"], ascending=[True, True, True, False])
+        .groupby(["contrast", "source"], as_index=False)
+        .head(5)
+        .copy()
+    )
+    sn_top_gsea[["contrast", "source", "set_name", "NES", "padj"]]
+```
+
+```{python}
+if sn_gsea_sig.empty:
+    print("Skipping GSEA plot because no significant terms were found.")
+else:
+    sn_gsea_plot = sn_top_gsea.copy()
+    sn_gsea_plot["set_label"] = sn_gsea_plot["set_name"].str.slice(0, 65)
+    plt.figure(figsize=(11, max(5, 0.25 * sn_gsea_plot.shape[0])))
+    sns.scatterplot(
+        data=sn_gsea_plot,
+        x="NES",
+        y="set_label",
+        hue="source",
+        style="contrast",
+        size=-np.log10(np.clip(sn_gsea_plot["padj"], 1e-300, None)),
+        sizes=(50, 220)
+    )
+    plt.axvline(0, color="gray", linewidth=1)
+    plt.title("SN label-transfer top significant GSEA pathways")
+    plt.xlabel("Normalized Enrichment Score (NES)")
+    plt.ylabel("")
+    plt.tight_layout()
+    plt.show()
+```
+
+## SN Label-Transfer Hallmark GSEA Results
+
+```{python}
+sn_hallmark_all = sn_gsea_results[sn_gsea_results["source"] == "H"].copy()
+sn_hallmark_sig = sn_hallmark_all[sn_hallmark_all["padj"] < 0.05].copy()
+
+print(f"Hallmark sets tested: {sn_hallmark_all.shape[0]}")
+print(f"Significant hallmark sets (FDR < 0.05): {sn_hallmark_sig.shape[0]}")
+
+if sn_hallmark_sig.empty:
+    print("No significant hallmark terms.")
+else:
+    sn_hallmark_sig = sn_hallmark_sig.sort_values(["padj", "NES"], ascending=[True, False])
+    sn_hallmark_sig[["contrast", "set_name", "NES", "pval", "padj"]].head(30)
+```
+
+## SN Label-Transfer Output Manifest
+
+```{python}
+sn_manifest = pd.DataFrame({
+    "file": [p.name for p in sn_paths.values()],
+    "path": [str(p) for p in sn_paths.values()],
+    "exists": [p.exists() for p in sn_paths.values()]
+})
+sn_manifest
+```
+
+## Notes
+
+- This notebook runs two pathways: spatial-imputation GSEA and SN label-transfer GSEA.
+- All spatial-imputation outputs are written under `spatial_imputation_gsea/`.
+- All SN label-transfer outputs and co-embedding PNGs are written under `sn_label_transfer_gsea/`.
+- SN label-transfer candidates come from SN `annot_v1` labels: `Monocytes`, `Microglia`, and `Macrophage`.
+- Hallmark pathways are included via source `H`.

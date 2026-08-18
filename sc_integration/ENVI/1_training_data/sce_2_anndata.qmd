@@ -1,0 +1,205 @@
+---
+title: ""
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+```{r}
+#| echo: FALSE
+library(SingleCellExperiment)
+library(SpatialExperiment)
+library(sceasy)
+
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+# local vs remote
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    # in dipg or uger, the home directory is '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Introduction
+
+-   RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds`
+
+-   subset version here: `/data/beroukhim1/youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds`
+
+We will convert this into an AnnData object for use in Python
+
+# Data Conversion
+
+We will convert single cell experiment class in the rds object to an AnnData object in Python. 
+More specifically, `SingleCellExperiment` class stores the single cell data in R and our spatial data is stored in a `SpatialExperiment` class.
+
+ENVI takes in raw counts and log1p transform the expression
+
+```{r}
+.regularise_df <- function(df, drop_single_values = TRUE) {
+    if (ncol(df) == 0) df[["name"]] <- rownames(df)
+    if (drop_single_values) {
+        k_singular <- sapply(df, function(x) length(unique(x)) == 1)
+        if (sum(k_singular) > 0) {
+        warning(
+            paste("Dropping single category variables:"),
+            paste(colnames(df)[k_singular], collapse = ", ")
+        )
+        }
+        df <- df[, !k_singular, drop = F]
+        if (ncol(df) == 0) df[["name"]] <- rownames(df)
+    }
+    return(df)
+}
+```
+
+```{r}
+spe2anndata <- function(obj, outFile = NULL, main_layer = "counts", transfer_layers = NULL, drop_single_values = TRUE) {
+    if (!requireNamespace("SummarizedExperiment")) {
+        stop("This function requires the 'SummarizedExperiment' package.")
+    }
+    if (!requireNamespace("SingleCellExperiment")) {
+        stop("This function requires the 'SingleCellExperiment' package.")
+    }
+    if (!requireNamespace('SpatialExperiment')) {
+        stop("This function requires the 'SpatialExperiment' package.")
+    }
+
+    assay_names <- SummarizedExperiment::assayNames(obj)
+    main_layer <- match.arg(main_layer, assay_names)
+    transfer_layers <- transfer_layers[transfer_layers %in% assay_names]
+    transfer_layers <- transfer_layers[transfer_layers != main_layer]
+
+    X <- SummarizedExperiment::assay(obj, main_layer)
+
+    obs <- .regularise_df(as.data.frame(SummarizedExperiment::colData(obj)), drop_single_values = drop_single_values)
+
+    var <- .regularise_df(as.data.frame(SummarizedExperiment::rowData(obj)), drop_single_values = drop_single_values)
+
+    obsm <- NULL
+    reductions <- SingleCellExperiment::reducedDimNames(obj)
+    if (length(reductions) > 0) {
+        obsm <- sapply(
+            reductions,
+            function(name) {
+                as.matrix(
+                    SingleCellExperiment::reducedDim(obj, type = name)
+                )
+            },
+            simplify = FALSE
+        )
+        names(obsm) <- paste0(
+            "X_", tolower(SingleCellExperiment::reducedDimNames(obj))
+        )
+    }
+    # adding in spatial coordinates
+    obsm[['spatial']] <- spatialCoords(obj)
+
+    layers <- list()
+    for (layer in transfer_layers) {
+        mat <- SummarizedExperiment::assay(obj, layer)
+        if (all(dim(mat) == dim(X))) layers[[layer]] <- Matrix::t(mat)
+    }
+
+    anndata <- reticulate::import("anndata", convert = FALSE)
+
+    adata <- anndata$AnnData(
+        X = Matrix::t(X),
+        obs = obs,
+        var = var,
+        obsm = obsm,
+        layers = layers
+    )
+
+    if (!is.null(outFile)) {
+        adata$write(outFile, compression = "gzip")
+    }
+
+    adata
+}
+```
+
+```{r}
+banksy_embeddings <- readRDS(ifelse(
+    basename(workdir) != 'dfci_mount', paste0(
+        workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+))
+colData(banksy_embeddings)$sample_id <- factor(colData(banksy_embeddings)$sample_id)
+colData(banksy_embeddings)$alteration = ifelse(is.na(colData(banksy_embeddings)$alteration), 'NA', colData(banksy_embeddings)$alteration)
+cell_type_mapping = fread(paste0(
+    workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
+))
+
+sample_histology = as.data.table(unique(colData(banksy_embeddings)[,c('sample_id','histology')]))
+
+mapply(
+    function(x, y){
+        # subset to one sample of interest
+        banksy_embeddings_sample <- banksy_embeddings[,
+            colData(banksy_embeddings)$sample_id == x
+        ]
+
+        # merge the metadata into the coldata
+        original_order = colnames(banksy_embeddings_sample)
+        merged_metadata = merge(
+            as.data.table(colData(banksy_embeddings_sample))[
+                ,.(clust_Harmony_BANKSY_lam0.2_k50_res1 = as.numeric(as.character(clust_Harmony_BANKSY_lam0.2_k50_res1)), cell_id_copy = cell_id)
+            ], cell_type_mapping,
+            by.x = "clust_Harmony_BANKSY_lam0.2_k50_res1",
+            by.y = "cluster", all.x = TRUE
+        )[match(gsub('__.*','', original_order), cell_id_copy)]
+        colData(banksy_embeddings_sample) = cbind(
+            colData(banksy_embeddings_sample),
+            merged_metadata
+        )
+
+        if(!all(colData(banksy_embeddings_sample)$cell_id == colData(banksy_embeddings_sample)$cell_id_copy)){
+            stop("cell_id does not match the original order")
+        } else {
+            message("cell_id matches the original order")
+            rownames(colData(banksy_embeddings_sample)) <- original_order
+        }
+
+
+        use_condaenv('/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/envs/spatial')
+        spe2anndata(
+            banksy_embeddings_sample, outFile = paste0(
+                workdir, "youyun/plgg/data/sc_integration/",
+                x,'_',gsub(' ', '_', y), "_spatial.h5ad"
+            ), main_layer = "normcounts",
+            drop_single_values = FALSE
+        )
+
+        return(NULL)
+    },
+    sample_histology$sample_id,
+    sample_histology$histology
+)
+```

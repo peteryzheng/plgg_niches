@@ -1,0 +1,364 @@
+---
+title: "Modeling of Cell Type Proportions with MAPK Activation"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+Here we will be using linear models to test the association between cell types and MAPK activation. We previously generated imputed MAPK overlap geneset score on the xenium data.
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+library(harmony)
+library(scran)
+library(Seurat)
+library(dbscan)
+library(circlize)
+library(Seurat)
+library(scales)
+library(htmlwidgets)
+library(ggrepel)
+library(rcartocolor)
+
+
+# local vs remote
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    # in dipg or uger, the home directory is '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+
+source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+```
+
+
+# Preperations
+
+## Loading the data
+
+The objects are here:
+
+RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
+
+    -   `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
+
+Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
+
+
+```{r}
+# load the banksy embeddings
+banksy_embeddings <- readRDS(ifelse(
+    !Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng"), paste0(
+        workdir, "youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+))
+colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+
+# Load the cell type clusters annotation
+prelim_annotation_res1 = fread(paste0(
+    workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
+))
+
+# specify the cluster names 
+# this is mainly to keep track of which resolution we are using
+cell_res = 1
+cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
+niche_res = 1
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
+
+# # filter the banksy object to only include the cells with annotated cell types
+# annotated_cell_clusters = sort(unique(prelim_annotation_res1$cluster))
+# banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)[,cell_clust_name] %in% annotated_cell_clusters]
+```
+
+
+## Build the color palette for all niches and cell types downstream
+
+```{r}
+set.seed(5555)
+cluster_classes = levels(colData(banksy_embeddings)[[niche_clust_name]])
+niche_color_manual = structure(
+    pals::polychrome()[c(1:length(cluster_classes))],
+    names = sample(cluster_classes)
+)
+# for niche resolution 0.5
+# niches_to_show = c(1:11, 13, 14, 16, 17)
+# for niche resolution 1
+niches_to_show = c(1:20, 22:25)
+
+cell_type_to_test = 'Coarse Cell Type'
+cell_type_to_test = 'Fine Cell Type'
+cell_type_to_test = 'Fine Cell Type UMAP'
+
+cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+cell_type_color_manual = structure(
+    pals::alphabet()[c(1:length(cell_type_class))],
+    names = cell_type_class
+)
+```
+
+## MAPK score
+
+```{r}
+mapk_scores = fread(paste0(workdir,'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/MAPK_overlap_scores.csv'))
+```
+
+# Visualize MAPK by niche
+
+```{r}
+cell_niches = as.data.table(colData(banksy_embeddings[
+    , colData(banksy_embeddings)$histology == 'pilocytic astrocytoma'
+])[, c('alteration',niche_clust_name)], keep.rownames = 'cell_id')[
+    , alteration := fcase(
+        grepl('188570', cell_id), 'KIAA1549::BRAF',
+        grepl('258482', cell_id), 'FGFR1 ITD',
+        grepl('320784', cell_id), 'FAM131B::BRAF',
+        grepl('328368', cell_id), 'RAF1::TOP2B'
+    )
+]
+setnames(cell_niches, c(niche_clust_name), c('niche_type'))
+mapk_scores_w_niches = merge(
+    mapk_scores, cell_niches,
+    by.x = 'cell_id', by.y = 'cell_id', all.y = TRUE
+)[
+    , sample_id := gsub('.*__','',cell_id)
+][
+    , niche_type := ifelse(
+        # niche_type %in% c(1,2,3,5,7,9,19,11,14,16,18,19,22,27),
+        niche_type %in% c(7, 18, 22),
+        niche_type, 'Other'
+    )
+]
+
+ggplot(
+    mapk_scores_w_niches[
+        grepl('Astro|OPC', cell_type) & niche_type != 'Other', 
+        .(
+            MAPK_overlap_score_mean = mean(MAPK_overlap_score),
+            MAPK_overlap_score_se = sd(MAPK_overlap_score)/sqrt(.N)
+        ), .(cell_type, niche_type = factor(as.numeric(niche_type)))
+    ], aes(
+        x = factor(cell_type), y = MAPK_overlap_score_mean
+    )
+) +
+    geom_point(
+        aes(group = niche_type, color = niche_type),
+        position = position_dodge(width = 0.8)
+    ) +
+    geom_errorbar(
+        aes(
+            y = MAPK_overlap_score_mean,
+            ymin = MAPK_overlap_score_mean - MAPK_overlap_score_se,
+            ymax = MAPK_overlap_score_mean + MAPK_overlap_score_se,
+            color = niche_type,
+            group = interaction(cell_type, niche_type)
+        ),
+        position = position_dodge(width = 0.8),
+        width = 0.2, size = 1
+    ) +
+    theme_bw(base_size = 20) +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = 'bottom'
+    ) +
+    labs(
+        title = "MAPK Activation by Niche Type",
+        x = "Cell Type",
+        y = "MAPK Activation Score"
+    ) +
+    scale_color_carto_d(name = "Niche Type", palette = "Vivid") +
+    guides(
+        fill = guide_legend(title = "Niche Type", nrow = 2, byrow = TRUE)
+    )
+```
+
+# Neighborhood analysis
+
+## Setting up Neighborhood Analysis
+
+Here we will look at the niches in the data and annotate them using the cell types of self and neighbors.
+
+```{r}
+k_geom = 15
+locs = spatialCoords(banksy_embeddings[, colData(banksy_embeddings)$histology == 'pilocytic astrocytoma'])
+knn = dbscan::kNN(x = locs, k = k_geom)
+knnDT <- data.table(
+    from = rep(seq_len(nrow(knn$id)), k_geom),
+    from_id = rep(rownames(knn$id), k_geom),
+    to = as.vector(knn$id),
+    to_id = rownames(knn$id)[as.vector(knn$id)],
+    distance = as.vector(knn$dist)
+)
+cell_cell_type_dt = data.table(
+    cell_id = rownames(colData(banksy_embeddings[])),
+    cell_type = as.character(colData(banksy_embeddings)[,cell_clust_name]),
+    sample_id = colData(banksy_embeddings)$sample_id,
+    histology = colData(banksy_embeddings)$histology
+)[histology == 'pilocytic astrocytoma']
+
+sparsity_threshold = 0.01
+cell_cell_type_dt[
+    , num_cells_per_sample := .N, .(sample_id)
+][
+    , cell_type := ifelse(
+        .N/num_cells_per_sample < sparsity_threshold |
+            is.na(cell_type), 'Other', cell_type
+    ),.(sample_id, cell_type)
+]
+```
+
+# Cell Cell Adjacency Analysis
+
+To do this, we compare each niche's cell cell adjacency to all other niches' cell cell adjacency. 
+
+```{r}
+cell_type_assignment_vector = structure(
+    c(prelim_annotation_res1[[cell_type_to_test]], 'Other'),
+    names = c(prelim_annotation_res1$cluster,'Other')
+)
+adjacencies = knnDT[,.(from_id,to_id,distance)][
+    cell_cell_type_dt[,.(cell_id,cell_type_to = cell_type)], 
+    on = c('to_id' = 'cell_id')
+][
+    cell_cell_type_dt[,.(
+        cell_id, cell_type_from = cell_type, sample_id, histology
+    )], on = c('from_id' = 'cell_id')
+][
+    , c('cell_type_test_from','cell_type_test_to') := list(
+        cell_type_assignment_vector[cell_type_from],
+        cell_type_assignment_vector[cell_type_to]
+    )
+]
+```
+
+# Modeling cell type proportions with MAPK activation
+
+```{r}
+adjacencies_and_mapk = merge(
+    dcast(
+        adjacencies[,.(neighbor_prop = .N/k_geom),.(from_id, cell_type_test_from, cell_type_test_to, sample_id)],
+        from_id + cell_type_test_from + sample_id ~ cell_type_test_to,
+        value.var = 'neighbor_prop', fill = 0
+    ),
+    mapk_scores[,.(cell_id, MAPK_overlap_score)], by.x = 'from_id', by.y = 'cell_id'
+)[, weights := k_geom]
+cell_types_in_dt = setdiff(colnames(adjacencies_and_mapk), c('from_id', 'cell_type_test_from', 'sample_id', 'MAPK_overlap_score', 'weights'))
+cell_type_pairs_to_test = expand.grid(cell_type_from = cell_types_in_dt, cell_type_to = cell_types_in_dt)
+
+mapk_adj_results = rbindlist(mapply(
+    function(ct1, ct2) {
+        print(paste0("Testing ", ct1, " -> ", ct2))
+        if (nrow(adjacencies_and_mapk[cell_type_test_from == ct1]) == 0) {
+            message(sprintf("Cell type %s not found in the data!", ct1))
+            return(NULL)
+        }
+        if (all(adjacencies_and_mapk[[ct2]] == 0)) {
+            message(sprintf("Cell type %s has all zeros!", ct))
+            return(NULL)
+        }
+        
+        tmp_dt = adjacencies_and_mapk[cell_type_test_from == ct1]
+
+        if (length(unique(tmp_dt$sample_id)) == 1){
+            model = glm(
+                as.formula(paste0('`',ct2, "` ~ MAPK_overlap_score")),
+                data = tmp_dt, family = binomial(link = 'logit'), weights = weights
+            )   
+        } else {
+            model = glm(
+                as.formula(paste0('`',ct2, "` ~ MAPK_overlap_score + sample_id")),
+                data = tmp_dt, family = binomial(link = 'logit'), weights = weights
+            )
+        }
+        model_coef = as.data.frame(summary(model)$coefficients)
+        model_coef$variables = rownames(model_coef)
+        model_coef = as.data.table(model_coef)[variables == 'MAPK_overlap_score'][
+            ,c('neg_log10_p_value', 'effect','ct_from','ct_to') := list(
+                -log10(`Pr(>|z|)`), exp(Estimate),
+                ct1, ct2
+            )
+        ]
+        return(model_coef)
+    }, 
+    cell_type_pairs_to_test$cell_type_from, 
+    cell_type_pairs_to_test$cell_type_to, 
+    SIMPLIFY = FALSE
+))[
+    , q_value := p.adjust(`Pr(>|z|)`, method = 'BH')
+]
+```
+
+# Results
+
+```{r}
+ggplot(mapk_adj_results[grepl('Astro|OPC', ct_from)]) +
+    geom_point(aes(
+        x = Estimate, y = neg_log10_p_value,
+        color = ifelse(
+            q_value >= 0.05,'not significant',
+            ifelse(
+                as.numeric(effect) > 1, 'enriched','depleted'
+            )
+        ), alpha = 0.5
+    )) +
+    geom_text_repel(aes(
+        x = Estimate, y = neg_log10_p_value,
+        label = ifelse(q_value < 0.05, gsub('`','',ct_to), '')
+    ), max.overlaps = 100, force = 3) +
+    theme_linedraw() +
+    theme(
+        text = element_text(size = 15), 
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = 'right', 
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank()
+    ) + scale_color_manual(values = c(
+        'enriched' = 'red', 'depleted' = 'blue',
+        'not significant' = 'grey'
+    )) +
+    geom_vline(xintercept = 0, linetype = 'dashed', color = 'black') +
+    xlim(-1, 0.5) +
+    labs(
+        title = "Effect of Imputed MAPK on Neighbor Cell Type Proportions",
+        x = "Effect size (log coefficient)",
+        y = "-log10(p-value)",
+        color = "Significance"
+    ) + facet_wrap(~ ct_from, nrow = 1)
+```

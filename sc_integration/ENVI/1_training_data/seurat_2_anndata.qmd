@@ -1,0 +1,125 @@
+---
+title: ""
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk: 
+        results: hold
+        R.options:
+            width: 120
+---
+
+```{r}
+#| echo: FALSE
+library(SingleCellExperiment)
+library(sceasy)
+library(Seurat)
+
+library(data.table)
+library(ggplot2)
+library(knitr)
+
+# local vs remote
+if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    # in a local mac, the home directory is usuaully at '/Users/[username]'
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    # in dipg or uger, the home directory is '/home/unix/[username]'
+    workdir <- "/xchip/beroukhimlab/"
+}
+```
+
+# Introduction
+
+-   RDS Seurat: `/data/beroukhim1/youyun/plgg/data/single_cell/sn_LGG.rds`
+
+
+We will convert this into an AnnData object for use in Python
+
+# Data Conversion
+
+We will convert seurat class in the rds object to an AnnData object in Python. The default layer for seurat2anndata is [`data`]  (https://github.com/cellgeni/sceasy/blob/c1c0bf973b0b3b67e013c01bf583d1fcc4c9f8cc/R/functions.R#L48)
+
+ENVI takes in raw counts and log1p transform the expression
+
+```{r}
+sc_plgg = readRDS(
+    file = paste0(
+        workdir, "youyun/plgg/data/single_cell/harmony_lambda2_t1.rds"
+    )
+)
+sapply(names(sc_plgg[['RNA']]@layers), function(n) dim(sc_plgg[['RNA']]@layers[[n]]))
+
+# this is still v5
+joined_layers <- JoinLayers(sc_plgg[['RNA']])
+sapply(names(joined_layers@layers), function(n) dim(joined_layers@layers[[n]]))
+
+# manually extract the counts layer and create a new Seurat object, since JoinLayers can drop dimnames which are needed for sceasy
+counts_mat <- joined_layers@layers[['counts']]
+# JoinLayers can drop dimnames; restore them from the original object
+if (is.null(rownames(counts_mat))) rownames(counts_mat) <- rownames(sc_plgg[['RNA']])
+if (is.null(colnames(counts_mat))) colnames(counts_mat) <- colnames(sc_plgg)
+sc_plgg_v4 = CreateSeuratObject(
+    counts = counts_mat,
+    meta.data = sc_plgg@meta.data,
+)
+# normalize data
+sc_plgg_v4 <- NormalizeData(sc_plgg_v4, normalization.method = "LogNormalize", scale.factor = 10000)
+VariableFeatures(sc_plgg_v4) <- VariableFeatures(sc_plgg)
+sc_plgg_v4@reductions <- sc_plgg@reductions
+sc_plgg_v4[['RNA']] = as(sc_plgg_v4[['RNA']], Class = 'Assay')
+Version(sc_plgg_v4)
+GetAssayData(object = sc_plgg_v4, assay = 'RNA', slot = 'counts')
+
+# Seurat v5 object is not compatible with sceasy, so we need to convert it to Seurat v4 first
+# sc_plgg[["RNA3"]] <- GetAssayData(sc_plgg[["SCT"]], slot = "data")
+sc_plgg[["RNA3"]] = as(JoinLayers(sc_plgg[['RNA']]), Class = 'Assay')
+DefaultAssay(sc_plgg) <- "RNA3"
+GetAssayData(object = sc_plgg, assay = 'RNA3', slot = 'data')
+Version(sc_plgg)
+
+banksy_embeddings <- readRDS(ifelse(
+    basename(workdir) != 'dfci_mount', paste0(
+        workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+))
+colData(banksy_embeddings)$sample_id <- factor(colData(banksy_embeddings)$sample_id)
+
+sample_histology = as.data.table(unique(colData(banksy_embeddings)[,c('sample_id','histology')]))[]
+
+mapply(
+    function(x, y){
+        sc_plgg_gg = sc_plgg_v4[
+            , sc_plgg_v4[[]]$orig.ident == x
+        ]
+
+        use_condaenv('/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/envs/spatial')
+        sceasy::convertFormat(
+            sc_plgg_gg, from="seurat", to="anndata",
+            outFile=paste0(
+                workdir, "youyun/plgg/data/sc_integration/",
+                x,'_',gsub(' ','_',y), "_sn.h5ad"
+            )
+        )
+    },
+    sample_histology$sample_id,
+    sample_histology$histology
+)
+```
