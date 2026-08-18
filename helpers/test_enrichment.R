@@ -96,24 +96,40 @@ pairwise_categorical_continuous_enrichment_wilcox_test = function(dcast_df, num_
     # test every single category with every single continuous variable
     individual_id_col = colnames(dcast_df)[1]
     categorical_col = colnames(dcast_df)[2]
-    categories = sort(dcast_df[,.N,categorical_col][[categorical_col]])
+    categories = sort(dcast_df[, .N, categorical_col][[categorical_col]])
+    print(categories)
+    if(length(categories) == 1){
+        return(NULL)
+    }
     continuous_vars = colnames(dcast_df)[-(1:2)]
     grid_df = data.table(expand.grid(
-        categorical_col = categories, 
+        categorical_col = categories,
         continuous_col = continuous_vars
     ))
     enrich_dt = data.table(t(mcmapply(
         function(x,y){
             vec_y_x = dcast_df[[as.character(y)]][dcast_df[[categorical_col]] == x]
             vec_y_not_x = dcast_df[[as.character(y)]][dcast_df[[categorical_col]] != x]
-            wilcox_test_var = wilcox.test(vec_y_x, vec_y_not_x, conf.int = TRUE)
-            return(c(
-                categorical_col = as.character(x), continuous_cols = as.character(y),
-                N_var1 = sum(dcast_df[[categorical_col]] == x), N_var2 = mean(vec_y_x),
-                N_var1var2 = sum(dcast_df[[categorical_col]] == x) * mean(vec_y_x),
-                p_value = wilcox_test_var$p.value,
-                delta = mean(vec_y_x) - mean(vec_y_not_x)
-            ))
+            if(
+                length(vec_y_x) > 0 && length(vec_y_not_x) > 0 &&
+                !all(is.na(vec_y_x)) && !all(is.na(vec_y_not_x)) &&
+                length(unique(na.omit(vec_y_x))) > 1 && length(unique(na.omit(vec_y_not_x))) > 1
+            ){
+                wilcox_test_var = wilcox.test(vec_y_x, vec_y_not_x, conf.int = TRUE)
+                return(c(
+                    categorical_col = as.character(x), continuous_cols = as.character(y),
+                    N_var1 = sum(dcast_df[[categorical_col]] == x), N_var2 = mean(vec_y_x),
+                    N_var1var2 = sum(dcast_df[[categorical_col]] == x) * mean(vec_y_x),
+                    p_value = wilcox_test_var$p.value,
+                    delta = mean(vec_y_x) - mean(vec_y_not_x)
+                ))
+            }else{
+                return(c(
+                    categorical_col = as.character(x), continuous_cols = as.character(y),
+                    N_var1 = NA, N_var2 = NA, N_var1var2 = NA,
+                    p_value = NA, delta = NA
+                ))
+            }
         }, grid_df$categorical_col, grid_df$continuous_col,
         mc.preschedule = TRUE, mc.set.seed = 55555,
         mc.cores = num_cores
