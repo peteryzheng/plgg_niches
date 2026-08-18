@@ -49,12 +49,18 @@ library(scales)
 library(htmlwidgets)
 library(metap)
 
-# local vs UGER
+# local vs remote
 if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
     # in a local mac, the home directory is usuaully at '/Users/[username]'
-    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
 } else {
-    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    # in dipg or uger, the home directory is '/home/unix/[username]'
     workdir <- "/xchip/beroukhimlab/"
 }
 
@@ -77,9 +83,9 @@ Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xeniu
 ```{r}
 # load the banksy embeddings
 banksy_embeddings <- readRDS(ifelse(
-    workdir == "/xchip/beroukhimlab/", paste0(
+    basename(workdir) != 'dfci_mount', paste0(
         workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
-    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_20_30_res_0.75_1_20241223_222156.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
 ))
 colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
 
@@ -89,23 +95,11 @@ cell_res = 1
 kc = 50
 cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k%.1i_res%.1f', kc ,cell_res))
 
-# # for when there is new manual annotations
-# # Load the cell type clusters annotation
-# prelim_annotation_res1 = fread(paste0(
-#     workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
-# ))
-# for now
-cell_cluster_count = as.data.table(colData(banksy_embeddings))[
-    ,.(N = .N),.(cell_clusters = get(cell_clust_name))
-][order(N, decreasing = TRUE)]
-kable(t(cell_cluster_count))
-cell_clusters = cell_cluster_count[N/ncol(banksy_embeddings) > 0.001]$cell_clusters
-prelim_annotation_res1 = data.table(
-    cluster = cell_clusters,
-    `Coarse Cell Type` = cell_clusters,
-    `Fine Cell Type` = cell_clusters,
-    `Fine Cell Type UMAP` = cell_clusters
-)
+# for when there is new manual annotations
+# Load the cell type clusters annotation
+prelim_annotation_res1 = fread(paste0(
+    workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
+))
 ```
 
 

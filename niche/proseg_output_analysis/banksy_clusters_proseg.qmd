@@ -45,14 +45,21 @@ library(ComplexHeatmap)
 library(circlize)
 
 
-# local vs UGER
+# local vs remote
 if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
     # in a local mac, the home directory is usuaully at '/Users/[username]'
-    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
 } else {
-    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    # in dipg or uger, the home directory is '/home/unix/[username]'
     workdir <- "/xchip/beroukhimlab/"
 }
+
 ```
 
 
@@ -64,26 +71,66 @@ The objects are here:
 
     -   `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_embeddings/total_spatial_banksy_clusters_subset_20240711_135041.rds`
 
-2.  RDS object with cell type cluster markers: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/Xenium_Objects/total_spatial_banksy_clusters_markers_20240711_135041.rds`
-
 Metadata is here:
 
 1.  `/Users/youyun/Documents/HMS/PhD/beroukhimlab/broad_mount/coja/Spatial_PLGG/data/metadata/Xenium_PS.xlsx`
 
 ```{r}
 banksy_embeddings <- readRDS(ifelse(
-    workdir == "/xchip/beroukhimlab/", paste0(
-        workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+    basename(workdir) != 'dfci_mount', paste0(
+        workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
     ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
 ))
 colData(banksy_embeddings)$sample_id <- factor(colData(banksy_embeddings)$sample_id)
 
 cell_type_markers <- fread(paste0(
-    workdir, "coja/Spatial_PLGG/data/markers/final_manual_markers.csv"
+    workdir, "youyun/plgg/data/markers/final_manual_markers.csv"
 ))
+
 xenium_markers <- fread(paste0(
     workdir, "youyun/plgg/data/xenium_selection/Xenium_hBrain_v1_metadata.csv"
 ))
+```
+
+Some additional neuronal markers 
+
+```{r}
+# General neuronal markers
+general_neuronal_markers <- c(
+    "RELN", "SYNPR", "CUX2", "RORB", "CHODL", 
+    "BCAN", "NTNG1", "NTNG2", "NXPH2", "APP"
+)
+xenium_markers[Genes %in% general_neuronal_markers]
+
+# Excitatory neuronal markers
+excitatory_neuronal_markers <- c(
+    "SLC17A6", "SLC17A7", "RORB", "CUX2", 
+    "RELN", "TAC1", "TACR1"
+)
+xenium_markers[Genes %in% excitatory_neuronal_markers]
+
+# Inhibitory neuronal markers
+inhibitory_neuronal_markers <- c(
+    "GAD1", "GAD2", "PVALB", "VIP", "SST", 
+    "LHX6", "CHODL", "RELN", "HTR2A", "HTR2C"
+)
+xenium_markers[Genes %in% inhibitory_neuronal_markers]
+
+cell_type_markers = rbind(
+    cell_type_markers,
+    data.table(
+        marker = general_neuronal_markers, annotation = 'Neuronal',
+        category = 'Cell Type', xenium = TRUE
+    ),
+    data.table(
+        marker = excitatory_neuronal_markers, annotation = 'Excitatory Neuronal',
+        category = 'Cell Type', xenium = TRUE
+    ),
+    data.table(
+        marker = inhibitory_neuronal_markers, annotation = 'Inhibitory Neuronal',
+        category = 'Cell Type', xenium = TRUE
+    )
+)
 ```
 
 # Looking at the harmony corrected embeddings
@@ -168,7 +215,9 @@ if(all(rownames(colData(banksy_embeddings)) == colData(banksy_embeddings)$cell_s
 }else{
     stop('Cell IDs do not match')
 }
+```
 
+```{r}
 # make the plots
 a = lapply(cell_clusters, function(x){
     assign(
@@ -327,6 +376,24 @@ Heatmap(
 })
 ```
 
+It is clear that:
+
+1.  Cluster 3 is OPC
+2.  Cluster 7 and 10 are astrocytes
+3.  Cluster 9 is stromal cells
+4.  Cluster 8 and 22 are myeloid cells
+5.  Cluster 2 and 6 are RGCs (and are sample specific to the 2 CNs respectively)
+6.  Cluster 19 is oligodendrocytes
+7.  Cluster 18 are proliferative cells
+8.  Cluster 14 is lymphoid cells
+
+This leaves:
+
+1.  Clusters 1, 4, 5, 11, 13, 15, 16, 20, 21, 34 which should all be neurons of some sort. 
+2.  Cluster 23 has oligodendrocytic and GBM-TME (xenium) markers
+3.  Cluster 24 has GBM-Cancer Cell (xenium) markers
+
+
 ## Looking at the DE Genes in each cluster
 
 ```{r}
@@ -341,28 +408,31 @@ ggplot(colData(banksy_embeddings)) +
     ) + scale_fill_viridis_c(option = 'D') +
     guides(fill = guide_legend(title = 'Cluster ID')) +
     scale_y_log10()
-
 ```
 
 ```{r}
 #| warning: false
-banksy_embeddings_seurat = as.Seurat(banksy_embeddings, counts = 'counts', data = NULL)
-banksy_embeddings_seurat = NormalizeData(
-    banksy_embeddings_seurat, normalization.method = "LogNormalize", 
-    scale.factor = 10000
-)
+banksy_embeddings_seurat = as.Seurat(banksy_embeddings, counts = 'normcounts', data = NULL)
+# banksy_embeddings_seurat <- SCTransform(
+#     banksy_embeddings_seurat, assay = "originalexp", 
+#     verbose = FALSE, variable.features.n = 10000
+# )
 Idents(banksy_embeddings_seurat) = clust_name
 ```
 
+### Wilcox Test
+
 ```{r}
+#| fig-width: 12
+#| fig-height: 12
 DE_genes_wilcox = data.table(FindAllMarkers(
     banksy_embeddings_seurat[
         ,which(colData(banksy_embeddings)[, clust_name] %in% cell_clusters)
-    ], slot = 'counts',
+    ], slot = 'data',
     test.use = 'wilcox',
     only.pos = TRUE,
     verbose = FALSE
-))
+))[,cluster := as.character(cluster)]
 
 DE_genes_wilcox = merge(
     DE_genes_wilcox,
@@ -370,90 +440,167 @@ DE_genes_wilcox = merge(
     by = 'gene'
 )
 
+xenium_markers[,.N,.(Annotation)][order(-N)]
+paste0(xenium_markers$Genes, collapse = ', ')
+
 kable(DE_genes_wilcox[order(p_val_adj)][
     p_val_adj <= 0.05 & avg_log2FC >= 1, .(
         N = .N, 
         `Markers` = paste0(
-            gene[avg_log2FC >= 1], ' (', 
-            round(avg_log2FC[avg_log2FC >= 1], 2),  ', ',
-            Annotation[avg_log2FC >= 1] ,
-            ')', collapse = ', '
+            gene, ' (', Annotation, ')', 
+            collapse = ', '
         )
+        # `Markers` = paste0(
+        #     gene[avg_log2FC >= 1], ' (', 
+        #     round(avg_log2FC[avg_log2FC >= 1], 2),  ', ',
+        #     Annotation[avg_log2FC >= 1] ,
+        #     ')', collapse = ', '
+        # )
     ), 
-    .(cluster)
-][order(cluster)])
+    .(cluster = as.character(cluster))
+][order(as.numeric(cluster))])
 ```
 
 ```{r}
-DE_genes_mast = data.table(FindAllMarkers(
+DoHeatmap(
+    subset(banksy_embeddings_seurat, downsample = 100),
+    features = unique(DE_genes_wilcox[
+        p_val_adj < 0.05, 
+        .(gene = head(gene[order(-avg_log2FC)], 10)), 
+        .(cluster = as.numeric(cluster))
+    ][order(cluster)]$gene),
+    slot = 'data'
+) + NoLegend()
+```
+
+
+```{r}
+neuronal_markers = FindMarkers(
     banksy_embeddings_seurat[
         ,which(colData(banksy_embeddings)[, clust_name] %in% cell_clusters)
-    ], slot = 'counts',
-    test.use = 'MAST',
+    ], slot = 'data', ident.1 = 11,
+    ident.2 = c(1, 4, 5, 13, 15, 16, 20, 21, 34),
+    test.use = 'wilcox',
     only.pos = TRUE,
     verbose = FALSE
-))
-
-DE_genes_mast = merge(
-    DE_genes_mast,
-    xenium_markers[,.(gene = Genes, Annotation)],
-    by = 'gene'
 )
-
-kable(DE_genes_mast[order(p_val_adj)][
-    p_val_adj <= 0.05 & avg_log2FC >= 1, .(
-        N = .N, 
-        `Markers` = paste0(
-            gene[avg_log2FC >= 1], ' (', 
-            round(avg_log2FC[avg_log2FC >= 1], 2),  ', ',
-            Annotation[avg_log2FC >= 1] ,
-            ')', collapse = ', '
-        )
-    ), 
-    .(cluster)
-][order(cluster)])
-```
-
-```{r}
-de_genes_count = merge(
-    DE_genes_wilcox[
-        p_val_adj <= 0.05 & avg_log2FC >= 1,
-        .N, .(cluster)
-    ][order(cluster)],
-    DE_genes_mast[
-        p_val_adj <= 0.05 & avg_log2FC >= 1,
-        .N, .(cluster)
-    ][order(cluster)],
-    by = 'cluster', all = TRUE,
-    suffixes = c('_wilcox','_mast')
-)
+setDT(neuronal_markers, keep.rownames = TRUE)
+neuronal_markers$gene_annotation = xenium_markers[match(neuronal_markers$rn, xenium_markers$Genes),]$Annotation
+neuronal_markers[p_val_adj <= 0.05][,.N, .(gene_annotation)][order(-N)]
 
 ```
 
 ```{r}
-library(fgsea)
-library(msigdbr)
-# https://bioconductor.org/packages/release/bioc/vignettes/fgsea/inst/doc/geseca-tutorial.html#analysis-of-single-cell-rna-seq
+plotReducedDim(
+    banksy_embeddings, "UMAP_Harmony_BANKSY_lam0.2", 
+    point_size = 0.1,point_alpha = 0.5, color_by = "SOX4",
+    by_exprs_values = 'normcounts'
+) +
+    theme(legend.title = element_blank()) +
+    guides(colour = 'none')
+```
 
-# prep seurat object
-banksy_embeddings_seurat <- SCTransform(
-    banksy_embeddings_seurat, assay = "originalexp", 
-    verbose = FALSE, variable.features.n = 10000
-)
-banksy_embeddings_seurat <- RunPCA(
-    banksy_embeddings_seurat, assay = "SCT", verbose = FALSE,
-    rev.pca = TRUE, reduction.name = "pca.rev",
-    reduction.key="PCR_", npcs = 50
-)
-E <- banksy_embeddings_seurat@reductions$pca.rev@feature.loadings
 
-# get human gene set
-pathwaysDF <- msigdbr("human")
-pathways <- split(pathwaysDF$gene_symbol, pathwaysDF$gs_name)
+### MAST Test
 
-set.seed(1)
-gesecaRes <- geseca(pathways, E, minSize = 15, maxSize = 500, center = FALSE)
-kable(gesecaRes[padj < 0.05])
+```{r}
+# DE_genes_mast = data.table(FindAllMarkers(
+#     banksy_embeddings_seurat[
+#         ,which(colData(banksy_embeddings)[, clust_name] %in% cell_clusters)
+#     ], slot = 'counts',
+#     test.use = 'MAST',
+#     only.pos = TRUE,
+#     verbose = FALSE
+# ))
+
+# DE_genes_mast = merge(
+#     DE_genes_mast,
+#     xenium_markers[,.(gene = Genes, Annotation)],
+#     by = 'gene'
+# )
+
+# kable(DE_genes_mast[order(p_val_adj)][
+#     p_val_adj <= 0.05 & avg_log2FC >= 1, .(
+#         N = .N, 
+#         `Markers` = paste0(
+#             gene[avg_log2FC >= 1], ' (', 
+#             round(avg_log2FC[avg_log2FC >= 1], 2),  ', ',
+#             Annotation[avg_log2FC >= 1] ,
+#             ')', collapse = ', '
+#         )
+#     ), 
+#     .(cluster)
+# ][order(cluster)])
+```
+
+### Comparing the two tests
+
+```{r}
+# de_genes_count = merge(
+#     DE_genes_wilcox[
+#         p_val_adj <= 0.05 & avg_log2FC >= 1,
+#         .N, .(cluster)
+#     ][order(cluster)],
+#     DE_genes_mast[
+#         p_val_adj <= 0.05 & avg_log2FC >= 1,
+#         .N, .(cluster)
+#     ][order(cluster)],
+#     by = 'cluster', all = TRUE,
+#     suffixes = c('_wilcox','_mast')
+# )
+```
+
+### GSEA
+
+code to subset the pathways to only include the genes in the panel and then run fgsea. The results are not very good except for identifying coarse immune cells types
+
+```{r}
+# library(fgsea)
+# library(msigdbr)
+# # https://bioconductor.org/packages/release/bioc/vignettes/fgsea/inst/doc/geseca-tutorial.html#analysis-of-single-cell-rna-seq
+
+# # get human gene set
+# pathwaysDF <- msigdbr("human")
+# pathways <- split(pathwaysDF$gene_symbol, pathwaysDF$gs_name)
+# # Filter pathways to include only genes in the panel
+# pathways <- lapply(pathways, function(genes) intersect(genes, xenium_markers$Genes))
+# logfc_genes = data.table(FindAllMarkers(
+#     banksy_embeddings_seurat[
+#         ,which(colData(banksy_embeddings)[, clust_name] %in% cell_clusters)
+#     ], slot = 'data',
+#     test.use = 'wilcox',
+#     logfc.threshold = 0,  # Include all genes regardless of log fold change
+#     min.pct = 0,          # Include all genes regardless of expression percentage
+#     verbose = FALSE
+# ))[,cluster := as.character(cluster)]
+
+# # perform GSEA
+# fgsea_results = rbindlist(lapply(
+#     c(1,4,5,11,15,16,20,21,34), 
+#     function(x){
+#         sig_genes = logfc_genes[
+#             cluster == x,
+#             .(gene, score = avg_log2FC)
+#         ][order(-score)]
+#         ranked_list <- setNames(sig_genes$score, sig_genes$gene)
+#         # Perform GSEA
+#         fgsea_results <- fgsea(
+#             pathways = pathways,
+#             stats = ranked_list,
+#             minSize = 2,  # Minimum size of gene sets
+#             maxSize = 266,  # Maximum size of gene sets
+#             scoreType = "pos"
+#         )[,cluster := x]
+
+#         # View significant results
+#         fgsea_results[padj <= 0.05]
+#     }
+# ))
+
+# kable(fgsea_results[,.(
+#     pathway, padj, size, cluster = as.character(cluster)
+# )][order(as.numeric(cluster))])
+
 ```
 
 # Preliminary annotation
@@ -464,36 +611,34 @@ This [Cell Paper](https://www.sciencedirect.com/science/article/pii/S00928674210
 
 ```{r}
 prelim_annotation_res1 = data.table(t(setDT(list(
-    `1` = c('Neuron','GABAergic Neuron (lamp5, pax6)'),
-    `2` = c('Neuron','Glutamatergic Neuron (GBM CC Xenium)'),
-    `12` = c('Neuron','GABAergic Neuron (Proliferating)'),
-    `15` = c('Neuron','Glutamatergic Neuron'),
-    `18` = c('Neuron','Unknown Neuron (GABAergic and Glutamatergic)'),
-    `17` = c('Oligodendrocytes','Oligodendrocytes'),
-    `16` = c('Proliferation','Proliferation'),
-    `9` = c('Lymphoid','Lymphoid'),
-    `11` = c('Neuron','Unknown Neuron (GABAergic and Glutamatergic)'),
-    `19` = c('Neuron','GABAergic Neuron (sst, sst/chodl, pvalb, chandelier)'),
-    `3` = c('RGC','RGC'),
-    `8` = c('RGC','RGC'),
-    `14` = c('Neuron','Glutamatergic Neuron (l6b)'),
-    `20` = c('Undetermined','Undetermined'),
-    `4` = c('Myeloid','Myeloid'),
-    `6` = c('Stromal','Endothelial/VLMC'), 
-    `13` = c('Myeloid','Myeloid'),
-    `5` = c('OPC','OPC'),
-    `7` = c('Astrocyte','Astrocyte'),
-    `10` = c('Astrocyte','Astrocyte (VLMC, myeloid)')
+    `3` = c('OPC','OPC'),
+    `10` = c('Astrocyte','Astrocyte'),
+    `7` = c('Astrocyte','Astrocyte (VLMC, myeloid)'),
+    `9` = c('Stromal','Stromal/Endothelial/VLMC'),
+    `8` = c('Myeloid','Myeloid (Endothelial)'),
+    `22` = c('Myeloid','Myeloid'),
+    `6` = c('RGC','RGC (Pax6)'),
+    `2` = c('RGC','RGC'),
+    `19` = c('Oligodendrocytes','Oligodendrocytes'),
+    `18` = c('Proliferation','Proliferation'),
+    `14` = c('Lymphoid','Lymphoid'),
+    `1` = c('Neuron','Neuron (RELN)'),
+    `4` = c('Neuron','Neuron (NNAT, SOX11)'),
+    `5` = c('Neuron','Neuron (52 DEG)'),
+    `11` = c('Neuron','Neuron (APP, RELN, SOX4)'),
+    `13` = c('Neuron','Neuron (SLC17A7, C1QL3, CRYM, HS3ST2, SLIT3)'),
+    `15` = c('Neuron','Neuron (NTNG2)'),
+    `16` = c('Neuron','Neuron (PROX1)'),
+    `20` = c('Neuron','Neuron (FBLN, EGFR, MYO16)'),
+    `21` = c('Neuron','Neuron (SST, GAD1, LHX6)'),
+    `34` = c('Neuron','Neuron (SOX9)'),
+    `23` = c('Neuron','Neuron (NR4A2)'),
+    `24` = c('Neuron','Neuron (IGFBP5)')
 ))), keep.rownames = 'cluster')[
     , c('Coarse Cell Type', 'Fine Cell Type Annotation') := list(V1, V2)
 ][,c('V1','V2') := NULL][
-    order(as.numeric(cluster)), 
-    `Coarse Cell Type UMAP` := paste0(
-        `Coarse Cell Type`, ' ', c(1:.N)
-    ),.(`Coarse Cell Type`)
-][,`Fine Cell Type` := gsub(
-        ' \\(.*','', `Fine Cell Type Annotation`
-)][
+    ,`Fine Cell Type` := gsub(' \\(.*','', `Fine Cell Type Annotation`)
+][
     order(as.numeric(cluster)),
     `Fine Cell Type UMAP` := paste0(
         `Fine Cell Type`, ' ', c(1:.N)
@@ -502,19 +647,19 @@ prelim_annotation_res1 = data.table(t(setDT(list(
 setcolorder(
     prelim_annotation_res1,
     c(
-        'cluster','Coarse Cell Type','Coarse Cell Type UMAP',
+        'cluster','Coarse Cell Type',
         'Fine Cell Type','Fine Cell Type UMAP',
         'Fine Cell Type Annotation'
     )
 )
 kable(prelim_annotation_res1)
-# write.table(
-#     prelim_annotation_res1,
-#     file = paste0(
-#         workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
-#     ),
-#     sep = '\t', quote = FALSE, row.names = FALSE
-# )
+write.table(
+    prelim_annotation_res1,
+    file = paste0(
+        workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
+    ),
+    sep = '\t', quote = FALSE, row.names = FALSE
+)
 ```
 
 ## Plotting out the preliminary annotation on UMAP
@@ -540,7 +685,7 @@ colData(banksy_embeddings) = merged_coldata[original_order,]
 ```
 
 ```{r}
-cell_type_to_test = 'Fine Cell Type UMAP'
+cell_type_to_test = 'Coarse Cell Type'
 cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
 cell_type_color_manual = structure(
     pals::alphabet()[c(1:length(cell_type_class))],
@@ -602,30 +747,32 @@ plot_grid(
 
 ```{r}
 source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+cell_type_to_test = 'Fine Cell Type UMAP'
 histology_cell_type_enrichment = pairwise_categorical_continuous_enrichment_wilcox_test(dcast(
     data.table(
         sample_id = colData(banksy_embeddings)$sample_id,
         histology = colData(banksy_embeddings)$histology,
-        cluster = as.character(colData(banksy_embeddings)[,clust_name])
+        cluster = as.character(colData(banksy_embeddings)[,clust_name]),
+        cell_type = colData(banksy_embeddings)[,cell_type_to_test]
     )[
         cluster %in% cell_clusters, 
         .(proportion = as.numeric(.N)), 
-        .(sample_id, histology, cluster)
+        .(sample_id, histology, cell_type)
     ][, proportion := proportion/sum(proportion), .(sample_id, histology)],
-    sample_id + histology ~ cluster,
+    sample_id + histology ~ cell_type,
     value.var = 'proportion', fill = 0
 ),padj_method = 'BH')
 setnames(
     histology_cell_type_enrichment, 1:2,
     c('histology','cell_type')
 )
-
+head(histology_cell_type_enrichment)
 ```
 
 ```{r}
 ggplot(histology_cell_type_enrichment) +
     geom_point(aes(
-        x = as.factor(as.numeric(cell_type)), 
+        x = cell_type, 
         y = histology, size = N_var2, 
         # color by odds_ratios column capped at percentile 95
         fill = delta, color = ifelse(
@@ -651,66 +798,3 @@ ggplot(histology_cell_type_enrichment) +
         color = guide_legend(title = 'Significance')
     )
 ```
-
-```{r}
-# source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
-# histology_cell_type_enrichment = pairwise_categorical_continuous_enrichment_wilcox_test(dcast(
-#     data.table(
-#         sample_id = colData(banksy_embeddings)$sample_id,
-#         histology = colData(banksy_embeddings)$histology,
-#         cluster = as.character(colData(banksy_embeddings)[,clust_name])
-#     )[
-#         prelim_annotation_res1[,.(
-#             cluster = as.character(cluster), 
-#             `Fine Cell Type UMAP`
-#         )],
-#         on = c('cluster' = 'cluster')
-#     ][
-#         , .(proportion = as.numeric(.N)), 
-#         .(sample_id, histology, `Fine Cell Type UMAP`)
-#     ][, proportion := proportion/sum(proportion), .(sample_id, histology)],
-#     sample_id + histology ~ `Fine Cell Type UMAP`,
-#     value.var = 'proportion', fill = 0
-# ),padj_method = 'BH')
-# setnames(
-#     histology_cell_type_enrichment, 1:2,
-#     c('histology','cell_type')
-# )
-
-```
-
-```{r}
-# ggplot(histology_cell_type_enrichment) +
-#     geom_point(aes(
-#         x = factor(cell_type, levels = c(
-#                 'GABAergic Neuron 1','GABAergic Neuron 2','GABAergic Neuron 3',
-#                 'Glutamatergic Neuron 1','Glutamatergic Neuron 2','Glutamatergic Neuron 3',
-#                 'Unknown Neuron 1','Unknown Neuron 2' ,'RGC 1','RGC 2','Proliferation 1',
-#                 'OPC 1','Oligodendrocytes 1','Astrocyte 1','Astrocyte 2','Endothelial/VLMC 1',
-#                 'Lymphoid 1','Myeloid 1','Myeloid 2', 'Undetermined 1'
-#             )), y = histology, size = N_var2, 
-#         # color by odds_ratios column capped at percentile 95
-#         fill = delta, color = ifelse(
-#             q_value < 0.25 & as.numeric(delta) > 0, 
-#             'significant','not significant'
-#         )
-#     ), shape = 21, stroke = 1) +
-#     theme(
-#         text = element_text(size = 15), legend.position = 'right',
-#         axis.text.x = element_text(angle = 45, hjust = 1)
-#     ) + scale_fill_viridis_c() +
-#     scale_size_area(max_size = 20) +
-#     scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
-#     labs(
-#         title = 'Enrichment of Cell Types Across Histologies',
-#         x = 'Cell Type',
-#         y = 'Histology',
-#         size = 'Average Proportion',
-#         fill = 'Delta Proportions',
-#         color = 'Significance'
-#     ) + guides(
-#         fill = guide_legend(title = 'Avg Delta'),
-#         color = guide_legend(title = 'Significance')
-#     )
-```
-

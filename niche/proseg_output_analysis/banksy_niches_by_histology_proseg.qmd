@@ -90,18 +90,26 @@ colData(banksy_embeddings)$sample_id <- factor(colData(banksy_embeddings)$sample
 
 prelim_annotation_res1 <- fread(paste0(
     workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
-))
+))[
+    , `Fine Cell Type UMAP` := ifelse(
+        `Fine Cell Type UMAP` == 'Stromal/Endothelial/VLMC 1',
+        'Stromal 1', `Fine Cell Type UMAP`
+    )
+]
 
 # specify the cluster names 
 # this is mainly to keep track of which resolution we are using
 cell_res = 1
 cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
-niche_res = 0.75
-niche_clust_name = gsub('.00$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.2f',niche_res))
+niche_res = 1
+niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
 
 # # filter the banksy object to only include the cells with annotated cell types
 # annotated_cell_clusters = sort(unique(prelim_annotation_res1$cluster))
 # banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)[,cell_clust_name] %in% annotated_cell_clusters]
+
+# sample-histology reference table
+sample_histology = as.data.table(unique(colData(banksy_embeddings)[,c('sample_id','histology')]))
 ```
 
 
@@ -485,12 +493,16 @@ Some statistical testing
 We are using metap here for fisher's method for combining p-values. It is important to note that here, `metap` is throwing out p-values == 0 because this would give -Inf after log transformation required for the fisher's method. There is no real p-value of 0 but this does happen because of the numeric lower bound of R, and so even though they are thrown out, they still contain meaningful information and also very significant asssociation. Therefore, we are likely underestimating the significance of the combined p-values. 
 
 ```{r}
-self_cell_type_niche_enrichment_per_sample = do.call('rbind',lapply(unique(niche_self_dt$sample_id), 
-    function(x){pairwise_categorical_enrichment_test(
+#| fig-width: 20
+#| fig-height: 12
+self_cell_type_niche_enrichment_per_sample = do.call('rbind',mapply(, 
+    function(x, y ){pairwise_categorical_enrichment_test(
         niche_self_dt[sample_id == x]$niche_type, niche_self_dt[sample_id == x][[cell_type_to_test]]
-    )[,sample_id := x]}
+    )[,c('sample_id','histology') := list(x, y)]},
+    sample_histology$sample_id, sample_histology$histology, 
+    SIMPLIFY = FALSE
 ))
-self_cell_type_niche_enrichment = self_cell_type_niche_enrichment_per_sample[
+self_cell_type_niche_enrichment_by_histology = self_cell_type_niche_enrichment_per_sample[
     ,.(
         N_var1 = mean(N_var1), N_var2 = mean(N_var2),
         N_var1var2 = mean(N_var1var2/N_var1), odds_ratios = mean(odds_ratios),
@@ -498,15 +510,15 @@ self_cell_type_niche_enrichment = self_cell_type_niche_enrichment_per_sample[
             sum((p_value > 0) & (p_value <= 1)) >= 2,
             sumlog(p_value)$p, p_value
         )
-    ),.(var1, var2)
+    ),.(var1, var2, histology)
 ][
     ,q_value := p.adjust(p_value, method = 'BY')
 ]
 setnames(
-    self_cell_type_niche_enrichment, 1:2,
+    self_cell_type_niche_enrichment_by_histology, 1:2,
     c('niche_type', 'cell_type')
 )
-ggplot(self_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
+ggplot(self_cell_type_niche_enrichment_by_histology[niche_type %in% niches_to_show]) +
     geom_point(aes(
         x = as.factor(as.numeric(niche_type)), y = cell_type, size = N_var1var2, 
         # color by odds_ratios column capped at percentile 95
@@ -521,6 +533,7 @@ ggplot(self_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
             'significant','not significant'
         )
     ), shape = 21, stroke = 1) +
+    facet_wrap(~histology, axes = 'all') +
     theme(
         text = element_text(size = 15), legend.position = 'right'
     ) + scale_fill_viridis_c() + scale_alpha_manual(
@@ -543,7 +556,7 @@ ggplot(self_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
         alpha = 'none'
     )
 
-ggplot(self_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
+ggplot(self_cell_type_niche_enrichment_by_histology[niche_type %in% niches_to_show]) +
     geom_point(aes(
         x = as.factor(as.numeric(niche_type)), y = cell_type, size = N_var1var2, 
         # color by odds_ratios column capped at percentile 95
@@ -555,6 +568,7 @@ ggplot(self_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
             'significant','not significant'
         )
     ), shape = 21, stroke = 1) +
+    facet_wrap(~histology, axes = 'all') +
     theme(
         text = element_text(size = 15), legend.position = 'right'
     ) + scale_fill_viridis_c() +
@@ -581,7 +595,7 @@ ggplot(self_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
 ```{r}
 ggplot(
     niche_self_neighbor_dt[
-        niche_type %in% niches_to_show,.(proportion = .N/15), .(
+        niche_type %in% niches_to_show,.(proportion = .N/k_geom), .(
             cell_id, niche_type, 
             neighbor_cell_type = get(paste0(cell_type_to_test,' Neighbors'))
         )
@@ -607,20 +621,24 @@ ggplot(
 Some statistical testing
 
 ```{r}
-neighbor_cell_type_niche_enrichment_per_sample = do.call('rbind',lapply(unique(niche_self_dt$sample_id), 
-    function(x){pairwise_categorical_continuous_enrichment_t_test(dcast(
+#| fig-width: 20
+#| fig-height: 12
+neighbor_cell_type_niche_enrichment_per_sample = do.call('rbind',mapply( 
+    function(x, y){pairwise_categorical_continuous_enrichment_t_test(dcast(
         niche_self_neighbor_dt[
             !is.na(get(paste0(cell_type_to_test,' Neighbors'))) & sample_id == x,
-            .(proportion = .N/15), .(
+            .(proportion = .N/k_geom), .(
                 cell_id, niche_type, 
                 neighbor_cell_type = get(paste0(cell_type_to_test,' Neighbors'))
             )
         ],
         cell_id + niche_type ~ neighbor_cell_type, 
         value.var = 'proportion', fill = 0
-    ))}
+    ))[, c('sample_id','histology') := list(x, y)]},
+    sample_histology$sample_id, sample_histology$histology,
+    SIMPLIFY = FALSE
 ))
-neighbor_cell_type_niche_enrichment = neighbor_cell_type_niche_enrichment_per_sample[
+neighbor_cell_type_niche_enrichment_by_histology = neighbor_cell_type_niche_enrichment_per_sample[
     ,.(
         N_var1 = mean(N_var1), N_var2 = mean(N_var2),
         N_var1var2 = mean(N_var1var2), delta = mean(delta),
@@ -628,14 +646,14 @@ neighbor_cell_type_niche_enrichment = neighbor_cell_type_niche_enrichment_per_sa
             sum((p_value > 0) & (p_value <= 1)) >= 2,
             sumlog(p_value)$p, p_value
         )
-    ),.(niche_type, continuous_cols)
+    ),.(niche_type, continuous_cols, histology)
 ][
     ,q_value := p.adjust(p_value, method = 'BY')
 ]
-neighbor_cell_type_niche_enrichment[
-    ,.(sum_prop = sum(N_var2)),.(niche_type)
+neighbor_cell_type_niche_enrichment_by_histology[
+    ,.(sum_prop = sum(N_var2)),.(niche_type, histology)
 ]
-ggplot(neighbor_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
+ggplot(neighbor_cell_type_niche_enrichment_by_histology[niche_type %in% niches_to_show]) +
     geom_point(aes(
         x = as.factor(as.numeric(niche_type)), y = continuous_cols, 
         size = N_var2,fill = delta, color = ifelse(
@@ -646,6 +664,7 @@ ggplot(neighbor_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
             'significant','not significant'
         )
     ), shape = 21, stroke = 1) + 
+    facet_wrap(~histology, axes = 'all') +
     theme(
         text = element_text(size = 15), legend.position = 'right'
     ) + scale_fill_viridis_c() + scale_alpha_manual(
@@ -668,7 +687,7 @@ ggplot(neighbor_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
         alpha = 'none'
     )
 
-ggplot(neighbor_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
+ggplot(neighbor_cell_type_niche_enrichment_by_histology[niche_type %in% niches_to_show]) +
     geom_point(aes(
         x = as.factor(as.numeric(niche_type)), y = continuous_cols, 
         size = N_var2,fill = delta, color = ifelse(
@@ -676,6 +695,7 @@ ggplot(neighbor_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
             'significant','not significant'
         )
     ), shape = 21, stroke = 1) + 
+    facet_wrap(~histology, axes = 'all') +
     theme(
         text = element_text(size = 15), legend.position = 'right'
     ) + scale_fill_viridis_c() + scale_size_area(
@@ -699,85 +719,60 @@ ggplot(neighbor_cell_type_niche_enrichment[niche_type %in% niches_to_show]) +
 ## Pulling everything together to understand the niches components
 
 ```{r}
-#| fig-width: 25
-#| fig-height: 18
+#| fig-width: 20
+#| fig-height: 12
 library(scales)
 including_niches = intersect(
     intersect(
         unique(histology_niche_enrichment$niche_type),
-        unique(self_cell_type_niche_enrichment$niche_type)
+        unique(self_cell_type_niche_enrichment_by_histology$niche_type)
     ),
-    unique(neighbor_cell_type_niche_enrichment$niche_type) 
+    unique(neighbor_cell_type_niche_enrichment_by_histology$niche_type) 
 )
 enrichment_overview_dt = merge(
     rbind(
-        self_cell_type_niche_enrichment[
+        self_cell_type_niche_enrichment_by_histology[
             niche_type %in% including_niches,
             .(cell_type, size = N_var1var2/sum(N_var1var2), q_value, test_statistic = odds_ratios),
-            .(niche_type)
+            .(niche_type,histology)
         ][, data_type := 'Self Cell Type'],
-        neighbor_cell_type_niche_enrichment[
+        neighbor_cell_type_niche_enrichment_by_histology[
             niche_type %in% including_niches,
             .(cell_type = continuous_cols, size = N_var2, q_value, test_statistic = delta),
-            .(niche_type)
+            .(niche_type,histology)
         ][, data_type := 'Neighbor Cell Type']
     ),histology_niche_enrichment[
         niche_type %in% including_niches
-        ,.(enriched_histologies = histology[which(N_var1var2 == max(N_var1var2))]), 
-        .(niche_type)
-    ], by = 'niche_type'
+        ,.(q_value_histo = q_value, test_statistic_histo = delta), 
+        .(niche_type, histology)
+    ], by = c('niche_type','histology')
 )
 
-ggplot(enrichment_overview_dt) + geom_point(aes(
-    x = data_type, y = cell_type, size = size, 
-    # fill = q_value, 
-    color = ifelse(
-        # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
-        (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic > 1) |
-        # if it's the continuous test, we use a delta > 0 as positive enrichment
-            (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic > 0), 
-        'significant','not significant'
-    )
-)) + 
-    facet_wrap(as.numeric(niche_type) ~ enriched_histologies, nrow = 3) +
-    theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        text = element_text(size = 20), 
-        legend.position = 'bottom',
-        strip.text = element_text(size = 15),
-        strip.background = element_blank(),
-        panel.spacing = unit(1, "lines")
-    ) + #scale_fill_viridis_c()  +
-    scale_size_area(max_size = 10) +
-    scale_x_discrete(
-        labels = c('Self','Neighbor'),
-        limits = c('Self Cell Type','Neighbor Cell Type')
-    ) +
-    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
-    labs(
-        title = 'Enrichment of Cell Types By Niche',
-        x = 'Niche Type',
-        y = 'Cell Type',
-        size = 'Proportion Cell Type',
-        fill = 'q-value',
-        color = 'Significance'
-    ) + guides(
-        fill = guide_legend(title = 'q-value'),
-        color = guide_legend(title = 'Significance')
-    )
+histo_vector = structure(
+    c('CN','CLN','GG','PA'), 
+    names = c('central neurocytoma','cerebellar liponeurocytoma','ganglioglioma','pilocytic astrocytoma')
+)
+enrichment_overview_dt[, histology := histo_vector[histology]]
 
-ggplot(enrichment_overview_dt) + geom_point(aes(
-    x = data_type, y = cell_type, size = size, 
-    # fill = q_value, 
-    color = ifelse(
-        # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
-        (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic > 1) |
-        # if it's the continuous test, we use a delta > 0 as positive enrichment
-            (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic > 0), 
-        'significant','not significant'
-    )
-)) + 
-    facet_wrap(enriched_histologies ~ as.numeric(niche_type), nrow = 3) +
+ggplot(enrichment_overview_dt[q_value_histo <= 0.25 & as.numeric(test_statistic_histo) > 0]) + 
+    geom_point(aes(
+        x = data_type, y = cell_type, size = size, 
+        # fill = q_value, 
+        color = ifelse(
+            # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
+            (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic > 1) |
+            # if it's the continuous test, we use a delta > 0 as positive enrichment
+                (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic > 0), 
+            'sig. enriched',ifelse(
+                # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
+                (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic < 1) |
+                # if it's the continuous test, we use a delta > 0 as positive enrichment
+                    (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic < 0), 
+                'sig. depleted','not sig.'
+            )
+        )
+    )) + 
+    facet_wrap(as.numeric(niche_type) ~ histology, nrow = 2) +
     theme(
         axis.text.x = element_text(angle = 45, hjust = 1),
         text = element_text(size = 20), 
@@ -791,7 +786,10 @@ ggplot(enrichment_overview_dt) + geom_point(aes(
         labels = c('Self','Neighbor'),
         limits = c('Self Cell Type','Neighbor Cell Type')
     ) +
-    scale_color_manual(values = c('significant' = 'red','not significant' = 'black')) +
+    scale_color_manual(values = c(
+        'sig. enriched' = 'firebrick3', 'sig. depleted' = 'dodgerblue2',
+        'not sig.' = 'slategrey'
+    )) +
     labs(
         title = 'Enrichment of Cell Types By Niche',
         x = 'Niche Type',
@@ -800,42 +798,122 @@ ggplot(enrichment_overview_dt) + geom_point(aes(
         fill = 'q-value',
         color = 'Significance'
     ) + guides(
-        fill = guide_legend(title = 'q-value'),
-        color = guide_legend(title = 'Significance')
+        size = guide_legend(title = 'Proportion', nrow = 2),
+        color = guide_legend(title = 'Significance', nrow = 2)
     )
 ```
 
-
-# Radii Analysis
-
-It seems like the average distance to the nearest neighbors is larger in GG and PAs than in CN and CLNs
+### Only Significantly Enriched Niches
 
 ```{r}
-niche_radii = knnDT[,.(from_id,to_id,distance)][
-    cell_cell_type_dt[,.(cell_id,niche_type_to = niche_type)], on = c('to_id' = 'cell_id'),
-][
-    cell_cell_type_dt[,.(
-        cell_id, niche_type_from = niche_type, sample_id, histology
-    )], on = c('from_id' = 'cell_id')
-]
+lapply(
+    histo_vector, function(x){
+        ggplot(enrichment_overview_dt[q_value_histo <= 0.25 & as.numeric(test_statistic_histo) > 0 & histology == x]) + 
+            geom_point(aes(
+                x = data_type, y = cell_type, size = size, 
+                # fill = q_value, 
+                color = ifelse(
+                    # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
+                    (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic > 1) |
+                    # if it's the continuous test, we use a delta > 0 as positive enrichment
+                        (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic > 0), 
+                    'sig. enriched',ifelse(
+                        # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
+                        (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic < 1) |
+                        # if it's the continuous test, we use a delta > 0 as positive enrichment
+                            (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic < 0), 
+                        'sig. depleted','not sig.'
+                    )
+                )
+            )) + 
+            facet_wrap(histology ~ as.numeric(niche_type), nrow = 1) +
+            theme(
+                axis.text.x = element_text(angle = 45, hjust = 1),
+                text = element_text(size = 20), 
+                legend.position = 'bottom',
+                strip.text = element_text(size = 15),
+                strip.background = element_blank(),
+                panel.spacing = unit(1, "lines")
+            ) + #scale_fill_viridis_c()  +
+            scale_size_area(max_size = 10) +
+            scale_x_discrete(
+                labels = c('Self','Neighbor'),
+                limits = c('Self Cell Type','Neighbor Cell Type')
+            ) +
+            scale_color_manual(values = c(
+                'sig. enriched' = 'firebrick3', 'sig. depleted' = 'dodgerblue2',
+                'not sig.' = 'slategrey'
+            )) +
+            labs(
+                title = 'Enrichment of Cell Types By Niche',
+                x = 'Niche Type',
+                y = 'Cell Type',
+                size = 'Proportion Cell Type',
+                fill = 'q-value',
+                color = 'Significance'
+            ) + guides(
+                size = guide_legend(title = 'Proportion', nrow = 2 ),
+                color = guide_legend(title = 'Significance', nrow = 2)
+            )
+    }
+)
 
-ggplot(niche_radii[
-    , .(distance = median(distance)), .(
-        from_id, niche_type_from, sample_id, histology
-    )
-]) + 
-    geom_boxplot(aes(x = niche_type_from, y = distance, fill = niche_type_from)) +
-    facet_wrap(histology~sample_id) +
-    theme_minimal() + theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        text = element_text(size = 15), legend.position = 'bottom'
-    ) + scale_fill_manual(values = niche_color_manual) +
-    labs(
-        title = 'Distribution of Radii By Niche',
-        x = 'Niche Type',
-        y = 'Distance to Neighbor'
-    ) + guides(
-        fill = guide_legend(title = 'Niche Type', nrow = 2)
-    ) + scale_y_log10()
 ```
 
+### All Niches by Histology
+
+```{r}
+#| fig-width: 20
+#| fig-height: 12
+lapply(
+    histo_vector, function(x){
+        ggplot(enrichment_overview_dt[histology == x]) + 
+            geom_point(aes(
+                x = data_type, y = cell_type, size = size, 
+                # fill = q_value, 
+                color = ifelse(
+                    # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
+                    (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic > 1) |
+                    # if it's the continuous test, we use a delta > 0 as positive enrichment
+                        (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic > 0), 
+                    'sig. enriched',ifelse(
+                        # if it's the fishers test, we use a odds ratio > 1 as positive enrichment
+                        (q_value < 0.05 & data_type == 'Self Cell Type' & test_statistic < 1) |
+                        # if it's the continuous test, we use a delta > 0 as positive enrichment
+                            (q_value < 0.05 & data_type == 'Neighbor Cell Type' & test_statistic < 0), 
+                        'sig. depleted','not sig.'
+                    )
+                )
+            )) + 
+            facet_wrap(histology ~ as.numeric(niche_type), nrow = 2) +
+            theme(
+                axis.text.x = element_text(angle = 45, hjust = 1),
+                text = element_text(size = 20), 
+                legend.position = 'bottom',
+                strip.text = element_text(size = 15),
+                strip.background = element_blank(),
+                panel.spacing = unit(1, "lines")
+            ) + #scale_fill_viridis_c()  +
+            scale_size_area(max_size = 10) +
+            scale_x_discrete(
+                labels = c('Self','Neighbor'),
+                limits = c('Self Cell Type','Neighbor Cell Type')
+            ) +
+            scale_color_manual(values = c(
+                'sig. enriched' = 'firebrick3', 'sig. depleted' = 'dodgerblue2',
+                'not sig.' = 'slategrey'
+            )) +
+            labs(
+                title = 'Enrichment of Cell Types By Niche',
+                x = 'Niche Type',
+                y = 'Cell Type',
+                size = 'Proportion Cell Type',
+                fill = 'q-value',
+                color = 'Significance'
+            ) + guides(
+                size = guide_legend(title = 'Proportion', nrow = 2),
+                color = guide_legend(title = 'Significance', nrow = 2)
+            )
+    }
+)
+```

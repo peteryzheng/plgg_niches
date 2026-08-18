@@ -48,13 +48,20 @@ library(plotly)
 library(scales)
 library(htmlwidgets)
 library(metap)
+library(rcartocolor)
 
-# local vs UGER
+# local vs remote
 if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
     # in a local mac, the home directory is usuaully at '/Users/[username]'
-    workdir <- "~/Documents/HMS/PhD/beroukhimlab/broad_mount/"
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
+    # in eristwo, the home directory is at /PHShome/yz762
+    workdir <- "/data/beroukhim1/"
+} else if (Sys.getenv("HOME") == "/home/yz762"){
+    # on the new server, the home directory is at /home/yz762
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
 } else {
-    # in dipg or uger, the home directory is usuaully at '/home/unix/[username]'
+    # in dipg or uger, the home directory is '/home/unix/[username]'
     workdir <- "/xchip/beroukhimlab/"
 }
 
@@ -77,15 +84,15 @@ Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xeniu
 ```{r}
 # load the banksy embeddings
 banksy_embeddings <- readRDS(ifelse(
-    workdir == "/xchip/beroukhimlab/", paste0(
-        workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
-    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_20_30_res_0.75_1_20241223_222156.rds"
+    !Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng"), paste0(
+        workdir, "youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
 ))
 colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
 
 # Load the cell type clusters annotation
 prelim_annotation_res1 = fread(paste0(
-    workdir,'coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv'
+    workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
 ))
 
 # specify the cluster names 
@@ -123,10 +130,10 @@ graph_dt = melt(
     as.data.table(cbind(
         spatialCoords(banksy_embeddings),
         colData(banksy_embeddings)[c(
-            'sample_id','cell_id', 'histology',
-            niche_clust_name
+            'sample_id','cell_id', 'histology', 
+            'pathology_annotation', niche_clust_name
         )]
-    )),id.vars = c('sample_id','cell_id','histology','sdimx','sdimy'),
+    )),id.vars = c('sample_id','cell_id','histology','pathology_annotation','sdimx','sdimy'),
     variable.name = 'Cluster Type',value.name = 'Cluster ID'
 )[`Cluster ID` %in% niches_to_show][
     ,`Cluster ID` := as.character(`Cluster ID`)
@@ -159,6 +166,73 @@ g = ggplot(
     ) +
     coord_flip()
 g
+```
+
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+graph_dt[, pathology_annotation := relevel(factor(ifelse(
+    !grepl('Compact', pathology_annotation), pathology_annotation,
+    gsub('\\.', ',', pathology_annotation)
+)), ref = 'Compact, fibrillary component')]
+ggplot(
+    graph_dt[grepl('pilo', histology) & !grepl('dominant', pathology_annotation)], 
+    aes(x=sdimy, y=sdimx, color=pathology_annotation)
+) +
+    facet_wrap( ~ sample_id, scale = 'free_x', nrow = 1) +
+    # subset cells
+    # geom_point(size = 0.3, alpha = 0.5) + 
+    # all cells
+    geom_point(size = 0.00001, alpha = 0.7) + 
+    scale_color_carto_d(
+        name = '',
+        palette = 'Safe'
+    ) +
+    theme_void(base_size = 40) + 
+    theme(
+        legend.position = "bottom",
+        text = element_text(size = 40),
+        strip.text = element_text(size = 30),
+        strip.background = element_blank()
+    ) + guides(
+        color = guide_legend(override.aes = list(size=5, alpha = 1), nrow = 3, byrow = TRUE)
+    ) + labs(
+        title = 'Pathology Annotations on H&E Overlaid on Cell Locations',
+        x = '',y = ''
+    ) +
+    coord_flip()
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 24
+ggplot(
+    graph_dt[
+        grepl('pilo', histology) & !grepl('dominant', pathology_annotation) & 
+        `Cluster Type` == niche_clust_name
+    ], 
+    aes(x=sdimy, y=sdimx, color=`Cluster ID`)
+) +
+    facet_wrap( ~ sample_id, scale = 'free_x', nrow = 1) +
+    # subset cells
+    # geom_point(size = 0.3, alpha = 0.5) + 
+    # all cells
+    geom_point(size = 0.00001, alpha = 0.7) + 
+    scale_color_manual(values = niche_color_manual) +
+    theme_void(base_size = 40) + 
+    theme(
+        legend.position = "bottom",
+        text = element_text(size = 40),
+        strip.text = element_text(size = 30),
+        strip.background = element_blank()
+    ) + guides(
+        color = guide_legend(override.aes = list(size=5, alpha = 1), nrow = 3, byrow = TRUE)
+    ) + labs(
+        title = 'BANKSY Niches on Cell Locations',
+        x = '',y = ''
+    ) +
+    coord_flip()
 ```
 
 
@@ -237,4 +311,3 @@ lapply(sort(unique(graph_dt[`Cluster Type` == niche_clust_name]$`Cluster ID`)), 
         coord_flip()
 })
 ```
-

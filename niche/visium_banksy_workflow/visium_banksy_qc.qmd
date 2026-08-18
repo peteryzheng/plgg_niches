@@ -1,0 +1,205 @@
+---
+title: "Visium BANKSY QC"
+author: "Codex"
+format:
+    html:
+        code-fold: true
+        fig-width: 12
+        fig-height: 8
+        toc: true
+        embed-resources: true
+params:
+    run_dir: null
+engine: knitr
+knitr:
+    opts_chunk:
+        warning: false
+        message: false
+        fig.width: 12
+        fig.height: 8
+---
+
+```{r}
+if (is.null(params$run_dir)) {
+    stop("params$run_dir is required")
+}
+
+suppressPackageStartupMessages({
+    library(data.table)
+    library(ggplot2)
+    library(knitr)
+    library(cowplot)
+})
+
+helper_path = normalizePath(
+    file.path(
+        dirname(knitr::current_input(dir = TRUE)),
+        "..",
+        "..",
+        "helpers",
+        "spatial_helper_visium.R"
+    ),
+    mustWork = TRUE
+)
+source(helper_path)
+
+run_dir = normalizePath(params$run_dir)
+spe = readRDS(file.path(run_dir, "visium_banksy_output.rds"))
+qc_summary = fread(file.path(run_dir, "visium_banksy_qc_summary.tsv"))
+section_summary = fread(file.path(run_dir, "visium_banksy_section_summary.tsv"))
+run_summary = fread(file.path(run_dir, "visium_banksy_run_summary.tsv"))
+
+preferred_cluster_col = if (
+    "marker_cluster_column" %in% colnames(run_summary) &&
+    nrow(run_summary) > 0 &&
+    !is.na(run_summary$marker_cluster_column[[1]]) &&
+    nzchar(run_summary$marker_cluster_column[[1]])
+) {
+    run_summary$marker_cluster_column[[1]]
+} else {
+    NULL
+}
+
+sample_order = visium_sample_order(spe)
+lambda0_cluster = resolve_visium_cluster_column(spe, lambda = 0)
+lambda02_cluster = resolve_visium_cluster_column(
+    spe,
+    lambda = 0.2,
+    preferred_col = preferred_cluster_col
+)
+sample_palette = build_visium_palette(sample_order)
+lambda0_palette = build_visium_palette(colData(spe)[[lambda0_cluster]])
+lambda02_palette = build_visium_palette(colData(spe)[[lambda02_cluster]])
+
+qc_long = melt(
+    qc_summary,
+    id.vars = c("source_file", "sample_id"),
+    measure.vars = c(
+        "n_spots_input",
+        "n_spots_hard_filter",
+        "n_spots_nonzero",
+        "n_spots_qc_keep"
+    ),
+    variable.name = "stage",
+    value.name = "n_spots"
+)
+qc_long[, sample_id := factor(as.character(sample_id), levels = sample_order)]
+composition = visium_cluster_composition_dt(
+    spe,
+    lambda02_cluster,
+    sample_order = sample_order
+)
+```
+
+# Run Summary
+
+```{r}
+kable(run_summary)
+```
+
+# Spot Retention
+
+```{r}
+ggplot(qc_long, aes(sample_id, n_spots, fill = stage)) +
+    geom_col(position = "dodge") +
+    theme_bw() +
+    labs(
+        title = "Spot retention by sample",
+        x = "Sample",
+        y = "Spots"
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Section Summary
+
+```{r}
+kable(head(section_summary[order(n_spots)], 20))
+```
+
+# UMAPs
+
+```{r}
+#| fig-height: 8
+#| fig-width: 16
+cowplot::plot_grid(
+    plot_visium_umap(
+        spe,
+        "UMAP_Harmony_BANKSY_lam0",
+        "visium_sample_id",
+        "UMAP: lambda 0, colored by sample",
+        palette = sample_palette
+    ),
+    plot_visium_umap(
+        spe,
+        "UMAP_Harmony_BANKSY_lam0",
+        lambda0_cluster,
+        "UMAP: lambda 0, colored by cluster",
+        palette = lambda0_palette
+    ),
+    ncol = 2
+)
+```
+
+```{r}
+#| fig-height: 8
+#| fig-width: 16
+cowplot::plot_grid(
+    plot_visium_umap(
+        spe,
+        "UMAP_Harmony_BANKSY_lam0.2",
+        "visium_sample_id",
+        "UMAP: lambda 0.2, colored by sample",
+        palette = sample_palette
+    ),
+    plot_visium_umap(
+        spe,
+        "UMAP_Harmony_BANKSY_lam0.2",
+        lambda02_cluster,
+        "UMAP: lambda 0.2, colored by cluster",
+        palette = lambda02_palette
+    ),
+    ncol = 2
+)
+```
+
+# Spatial Cluster Maps
+
+```{r}
+#| fig-height: 16
+#| fig-width: 16
+plot_visium_spatial_sample_grid(
+    spe,
+    lambda0_cluster,
+    title = "Spatial map by lambda 0 clusters",
+    sample_order = sample_order,
+    palette = lambda0_palette
+)
+```
+
+```{r}
+#| fig-height: 16
+#| fig-width: 16
+plot_visium_spatial_sample_grid(
+    spe,
+    lambda02_cluster,
+    title = "Spatial map by lambda 0.2 clusters",
+    sample_order = sample_order,
+    palette = lambda02_palette
+)
+```
+
+# Cluster Composition by Sample
+
+```{r}
+ggplot(composition, aes(sample_id, fraction, fill = cluster)) +
+    geom_col(position = "fill") +
+    scale_fill_manual(values = lambda02_palette, drop = FALSE) +
+    theme_bw() +
+    labs(
+        title = "Cluster composition by sample (lambda 0.2)",
+        x = "Sample",
+        y = "Fraction"
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
