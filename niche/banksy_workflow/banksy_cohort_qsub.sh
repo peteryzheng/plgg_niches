@@ -10,10 +10,20 @@
 #$ -e /mnt/storage/dept/medonc/beroukhim/youyun/plgg/code/niche/banksy_workflow/logs
 
 # task 1 = current chosen config (k_geom 15/30, lam 0.2/0.8, npc 20,
-# k_ct=50, res_ct=0.5,1, k_ni=50, res_ni=0.5,1) -- the only row in
+# k_ct=50, res_ct=0.2, k_ni=50, res_ni=0.5) -- the only row in
 # param_search.tsv. Older exploratory sweep rows used a different,
 # incompatible column layout (kc1/kc2/res1/res2 shared across both lambdas)
 # and were removed rather than migrated; see git history if needed.
+#
+# res_ct=0.2/res_ni=0.5 were chosen after an extensive resolution sweep
+# (see cluster_summary_stats.R and celltype_lowres_recluster.R) -- the
+# production annotated object was actually assembled via a validated
+# fast-path (finalize_final_resolution.R) that reuses the deterministic
+# BANKSY/Harmony/UMAP embeddings + Leiden clustering already computed for
+# this config rather than re-running this qsub script from scratch (which
+# would take ~35-55h to reproduce a scientifically identical result). This
+# script remains the correct from-scratch fallback if that equivalence
+# ever needs re-validating or the upstream data changes.
 
 set -euo pipefail
 

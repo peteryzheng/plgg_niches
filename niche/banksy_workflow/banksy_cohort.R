@@ -169,5 +169,18 @@ if(!interactive()) {
         output_dir, current_timestamp, seed_val = seed
     )
 
+    # Per-resolution cell-type review panels (cell-type UMAP + cluster UMAP
+    # on top, entropy stacked above marker heatmap below) -- easier to sanity
+    # check a cluster's cell-type call than cross-referencing the three
+    # separate QC pngs above.
+    generate_celltype_review_panels(
+        total_se_staggered,
+        aname = 'normcounts',
+        k_geom_vec = k_geom, lambda_vec = lambda, pc_val = npc,
+        k_leiden_celltype = k_ct, resolution_celltype = res_ct,
+        k_leiden_niche    = k_ni, resolution_niche    = res_ni,
+        output_dir, current_timestamp, seed_val = seed
+    )
+
     print(paste0('[',format(Sys.time(), "%Y/%m/%d-%H:%M:%S"),'] | ','Done!'))
 }
