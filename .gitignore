@@ -3,9 +3,15 @@ niche/logs/*
 niche/banksy_workflow/logs/*
 .vdoc.r
 .vdoc.py
+.vdoc*
 */*/*/figure-html/*
 */*/*/libs/*
 *.html
 */*/*in_space.html
 */*/*in_space_proseg.html
 *.zip
+# large derived data files -- regenerate from the notebooks
+sc_integration/ENVI/2_spatial_imputation/PA/myeloid_signature_scores.csv
+sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure.tsv
+sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure_parta_results.tsv
+sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure_partb_results.tsv
