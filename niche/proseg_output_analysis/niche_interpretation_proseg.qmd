@@ -254,17 +254,24 @@ ggplot(occ, aes(x = factor(sample_id), y = niche_type, fill = frac)) +
 
 # Assemble the niche dictionary
 
-Per niche we take the top neighborhood cell type(s), the top enriched pathology
-region (from the beta-binomial model), the histology it is enriched in, and
-whether it is sample-private (candidate tumor niche).
+Per niche we take the **most enriched** neighborhood cell type(s) (highest log2
+OR vs the cohort, from the enrichment above -- not merely the most *abundant*,
+which is usually Neuronal everywhere), the top enriched pathology region (from
+the beta-binomial model), the histology it is enriched in, and whether it is
+sample-private (candidate tumor niche).
 
 ```{r}
-# --- dominant neighborhood cell type(s): top 2 by proportion, display names ---
-comp_wide = dcast(niche_comp, niche_type ~ member_ct, value.var = "prop", fill = 0)
-top_ct = niche_comp[order(niche_type, -prop),
-    .(dominant_celltypes = paste0(
+# --- most ENRICHED neighborhood cell type(s): top 2 by log2 OR vs cohort (from
+# `enr` above), NOT the most abundant. Surfaces what makes a niche distinctive
+# (e.g. Endothelial in a vascular niche) instead of whatever is abundant
+# everywhere. Require prop (a / N_ni) >= 2% so a rare cell type with a large
+# Haldane-corrected OR can't hijack the label. Show both log2 OR and %.
+top_ct = enr[log2_or > 0 & (a / N_ni) >= 0.02][order(niche_type, -log2_or),
+    .(top_enriched_celltypes = paste0(
         lineage_display[as.character(member_ct[1:min(2, .N)])], " (",
-        sprintf("%.0f%%", prop[1:min(2, .N)] * 100), ")", collapse = "; ")
+        sprintf("%+.1f log2OR, %.0f%%", log2_or[1:min(2, .N)],
+                (a[1:min(2, .N)] / N_ni[1:min(2, .N)]) * 100), ")",
+        collapse = "; ")
     ), by = niche_type]
 
 # --- pathology: top enriched region per niche (sign_call == enriched, min q) ---
@@ -304,7 +311,7 @@ histo_top = histo_res[
 
 # --- merge into the dictionary ---
 niche_dict = data.table(niche_type = niche_levels)
-niche_dict = merge(niche_dict, top_ct[, .(niche_type = as.character(niche_type), dominant_celltypes)],
+niche_dict = merge(niche_dict, top_ct[, .(niche_type = as.character(niche_type), top_enriched_celltypes)],
                    by = "niche_type", all.x = TRUE)
 niche_dict = merge(niche_dict, path_top, by = "niche_type", all.x = TRUE)
 niche_dict = merge(niche_dict, histo_top, by = "niche_type", all.x = TRUE)
@@ -319,7 +326,7 @@ setorder(niche_dict, niche_type)
 # --- candidate identity: a compact auto-descriptor from the lenses ---
 # (heuristic starting point -- refine by eye against the heatmap/spatial maps)
 niche_dict[, candidate_identity := paste0(
-    dominant_celltypes,
+    top_enriched_celltypes,
     ifelse(!is.na(top_pathology), paste0(" | region: ", top_pathology), ""),
     ifelse(!is.na(top_histology), paste0(" | hist: ", top_histology), ""),
     ifelse(sample_private, " | SAMPLE-PRIVATE (candidate tumor niche)", "")
@@ -327,7 +334,7 @@ niche_dict[, candidate_identity := paste0(
 
 fwrite(niche_dict, paste0(workdir,
     "youyun/plgg/code/niche/proseg_output_analysis/niche_dictionary.tsv"), sep = "\t")
-print(niche_dict[, .(niche_type, dominant_celltypes, top_pathology, top_histology,
+print(niche_dict[, .(niche_type, top_enriched_celltypes, top_pathology, top_histology,
                      n_cells, n_samples_5pct, sample_private)])
 ```
 
