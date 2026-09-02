@@ -21,8 +21,8 @@ if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
 
 banksy_rds_path <- file.path(
     workdir,
-    "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1",
-    "banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
+    "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kct_50_resct_0.5,1_kni_50_resni_0.5,1",
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134.rds"
 )
 annotation_input_dir <- file.path(
     workdir,
@@ -31,12 +31,12 @@ annotation_input_dir <- file.path(
 annotated_rds_path <- file.path(
     workdir,
     "youyun/plgg/data/Xenium_annotations",
-    "banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds"
 )
 annotated_subset_rds_path <- file.path(
     workdir,
     "youyun/plgg/data/Xenium_annotations",
-    "banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_subset.rds"
 )
 
 parse_sample_id <- function(path) {

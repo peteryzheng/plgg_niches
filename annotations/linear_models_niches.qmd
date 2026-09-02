@@ -80,7 +80,7 @@ if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
 }
 
 source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
-source(paste0(workdir,'/youyun/plgg/code/helpers/pathology_mixed_models.R'))
+source(paste0(workdir,'/youyun/plgg/code/helpers/enrichment_models.R'))
 ```
 
 
@@ -90,9 +90,9 @@ source(paste0(workdir,'/youyun/plgg/code/helpers/pathology_mixed_models.R'))
 
 The objects are here:
 
-RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
+RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds`
 
-    -   `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
+    -   `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_subset.rds`
 
 Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
 
@@ -101,8 +101,8 @@ Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xeniu
 # load the banksy embeddings
 banksy_embeddings <- readRDS(ifelse(
     !Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng"), paste0(
-        workdir, "youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
-    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+        workdir, "youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_subset.rds"
 ))
 colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
 
@@ -115,7 +115,7 @@ prelim_annotation_res1 = fread(paste0(
 # this is mainly to keep track of which resolution we are using
 cell_res = 1
 cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
-niche_res = 1
+niche_res = 0.5
 niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
 
 # # filter the banksy object to only include the cells with annotated niche types
@@ -136,7 +136,7 @@ niche_color_manual = structure(
 # for niche resolution 0.5
 # niches_to_show = c(1:11, 13, 14, 16, 17)
 # for niche resolution 1
-niches_to_show = c(1:20, 22:25)
+niches_to_show = cluster_classes
 
 cell_type_to_test = 'Coarse Cell Type'
 cell_type_to_test = 'Fine Cell Type'
@@ -214,7 +214,7 @@ We now use a unified count-based beta-binomial mixed-effects pipeline with expli
 ```{r}
 pathology_rules = data.table(
     analysis_id = c("PA", "CLN", "CN", "GG"),
-    ref_region = c("unannotated", "Cerebellum, molecular layer", "Neuropil zone", "unannotated"),
+    ref_region = c("unannotated", "Cerebellum, molecular layer", "unannotated", "unannotated"),
     histology_regex = c("pilo", NA_character_, "central", NA_character_),
     pathology_exclude_regex = c("dominant", NA_character_, "Lipid", NA_character_),
     pathology_include_regex = c(NA_character_, NA_character_, NA_character_, NA_character_)
@@ -372,30 +372,44 @@ plot_niche_primary = summarize_results_for_plot(
 )
 
 if (nrow(plot_niche_primary) > 0) {
-    ggplot(plot_niche_primary, aes(
-        x = estimate_log_odds,
-        y = feature,
-        color = factor(sign_call, levels = c("enriched", "depleted", "not_significant"))
-    )) +
-        geom_point() +
-        geom_errorbarh(aes(
-            xmin = estimate_log_odds - 1.96 * se,
-            xmax = estimate_log_odds + 1.96 * se
-        ), height = 0.25) +
-        geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
-        facet_wrap(~ paste0(analysis_id, " | ", annotation_region), scales = "free_x") +
-        theme_bw(base_size = 12) +
-        theme(
-            legend.position = "bottom",
-            legend.title = element_blank(),
-            panel.grid.minor = element_blank()
-        ) +
+    setDT(plot_niche_primary)
+    cap = 4   # cap x + CI so near-separation models don't blow out the shared axis
+    plot_niche_primary[, est_cap := pmax(pmin(estimate_log_odds, cap), -cap)]
+    plot_niche_primary[, lo_cap := pmax(pmin(estimate_log_odds - 1.96 * se, cap), -cap)]
+    plot_niche_primary[, hi_cap := pmax(pmin(estimate_log_odds + 1.96 * se, cap), -cap)]
+    plot_niche_primary[, shape_code := fifelse(abs(estimate_log_odds) <= cap, "point",
+                                         fifelse(estimate_log_odds > cap, "hi", "lo"))]
+    plot_niche_primary[, direction := factor(sign_call,
+        levels = c("enriched", "not_significant", "depleted"),
+        labels = c("Enriched", "Not significant", "Depleted"))]
+    dir_colors = c(Enriched = "#B2182B", `Not significant` = "grey65", Depleted = "#2166AC")
+    ggplot(plot_niche_primary, aes(x = est_cap, y = feature, color = direction)) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.4) +
+        geom_errorbarh(aes(xmin = lo_cap, xmax = hi_cap, linewidth = direction != "Not significant"), height = 0) +
+        geom_point(aes(shape = shape_code, size = direction != "Not significant")) +
+        facet_wrap(~ paste0(analysis_id, " | ", annotation_region), ncol = 3) +
+        coord_cartesian(xlim = c(-cap, cap)) +
+        scale_shape_manual(values = c(point = 16, hi = 62, lo = 60), guide = "none") +  # 62='>' 60='<'
+        scale_color_manual(values = dir_colors, name = NULL,
+                           guide = guide_legend(override.aes = list(linewidth = 1.2, size = 3))) +
+        scale_linewidth_manual(values = c(`TRUE` = 0.9, `FALSE` = 0.5), guide = "none") +
+        scale_size_manual(values = c(`TRUE` = 2.6, `FALSE` = 1.8), guide = "none") +
         labs(
-            title = "Niche Type Enrichment (Primary-Pass Mixed Models)",
-            x = "Log-odds estimate",
-            y = "Niche Type"
+            title = "Niche enrichment by pathology region (beta-binomial mixed models)",
+            subtitle = "Log-odds vs. reference region (95% CI; x capped at ±4, arrows = overflow). Called at q < 0.25.",
+            x = "Log-odds estimate", y = "Niche"
         ) +
-        scale_color_brewer(palette = "Set1")
+        theme_classic(base_size = 13) +
+        theme(
+            panel.grid.major.x = element_line(color = "grey92", linewidth = 0.3),
+            strip.background = element_rect(fill = "grey95", color = "grey80", linewidth = 0.3),
+            strip.text = element_text(face = "bold", size = 9),
+            axis.text.x = element_text(angle = 30, hjust = 1),
+            panel.spacing.x = unit(0.7, "lines"),
+            legend.position = "bottom",
+            plot.title = element_text(face = "bold", size = 15),
+            plot.subtitle = element_text(color = "grey30", size = 10)
+        )
 } else {
     message("No primary-pass niche-type models to plot.")
 }
@@ -416,13 +430,18 @@ if (nrow(plot_niche_flagged) > 0) {
         color = analysis_id,
         shape = model_status
     )) +
-        geom_point(size = 2) +
-        geom_vline(xintercept = 0, linetype = "dashed", color = "gray") +
-        theme_bw(base_size = 12) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+        geom_point(size = 2.5) +
         labs(
-            title = "Flagged / Exploratory Niche Results",
-            x = "Log-odds estimate",
-            y = "Niche Type"
+            title = "Flagged / exploratory niche models (non-converged / near-separation)",
+            subtitle = "Large |log-odds| are perfect-separation artifacts -- shown for completeness, not interpretation",
+            x = "Log-odds estimate", y = "Niche", color = NULL, shape = NULL
+        ) +
+        theme_classic(base_size = 13) +
+        theme(
+            legend.position = "bottom",
+            plot.title = element_text(face = "bold", size = 14),
+            plot.subtitle = element_text(color = "grey30", size = 10)
         )
 } else {
     message("No warn/fail rows available for flagged niche view.")

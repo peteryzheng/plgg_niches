@@ -1,0 +1,368 @@
+---
+title: "Niche interpretation: neighborhood composition + pathology + histology"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 13
+        fig-height: 7
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk:
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+The BANKSY niches (lam0.8, res_ni=0.5) are numbered 1-19 with no biological
+identity. This notebook builds a per-niche "dictionary" on the **final object**
+(res_ct=0.2/res_ni=0.5) by characterizing each niche along orthogonal lenses and
+synthesizing a candidate identity, keeping the niches numbered.
+
+Lenses:
+
+1. **Neighborhood cell-type composition** (the backbone). A niche is a *context*
+   cluster, so we describe it by the cell types in each cell's local
+   neighborhood (self + 15 nearest spatial neighbors) pooled into one proportion
+   vector per niche -- essentially what BANKSY clustered on. This keeps the
+   spatial-context signal while giving a single interpretable vector per niche.
+2. **Pathology correspondence** -- beta-binomial niche x pathology-region model
+   (`annotations/linear_models_niches.qmd`, re-run on this object), the external
+   ground-truth anchor.
+3. **Histology association** -- from `niche_histology_enrichment.tsv`
+   (sample-level, n=11, underpowered; secondary).
+
+The synthesis is a `niche_dictionary.tsv` with a free-text `candidate_identity`.
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(SpatialExperiment)
+library(SummarizedExperiment)
+library(dbscan)
+library(pals)
+
+# Path resolution per AGENTS.md (works across mac/cluster mounts).
+home <- Sys.getenv("HOME")
+if (home %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (home == "/PHShome/yz762") {
+    workdir <- "/data/beroukhim1/"
+} else if (home == "/home/yz762") {
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    workdir <- "/xchip/beroukhimlab/"
+}
+source(paste0(workdir, "youyun/plgg/code/helpers/test_enrichment.R"))
+# lineage_display: snake_case cell-type key -> human-readable label (display only)
+source(paste0(workdir, "youyun/plgg/code/helpers/cell_type_display.R"))
+```
+
+# Load data
+
+We load the **pathology-annotated** copy of the final object (produced by the
+re-pointed `add_annotations.R`), so cell type, niche, pathology, histology and
+spatial coordinates all travel together.
+
+```{r}
+obj_rds = paste0(
+    workdir,
+    "youyun/plgg/data/Xenium_annotations/",
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds"
+)
+banksy_spe = readRDS(obj_rds)
+
+cd = as.data.table(colData(banksy_spe))
+# cell type: this object's marker-AUC lineage call (same column used elsewhere)
+cd[, cell_type := as.character(cell_type_clust_Harmony_BANKSY_lam0.2_k50_res0.2)]
+# niche type: the raw niche cluster id (numeric, kept as the "niche type")
+cd[, niche_type := as.character(clust_Harmony_BANKSY_lam0.8_k50_res0.5)]
+
+# niche display order = numeric
+niche_levels = as.character(sort(as.integer(unique(cd$niche_type))))
+cat("n cells:", nrow(cd), " | niches:", paste(niche_levels, collapse = ","), "\n")
+```
+
+# Neighborhood cell-type composition (backbone)
+
+For every cell we take its own type plus the cell types of its 15 nearest
+spatial neighbors (k_geom=15, the BANKSY geometry), and pool these over all
+cells in a niche to get one cell-type proportion vector per niche. Samples are
+spatially staggered in the object, so a global kNN does not cross samples.
+
+```{r}
+k_geom = 15
+locs = spatialCoords(banksy_spe)
+knn = dbscan::kNN(x = locs, k = k_geom)
+
+# cell types indexed the same as the object columns
+ct_vec = cd$cell_type
+niche_vec = cd$niche_type
+
+# long table: one row per (cell, neighbor) edge carrying the NEIGHBOR's cell type,
+# plus one self row per cell -- so each cell contributes k_geom+1 rows to its niche
+nb_dt = data.table(
+    from = rep(seq_len(nrow(knn$id)), times = k_geom),
+    member_ct = ct_vec[as.vector(knn$id)]
+)
+self_dt = data.table(from = seq_len(length(ct_vec)), member_ct = ct_vec)
+neighborhood = rbind(nb_dt, self_dt)
+neighborhood[, niche_type := niche_vec[from]]
+
+# per-niche neighborhood composition (proportions sum to 1 within niche)
+niche_comp = neighborhood[, .(N = .N), by = .(niche_type, member_ct)]
+niche_comp[, prop := N / sum(N), by = niche_type]
+niche_comp[, niche_type := factor(niche_type, levels = niche_levels)]
+
+# order cell types by overall neighborhood abundance, undetermined last
+ct_order = niche_comp[, .(m = sum(N)), by = member_ct][order(-m)]$member_ct
+ct_order = c(setdiff(ct_order, "undetermined"), "undetermined")
+niche_comp[, member_ct := factor(member_ct, levels = ct_order)]
+```
+
+## Niche x cell-type neighborhood-composition heatmap
+
+```{r}
+#| fig-height: 6.5
+ggplot(niche_comp, aes(x = member_ct, y = niche_type, fill = prop)) +
+    geom_tile(color = "grey92", linewidth = 0.3) +
+    geom_text(aes(label = ifelse(prop >= 0.08, sprintf("%.0f", prop * 100), "")),
+              size = 3, color = "grey15") +
+    scale_x_discrete(labels = lineage_display) +
+    scale_fill_gradient(low = "white", high = "#2166AC", name = "% of\nneighborhood",
+                        labels = scales::percent) +
+    labs(title = "Niche neighborhood composition (self + 15 neighbors, pooled)",
+         subtitle = "Each row sums to 100%; numbers are % of the niche's pooled neighborhood cells",
+         x = "Cell type (neighborhood member)", y = "Niche") +
+    theme_classic(base_size = 13) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1),
+          plot.title = element_text(face = "bold", size = 15))
+```
+
+## Per-niche composition as stacked bars
+
+Same neighborhood proportions as the heatmap, as one stacked bar per niche --
+easier to read each niche's dominant type(s) at a glance.
+
+```{r}
+#| fig-height: 5.5
+ct_levels_bar = levels(niche_comp$member_ct)   # abundance-ordered, undetermined last
+bar_cols = setNames(pals::alphabet()[seq_along(ct_levels_bar)], ct_levels_bar)
+bar_cols["undetermined"] = "grey75"
+ggplot(niche_comp, aes(x = niche_type, y = prop, fill = member_ct)) +
+    geom_col(width = 0.7) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.02))) +
+    scale_fill_manual(values = bar_cols, labels = lineage_display, name = "Cell type") +
+    labs(title = "Per-niche neighborhood composition (stacked)",
+         x = "Niche", y = "Proportion of neighborhood") +
+    theme_classic(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", size = 15))
+```
+
+# Neighborhood cell-type enrichment vs cohort
+
+Which cell types are over-/under-represented in each niche's neighborhood
+relative to the whole-cohort baseline -- the statistical complement to the raw
+proportions above. We form a one-vs-rest 2x2 from the pooled neighborhood counts
+per (niche, cell type) and take the log2 odds ratio: > 0 = enriched (red),
+< 0 = depleted (blue).
+
+**Caveat:** neighborhoods overlap (each cell is counted in ~16 of them), so a
+formal p-value here is pseudo-replicated and would be spuriously tiny. We
+therefore read the **effect size** (log2 OR), not significance.
+
+```{r}
+#| fig-height: 6.5
+grand = sum(niche_comp$N)
+ct_tot = niche_comp[, .(N_ct = sum(N)), by = member_ct]
+ni_tot = niche_comp[, .(N_ni = sum(N)), by = niche_type]
+enr = merge(merge(niche_comp[, .(niche_type, member_ct, N)], ct_tot, by = "member_ct"),
+            ni_tot, by = "niche_type")
+# one-vs-rest 2x2 per (niche, cell type), Haldane 0.5 correction for empty cells:
+# a=in-niche&type, b=in-niche&other, c=out-niche&type, d=out-niche&other
+enr[, a := N][, b := N_ni - a][, c := N_ct - a][, d := grand - N_ni - c]
+enr[, log2_or := log2(((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5)))]
+enr[, member_ct := factor(member_ct, levels = levels(niche_comp$member_ct))]
+enr[, niche_type := factor(niche_type, levels = niche_levels)]
+lim = max(abs(enr$log2_or))
+ggplot(enr, aes(x = member_ct, y = niche_type, fill = log2_or)) +
+    geom_tile(color = "grey92", linewidth = 0.3) +
+    geom_text(aes(label = sprintf("%+.1f", log2_or)), size = 2.6, color = "grey15") +
+    scale_x_discrete(labels = lineage_display) +
+    scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", midpoint = 0,
+                         limits = c(-lim, lim), name = "log2 OR\nvs cohort") +
+    labs(title = "Neighborhood cell-type enrichment/depletion by niche",
+         subtitle = "One-vs-rest log2 odds ratio (effect size; red = enriched, blue = depleted)",
+         x = "Cell type", y = "Niche") +
+    theme_classic(base_size = 13) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1),
+          plot.title = element_text(face = "bold", size = 15))
+```
+
+# Sample occupancy: is a niche private to one tumor?
+
+A niche that is **private to a single sample** is a candidate **tumor-specific
+(neoplastic) niche** -- shared/normal niches recur across samples and
+histologies, so privacy is itself a signal, not a nuisance. It is also exactly
+why such niches come back NA/untestable in the histology enrichment (no other
+sample has them, so there is no cross-sample contrast). We surface this
+directly here instead of dropping it. (Confirming a private niche is truly
+neoplastic vs. a sample-specific normal structure would need orthogonal
+evidence, e.g. inferCNV -- so we flag it as a *candidate*.)
+
+```{r}
+#| fig-height: 6
+# per-niche sample occupancy: fraction of each niche's cells coming from each sample
+occ = cd[, .N, by = .(niche_type, sample_id)]
+occ[, frac := N / sum(N), by = niche_type]
+occ[, niche_type := factor(niche_type, levels = niche_levels)]
+
+# per-niche summary: total cells, # samples holding >=5% of the niche, and the
+# single largest sample's share. A niche is "sample-private" if >=80% of its
+# cells come from one sample.
+niche_sample_summary = occ[, .(
+    n_cells = sum(N),
+    n_samples_5pct = sum(frac >= 0.05),
+    top_sample_frac = max(frac)
+), by = niche_type][order(niche_type)]
+niche_sample_summary[, sample_private := top_sample_frac >= 0.8]
+print(niche_sample_summary)
+
+ggplot(occ, aes(x = factor(sample_id), y = niche_type, fill = frac)) +
+    geom_tile(color = "grey92", linewidth = 0.3) +
+    geom_text(aes(label = ifelse(frac >= 0.1, sprintf("%.0f", frac * 100), "")),
+              size = 2.6, color = "grey15") +
+    scale_fill_gradient(low = "white", high = "#762A83", name = "% of niche's\ncells",
+                        labels = scales::percent) +
+    labs(title = "Niche sample occupancy (fraction of each niche's cells per sample)",
+         subtitle = "A niche concentrated in one column is sample-private -> candidate tumor niche",
+         x = "Sample", y = "Niche") +
+    theme_classic(base_size = 13) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(face = "bold", size = 15))
+```
+
+# Assemble the niche dictionary
+
+Per niche we take the top neighborhood cell type(s), the top enriched pathology
+region (from the beta-binomial model), the histology it is enriched in, and
+whether it is sample-private (candidate tumor niche).
+
+```{r}
+# --- dominant neighborhood cell type(s): top 2 by proportion, display names ---
+comp_wide = dcast(niche_comp, niche_type ~ member_ct, value.var = "prop", fill = 0)
+top_ct = niche_comp[order(niche_type, -prop),
+    .(dominant_celltypes = paste0(
+        lineage_display[as.character(member_ct[1:min(2, .N)])], " (",
+        sprintf("%.0f%%", prop[1:min(2, .N)] * 100), ")", collapse = "; ")
+    ), by = niche_type]
+
+# --- pathology: top enriched region per niche (sign_call == enriched, min q) ---
+path_tsv = paste0(workdir,
+    "youyun/plgg/code/annotations/annotations/model_outputs/mixed_models/linear_models_niches_primary_results.tsv")
+path_res = fread(path_tsv)
+# real anatomic regions only: "unannotated" = cells outside any drawn polygon
+# (absence of annotation, not a region), and "Other" = the model's collapsed
+# minority-niche bucket -- neither belongs as a niche's "top pathology".
+# sign_call == "enriched" already encodes q < 0.25 (the model's discovery cutoff),
+# so no extra q filter -- this surfaces e.g. Lipidized-cells enrichments too.
+path_top = path_res[
+    model_status == "pass" & sign_call == "enriched" &
+    annotation_region != "unannotated" & as.character(feature) %in% niche_levels
+][order(feature, q_value),
+    .(top_pathology = paste0(annotation_region[1], " (logOR=", round(estimate_log_odds[1], 1), ")")),
+    by = .(niche_type = as.character(feature))]
+
+# --- histology: top enriched histology per niche (beta-binomial logOR > 0, min q) ---
+# uses estimate_log_odds now that the histology test is beta-binomial (not Wilcoxon
+# delta); require model_status == "pass" so degenerate niches (15/17/19) don't get
+# a spurious top-histology from a separation artifact.
+histo_tsv = paste0(workdir,
+    "youyun/plgg/code/niche/proseg_output_analysis/niche_histology_enrichment.tsv")
+histo_res = fread(histo_tsv)
+# abs(logOR) < 6 guard: model_status=="pass" does NOT catch quasi-separation
+# (numerically converged but degenerate), which produces huge logORs (13, 22)
+# for sample-private niches -- those are artifacts of the niche living in one
+# sample, not real histology enrichment, so exclude them. Real effects top out
+# ~5 (radial_glia in CN), so 6 cleanly separates signal from separation.
+histo_top = histo_res[
+    model_status == "pass" & !is.na(estimate_log_odds) &
+    estimate_log_odds > 0 & estimate_log_odds < 6 & !is.na(q_value)
+][order(niche_type, q_value),
+    .(top_histology = paste0(histology[1], " (logOR=", round(estimate_log_odds[1], 1), ")")),
+    by = .(niche_type = as.character(niche_type))]
+
+# --- merge into the dictionary ---
+niche_dict = data.table(niche_type = niche_levels)
+niche_dict = merge(niche_dict, top_ct[, .(niche_type = as.character(niche_type), dominant_celltypes)],
+                   by = "niche_type", all.x = TRUE)
+niche_dict = merge(niche_dict, path_top, by = "niche_type", all.x = TRUE)
+niche_dict = merge(niche_dict, histo_top, by = "niche_type", all.x = TRUE)
+# sample occupancy: n_cells, breadth, and the sample-private (candidate tumor) flag
+niche_dict = merge(niche_dict, niche_sample_summary[, .(
+    niche_type = as.character(niche_type), n_cells, n_samples_5pct,
+    top_sample_frac = round(top_sample_frac, 2), sample_private)],
+    by = "niche_type", all.x = TRUE)
+niche_dict[, niche_type := factor(niche_type, levels = niche_levels)]
+setorder(niche_dict, niche_type)
+
+# --- candidate identity: a compact auto-descriptor from the lenses ---
+# (heuristic starting point -- refine by eye against the heatmap/spatial maps)
+niche_dict[, candidate_identity := paste0(
+    dominant_celltypes,
+    ifelse(!is.na(top_pathology), paste0(" | region: ", top_pathology), ""),
+    ifelse(!is.na(top_histology), paste0(" | hist: ", top_histology), ""),
+    ifelse(sample_private, " | SAMPLE-PRIVATE (candidate tumor niche)", "")
+)]
+
+fwrite(niche_dict, paste0(workdir,
+    "youyun/plgg/code/niche/proseg_output_analysis/niche_dictionary.tsv"), sep = "\t")
+print(niche_dict[, .(niche_type, dominant_celltypes, top_pathology, top_histology,
+                     n_cells, n_samples_5pct, sample_private)])
+```
+
+# Niche x pathology region
+
+The niche's top enriched pathology region is summarized in the `top_pathology`
+column of the dictionary above (from the beta-binomial niche x region models).
+The full forest plot with 95% CIs lives in its natural home,
+`annotations/linear_models_niches.qmd` -- not duplicated here.
+
+# Spatial reference (downsampled)
+
+Where the niches sit in tissue (5% downsample for legibility). Samples are
+staggered, so this is the whole cohort in one panel set.
+
+```{r}
+#| fig-height: 9
+#| fig-width: 14
+set.seed(5555)
+sub_idx = sample(seq_len(nrow(cd)), min(80000, nrow(cd)))
+spat = data.table(
+    sdimx = spatialCoords(banksy_spe)[sub_idx, 1],
+    sdimy = spatialCoords(banksy_spe)[sub_idx, 2],
+    niche_type = factor(cd$niche_type[sub_idx], levels = niche_levels),
+    sample_id = cd$sample_id[sub_idx],
+    histology = cd$histology[sub_idx]
+)
+niche_cols = setNames(pals::polychrome()[seq_along(niche_levels)], niche_levels)
+ggplot(spat, aes(x = sdimx, y = sdimy, color = niche_type)) +
+    geom_point(size = 0.15, alpha = 0.6) +
+    facet_wrap(~ histology + sample_id, scales = "free", ncol = 4) +
+    scale_color_manual(values = niche_cols, name = "Niche") +
+    guides(color = guide_legend(override.aes = list(size = 3, alpha = 1), ncol = 1)) +
+    labs(title = "BANKSY niches in space (5% downsample)") +
+    theme_void(base_size = 12) +
+    theme(strip.text = element_text(size = 8), legend.position = "right",
+          plot.title = element_text(face = "bold", size = 15))
+```

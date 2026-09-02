@@ -82,7 +82,7 @@ if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
 }
 
 source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
-source(paste0(workdir,'/youyun/plgg/code/helpers/pathology_mixed_models.R'))
+source(paste0(workdir,'/youyun/plgg/code/helpers/enrichment_models.R'))
 ```
 
 
