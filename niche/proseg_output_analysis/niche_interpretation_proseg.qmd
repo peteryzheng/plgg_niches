@@ -128,6 +128,12 @@ niche_comp[, niche_type := factor(niche_type, levels = niche_levels)]
 ct_order = niche_comp[, .(m = sum(N)), by = member_ct][order(-m)]$member_ct
 ct_order = c(setdiff(ct_order, "undetermined"), "undetermined")
 niche_comp[, member_ct := factor(member_ct, levels = ct_order)]
+
+# persist the full niche x cell-type composition so downstream figures (e.g. the
+# focused presentation panel below, or a log2-OR variant) can be built from this
+# TSV without reloading the 5GB object.
+fwrite(niche_comp[, .(niche_type, member_ct, N, prop)], paste0(workdir,
+    "youyun/plgg/code/niche/proseg_output_analysis/niche_celltype_composition.tsv"), sep = "\t")
 ```
 
 ## Niche x cell-type neighborhood-composition heatmap
@@ -147,6 +153,50 @@ ggplot(niche_comp, aes(x = member_ct, y = niche_type, fill = prop)) +
     theme_classic(base_size = 13) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1),
           plot.title = element_text(face = "bold", size = 15))
+```
+
+## Histology-signature niches (presentation figure)
+
+Focused 4x4 view for the talk: each histology's characteristic niche and the
+cell type that anchors it, on the diagonal. Fill = % of that niche's pooled
+neighborhood. Niche 1 is enriched in both CN and CLN; shown here as the
+neuronal-rich CL niche.
+
+```{r}
+#| fig-height: 5
+#| fig-width: 11
+# rows top->bottom: CN, CL, GG, PA (consistent with the other figure panels)
+row_order = c("6", "1", "2", "5")                                    # CN, CL, GG, PA
+niche_hist = c("6" = "Niche 6 · Central neurocytoma", "1" = "Niche 1 · Cerebellar liponeurocytoma",
+               "2" = "Niche 2 · Ganglioglioma", "5" = "Niche 5 · Pilocytic astrocytoma")
+# cols reordered to match so each niche's characteristic cell type stays on the diagonal
+sig_ct = c("radial_glia", "neuronal", "astro_glial", "opc")          # CN, CL, GG, PA
+
+sig_dt = niche_comp[as.character(niche_type) %in% row_order &
+                    as.character(member_ct) %in% sig_ct]
+sig_dt[, niche_lab := factor(niche_hist[as.character(niche_type)],
+       levels = rev(niche_hist[row_order]))]                         # rev -> CN on top
+sig_dt[, ct_lab := factor(as.character(member_ct), levels = sig_ct)]
+
+sig_fig = ggplot(sig_dt, aes(x = ct_lab, y = niche_lab, fill = prop)) +
+    geom_tile(color = "white", linewidth = 1) +
+    geom_text(aes(label = sprintf("%.0f%%", prop * 100),
+                  color = prop > 0.35), size = 5, fontface = "bold") +
+    scale_x_discrete(labels = lineage_display, position = "top") +
+    scale_fill_gradient(low = "white", high = "#2166AC", name = "% of niche\nneighborhood",
+                        labels = scales::percent) +
+    scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "grey20"), guide = "none") +
+    labs(title = "Histology-specific niches are ecosystems defined by characteristic cell types",
+         subtitle = "Tile = % of the niche's pooled (self + 15-neighbor) neighborhood",
+         x = NULL, y = NULL) +
+    theme_minimal(base_size = 15) +
+    theme(panel.grid = element_blank(),
+          axis.text.x = element_text(face = "bold"),
+          plot.title = element_text(face = "bold", size = 14, lineheight = 1.05),
+          plot.title.position = "plot",           # left-align to full width so the title can't crop
+          plot.subtitle = element_text(color = "grey30", size = 11),
+          plot.margin = margin(12, 16, 12, 12))
+sig_fig
 ```
 
 ## Per-niche composition as stacked bars
