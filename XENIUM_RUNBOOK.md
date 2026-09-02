@@ -48,8 +48,20 @@ Every R/QMD/PY entry point derives `workdir` from `$HOME` (see
 
 ### 0d. Shared helpers (`helpers/`)
 - `spatial_helper.R` — loading, QC, BANKSY workflow.
-- `test_enrichment.R` — categorical/continuous enrichment.
-- `pathology_mixed_models.R` — beta-binomial GLMM utilities.
+- `test_enrichment.R` — legacy categorical/continuous enrichment (Wilcoxon/Fisher);
+  still used for the within-sample niche↔cell-type composition test.
+- `enrichment_models.R` — **unified beta-binomial GLMM engine** for all
+  label-vs-grouping enrichment (cell type / niche × histology **or** pathology
+  region). `build_feature_count_dt` → `fit_feature_set` (pathology) /
+  `fit_feature_histology_set` (histology). Random intercept `(1|sample_id)` is
+  included **only when the grouping varies within a sample** (pathology regions);
+  it is omitted for histology (one aggregate row per sample, so a sample RI is
+  unidentifiable — the beta-binomial overdispersion carries the sample-level
+  variance). Formerly `pathology_mixed_models.R`. Note: histology q-values are
+  anti-conservative at small n (2–4 samples/group) — report effect size (logOR +
+  CI), treat q as ranking only.
+- `cell_type_display.R` — snake_case lineage key → human-readable label map,
+  applied at plot time (keeps canonical `marker_panel` keys stable).
 - `spatial_helper_visium.R` — Visium-only (not on Xenium critical path).
 
 ---
@@ -211,18 +223,24 @@ conda activate spatial
 quarto render niche/proseg_output_analysis/banksy_clusters_proseg.qmd
 ```
 
-### 2d. Niche enrichment modeling (cell-type / histology axes)
-These notebooks only need the BANKSY object (no pathology required) and
-extend the niche interpretation above with GLMs. Both live in
+### 2d. Cell-type / niche enrichment modeling (histology axis)
+These notebooks need only the BANKSY object (no pathology required) and live in
 `niche/proseg_output_analysis/`.
-- `banksy_niches_glm_proseg.qmd` — niche × fine cell-type enrichment via
-  binomial / quasibinomial GLM. Produces e.g.
-  `niche_fine_cell_type_umap_binomial_enrichment.tsv` and
-  `niche_fine_cell_type_umap_quasibinomial_enrichment.tsv`.
-- `banksy_niches_by_histology_proseg.qmd` — histology-stratified niche
-  analysis (each niche modeled independently).
-- **Helpers used**: `helpers/test_enrichment.R`,
-  `helpers/pathology_mixed_models.R`.
+- `celltype_niche_histology_enrichment.qmd` — **current** cell-type × histology and
+  niche × histology enrichment via the unified beta-binomial engine
+  (`fit_feature_histology_set`, one-vs-rest, no random intercept), plus per-sample
+  composition bars. Writes `celltype_histology_enrichment.tsv`,
+  `niche_histology_enrichment.tsv`. Report logOR + CI (q is ranking-only,
+  anti-conservative at n=2–4). This replaces the earlier Wilcoxon approach.
+- `niche_interpretation_proseg.qmd` — the **niche "dictionary"**: per-niche
+  neighborhood cell-type composition (self + kNN neighbors pooled), enrichment vs
+  cohort, pathology top-region, enriched histology, and a sample-private
+  (candidate-tumor-niche) flag → `niche_dictionary.tsv`.
+- `banksy_niches_glm_proseg.qmd`, `banksy_niches_by_histology_proseg.qmd` — older
+  GLM / histology-stratified niche analyses (superseded by the two above for the
+  final object; kept for reference).
+- **Helpers used**: `helpers/enrichment_models.R`, `helpers/cell_type_display.R`,
+  `helpers/test_enrichment.R`.
 - **Run**:
   ```bash
   conda activate spatial
@@ -303,10 +321,13 @@ independently.
   proportions.
 - `annotations/linear_models_sample_level.qmd` — sample-level variant
   (sample as the observation).
-- **Helpers used**: `helpers/pathology_mixed_models.R`
+- **Helpers used**: `helpers/enrichment_models.R`
   (`build_feature_count_dt`, `fit_feature_betabinom`, `fit_feature_set`,
   `summarize_results_for_plot`); `helpers/test_enrichment.R` for the
-  pairwise enrichment fallbacks.
+  pairwise enrichment fallbacks. **CN reference region = `unannotated`** (the
+  former `Neuropil zone` ref was tiny/noisy; `unannotated` matches PA/GG and is
+  large in both CN samples). Cell-type is taken from the object's own
+  `cell_type_<clust>` marker call, not the old res1 annotation TSV.
 - **Outputs**: `annotations/cln_associations.csv`,
   `annotations/pa_associations.csv`, and rendered HTML reports.
 - **Run**:
