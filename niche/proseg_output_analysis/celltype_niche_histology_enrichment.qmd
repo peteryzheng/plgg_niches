@@ -1,0 +1,351 @@
+---
+title: "Cell-type and Niche-type Enrichment by Tumor Histology"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 13
+        fig-height: 5.5
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+engine: knitr
+knitr:
+    opts_chunk:
+        results: hold
+        R.options:
+            width: 120
+---
+
+# Introduction
+
+Which BANKSY cell types and niche types are enriched or depleted across
+tumor histology, on the final res_ct=0.2/res_ni=0.5 annotated object (see
+`XENIUM_RUNBOOK.md` §2a/§2b-2 for how that object was produced). Three
+tests, in order:
+
+1. Cell-type proportion vs. histology.
+2. Niche-type proportion vs. histology.
+3. Niche *composition* (which cell types make up each niche) vs. histology.
+
+Tests 1 and 2 use a **unified beta-binomial one-vs-rest model** (the same engine
+as the pathology analyses; `helpers/enrichment_models.R`), replacing the
+earlier Wilcoxon-on-proportions. No sample random intercept: histology is one
+value per sample, so the beta-binomial overdispersion carries the sample-level
+variance (adding `(1|sample_id)` would be unidentifiable). Test 3 is a separate,
+within-sample niche↔cell-type association (Fisher + Fisher's method) and is left
+as-is.
+
+**This cohort has only 11 samples across 4 histology groups** (central
+neurocytoma n=2, ganglioglioma n=2, cerebellar liponeurocytoma n=3,
+pilocytic astrocytoma n=4). Read the **effect size (`estimate_log_odds`) and its
+95% CI** as the headline; `q_value` is for **ranking only** and is
+*anti-conservative* at these group sizes -- with 2-4 samples the CI leans on a
+single shared dispersion pooled across all samples, so n=2 groups (CN, GG) can
+show q~1e-27 with intervals tighter than 2 tumors truly justify. The **direction**
+of a call is trustworthy and describes this cohort faithfully; the extreme q
+magnitude does not generalize to the disease. Each call is worth a glance at
+`n_samples` (how many samples drove it) and the per-sample composition bars above.
+
+```{r}
+#| echo: FALSE
+#| output: false
+library(data.table)
+library(ggplot2)
+library(SpatialExperiment)
+library(SummarizedExperiment)
+library(metap)
+library(pals)   # polychrome()/alphabet() categorical palettes for the composition bars
+
+# Path resolution per AGENTS.md so this notebook works across mac/cluster mounts.
+home <- Sys.getenv("HOME")
+if (home %in% c("/Users/youyun", "/Users/youyunzheng")) {
+    workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+} else if (home == "/PHShome/yz762") {
+    workdir <- "/data/beroukhim1/"
+} else if (home == "/home/yz762") {
+    workdir <- "/mnt/storage/dept/medonc/beroukhim/"
+} else {
+    workdir <- "/xchip/beroukhimlab/"
+}
+source(paste0(workdir, "youyun/plgg/code/helpers/test_enrichment.R"))
+# lineage_display: snake_case cell-type key -> human-readable label, applied at
+# plot time only (keeps the canonical marker_panel keys stable everywhere else).
+source(paste0(workdir, "youyun/plgg/code/helpers/cell_type_display.R"))
+# unified beta-binomial enrichment engine (build_feature_count_dt,
+# fit_feature_histology_set) -- replaces the old Wilcoxon histology tests.
+source(paste0(workdir, "youyun/plgg/code/helpers/enrichment_models.R"))
+```
+
+# Load data
+
+```{r}
+outputdir = paste0(workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kct_50_resct_0.5,1_kni_50_resni_0.5,1")
+rds = paste0(outputdir, "/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134.rds")
+banksy_spe = readRDS(rds)
+
+# cell_type: this object's own automated marker-AUC call (score_lineages_top_gene(),
+# min_gene_auc=0.55, includes "undetermined") -- not the older manually curated
+# banksy_proseg_cell_cluster_annotation.tsv table, which was never regenerated
+# at this resolution and would duplicate work already validated this session.
+# niche_type: the raw niche cluster ID -- niches aren't given marker-based labels
+# anywhere in this pipeline, so the numbered cluster IS the "niche type".
+cd = as.data.table(colData(banksy_spe))
+cd[, cell_type := cell_type_clust_Harmony_BANKSY_lam0.2_k50_res0.2]
+cd[, niche_type := as.character(clust_Harmony_BANKSY_lam0.8_k50_res0.5)]
+
+sample_histology = unique(cd[, .(sample_id, histology)])
+print(sample_histology[order(histology)])
+```
+
+# Raw composition per sample
+
+Before the statistical tests: what does each sample actually look like? These
+stacked bars show the raw proportion of every cell type (and every niche type)
+per sample, each bar summing to 1, faceted by histology so the four groups are
+visually separated. There's no modeling here -- it's the underlying composition
+the enrichment tests below are run on, so read these first to sanity-check what
+drives any "enriched"/"depleted" call.
+
+```{r}
+#| fig-height: 5.4
+# Work on a copy so setting factor orders for plotting doesn't affect the
+# enrichment sections below, which recompute proportions from `cd`.
+comp_dt = copy(cd)
+# sample_id is stored numeric in this object (e.g. 53398, 241670) -- coerce to a
+# factor so the bar x-axis is categorical (one discrete slot per sample) rather
+# than a continuous scale, which would place all 11 bars on a ~40k-330k axis and
+# collapse each to an invisible sliver under width = 0.5.
+comp_dt[, sample_id := factor(sample_id)]
+
+# Stacking / legend order: most abundant cell type at the bottom, "undetermined"
+# last so the "no confident call" bucket doesn't sit among the real lineages.
+ct_levels = comp_dt[, .N, by = cell_type][order(-N)]$cell_type
+ct_levels = c(setdiff(ct_levels, "undetermined"), "undetermined")
+comp_dt[, cell_type := factor(cell_type, levels = ct_levels)]
+# Niches ordered numerically so the legend reads 1..N, not string-sorted (1,10,11,...).
+niche_levels = as.character(sort(as.integer(unique(comp_dt$niche_type))))
+comp_dt[, niche_type := factor(niche_type, levels = niche_levels)]
+# Histology facet order: small-n groups first, matching the enrichment panels.
+hist_levels = c("central neurocytoma", "ganglioglioma",
+                "cerebellar liponeurocytoma", "pilocytic astrocytoma")
+comp_dt[, histology := factor(histology, levels = hist_levels)]
+
+# Palettes keyed to those levels (pals::alphabet for cell types, polychrome for
+# niches -- same families as banksy_niches_by_histology_proseg.qmd). "undetermined"
+# is forced grey so it reads as "unlabeled" rather than a distinct lineage.
+cell_type_color_manual = setNames(pals::alphabet()[seq_along(ct_levels)], ct_levels)
+cell_type_color_manual["undetermined"] = "grey75"
+niche_color_manual = setNames(pals::polychrome()[seq_along(niche_levels)], niche_levels)
+
+# Shared bar builder. facet_grid(space="free_x") keeps bar width constant across
+# panels (facet_wrap would stretch a 2-sample panel to a 4-sample panel's width);
+# label_wrap_gen wraps long histology names so narrow panels don't truncate their
+# titles; the c(0, 0.02) lower expansion lets bars sit flush on the x axis.
+composition_bar = function(fill_col, palette, fill_labels, legend_title, title_text) {
+    ggplot(comp_dt, aes(x = sample_id, fill = .data[[fill_col]])) +
+        geom_bar(position = "fill", width = 0.5) +
+        facet_grid(cols = vars(histology), scales = "free_x", space = "free_x",
+                   labeller = label_wrap_gen(width = 14)) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.02))) +
+        scale_fill_manual(values = palette, labels = fill_labels, name = legend_title) +
+        labs(title = title_text, x = NULL, y = "Proportion of cells") +
+        theme_classic(base_size = 13) +
+        theme(
+            axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+            strip.background = element_rect(fill = "grey95", color = "grey80", linewidth = 0.3),
+            strip.text = element_text(face = "bold", size = 9.5, margin = margin(4, 2, 4, 2)),
+            strip.clip = "off",
+            panel.spacing.x = unit(0.7, "lines"),
+            plot.title = element_text(face = "bold", size = 15)
+        )
+}
+
+composition_bar("cell_type", cell_type_color_manual, lineage_display, "Cell type",
+                "Cell-type composition per sample")
+```
+
+```{r}
+#| fig-height: 5.6
+composition_bar("niche_type", niche_color_manual, ggplot2::waiver(), "Niche type",
+                "Niche-type composition per sample")
+```
+
+# Cell-type enrichment by histology
+
+Unified **beta-binomial** one-vs-rest test (`fit_feature_histology_set` in
+`helpers/enrichment_models.R`): for each (cell type, histology) we fit
+`cbind(k, n-k) ~ is_histology` on the per-sample counts (k = that cell type's
+cells in a sample, n = total cells in the sample). **No random intercept** --
+histology is one value per sample, so a sample RI is unidentifiable; the
+beta-binomial overdispersion carries the sample-level variance. This replaces
+the earlier Wilcoxon-on-proportions test, unifying with the pathology models.
+
+**Read the effect size, not the q-value.** logOR + 95% CI is the headline; q is
+for ranking only and is *anti-conservative* at small n -- with 2-4 samples per
+histology, the CI leans on a single shared dispersion pooled across all samples,
+so n=2 groups (CN, GG) can show q~1e-27 with CIs that are tighter than 2 tumors
+can truly justify. The direction generalizes; the tight magnitude/certainty does
+not. See the per-sample composition bars above for the raw evidence.
+
+```{r}
+# per-sample counts: one row per (sample, cell type), k / n from build_feature_count_dt
+celltype_counts = build_feature_count_dt(
+    cd, feature_col = "cell_type",
+    observation_col = "sample_id", region_col = "histology", extra_cols = "histology"
+)
+celltype_histology_enrichment = fit_feature_histology_set(celltype_counts)
+setnames(celltype_histology_enrichment, "feature", "cell_type")
+fwrite(celltype_histology_enrichment, paste0(workdir, "youyun/plgg/code/niche/proseg_output_analysis/celltype_histology_enrichment.tsv"), sep = "\t")
+print(celltype_histology_enrichment[order(q_value)][, .(cell_type, histology, n_samples,
+    estimate_log_odds = round(estimate_log_odds, 2), q_value = signif(q_value, 2), sign_call)])
+```
+
+# Niche-type enrichment by histology
+
+Same unified beta-binomial one-vs-rest test, on niche-cluster counts instead of
+cell-type counts. Rare / near-empty niches (e.g. 15, 17, 19) hit separation at
+these small group sizes and come back as degenerate models (huge |logOR|, flagged
+`model_status != "pass"`) -- the forest below caps the axis and draws them as
+arrows so they're not mistaken for null.
+
+```{r}
+niche_counts = build_feature_count_dt(
+    cd, feature_col = "niche_type",
+    observation_col = "sample_id", region_col = "histology", extra_cols = "histology"
+)
+niche_histology_enrichment = fit_feature_histology_set(niche_counts)
+setnames(niche_histology_enrichment, "feature", "niche_type")
+fwrite(niche_histology_enrichment, paste0(workdir, "youyun/plgg/code/niche/proseg_output_analysis/niche_histology_enrichment.tsv"), sep = "\t")
+print(niche_histology_enrichment[order(q_value)][, .(niche_type, histology, n_samples,
+    estimate_log_odds = round(estimate_log_odds, 2), q_value = signif(q_value, 2), sign_call, model_status)])
+```
+
+# Niche composition (cell-type makeup within each niche) by histology
+
+Does which cell types make up a given niche change by histology? Per-sample
+Fisher's exact test between `niche_type` and `cell_type`
+(`pairwise_categorical_enrichment_test`), then p-values from samples of the
+*same* histology combined via `metap::sumlog` (Fisher's method) when >=2
+valid p-values exist, BY-adjusted (matches
+`banksy_niches_by_histology_proseg.qmd`'s existing block exactly, re-pointed
+at the new object). Note: `metap::sumlog` drops p==0 values, which can bias
+the combined p slightly upward for very strong per-sample associations --
+same caveat the source notebook already carries.
+
+```{r}
+self_cell_type_niche_enrichment_per_sample = do.call('rbind', mapply(
+    function(x, y) {
+        pairwise_categorical_enrichment_test(
+            cd[sample_id == x]$niche_type, cd[sample_id == x]$cell_type
+        )[, c('sample_id', 'histology') := list(x, y)]
+    },
+    sample_histology$sample_id, sample_histology$histology, SIMPLIFY = FALSE
+))
+
+niche_composition_histology_enrichment = self_cell_type_niche_enrichment_per_sample[
+    , .(
+        N_var1 = mean(N_var1), N_var2 = mean(N_var2),
+        N_var1var2 = mean(N_var1var2 / N_var1), odds_ratios = mean(odds_ratios),
+        p_value = ifelse(sum((p_value > 0) & (p_value <= 1)) >= 2, metap::sumlog(p_value)$p, p_value)
+    ), .(var1, var2, histology)
+][, q_value := p.adjust(p_value, method = 'BY')]
+setnames(niche_composition_histology_enrichment, c('var1', 'var2'), c('niche_type', 'cell_type'))
+fwrite(niche_composition_histology_enrichment, paste0(workdir, "youyun/plgg/code/niche/proseg_output_analysis/niche_composition_histology_enrichment.tsv"), sep = "\t")
+print(niche_composition_histology_enrichment[order(q_value)][1:15])
+```
+
+# Visualization
+
+Forest plot: point = beta-binomial one-vs-rest **log-odds** (histology vs rest),
+whisker = 95% CI (`estimate ± 1.96·SE`), color = direction only when
+`q_value < 0.25` (red = enriched, blue = depleted, grey = not significant / not
+`pass`). The x-axis is capped at ±6 with sideways arrows for models that overflow
+(separation / near-empty niches), so a few degenerate fits don't blow out the
+scale. Facet labels carry the per-histology sample count `n`.
+
+**Effect size is the headline, q is for ranking only.** As discussed above, the
+q-values are anti-conservative at small n -- the direction of each colored call
+is trustworthy and the logOR/CI describe the cohort faithfully, but the extreme
+q magnitudes (n=2 groups can reach ~1e-27) lean on a shared-dispersion assumption
+and should not be read as population-level certainty. Ranking calls by q within
+the cohort is fine; treating q=1e-27 as "27× more certain" than q=1e-5 is not.
+
+```{r}
+#| fig-height: 5.2
+# Forest plot for the unified beta-binomial histology results. Effect size
+# (estimate_log_odds) is the headline; q_cutoff colors direction only. cap
+# bounds the x-axis so separation/near-empty models (huge |logOR|) don't blow
+# out the scale -- overflow points are drawn as sideways arrows. q is NOT
+# printed on the plot (anti-conservative at small n; see section intro).
+plot_enrichment_forest = function(dt, feature_col, title_text, q_cutoff = 0.25,
+                                  feature_labels = ggplot2::waiver(), cap = 6) {
+    dt = copy(dt)
+    dt = dt[!is.na(estimate_log_odds)]
+    # direction requires a converged (pass) model AND q under the cutoff
+    dt[, direction := fifelse(model_status == "pass" & q_value < q_cutoff & estimate_log_odds > 0, "Enriched",
+                        fifelse(model_status == "pass" & q_value < q_cutoff & estimate_log_odds < 0, "Depleted", "Not significant"))]
+    dt[, direction := factor(direction, levels = c("Enriched", "Not significant", "Depleted"))]
+    dt[, hist_label := paste0(histology, " (n=", n_samples, ")")]
+    # cap the estimate + CI for display; overflow points become arrows
+    dt[, est_cap := pmax(pmin(estimate_log_odds, cap), -cap)]
+    dt[, lo_cap := pmax(pmin(ci_low, cap), -cap)]
+    dt[, hi_cap := pmax(pmin(ci_high, cap), -cap)]
+    dt[, shape_code := fifelse(abs(estimate_log_odds) <= cap, "point",
+                         fifelse(estimate_log_odds > cap, "hi", "lo"))]
+    # order features by largest capped |effect| so the strongest sit at the top
+    feature_order = dt[, .(m = max(pmin(abs(estimate_log_odds), cap), na.rm = TRUE)), by = feature_col][order(m)][[feature_col]]
+    dt[[feature_col]] = factor(dt[[feature_col]], levels = feature_order)
+
+    dir_colors = c(Enriched = "#B2182B", `Not significant` = "grey65", Depleted = "#2166AC")
+    ggplot(dt, aes(x = est_cap, y = .data[[feature_col]], color = direction)) +
+        geom_vline(xintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.4) +
+        geom_errorbar(aes(xmin = lo_cap, xmax = hi_cap, linewidth = direction != "Not significant"),
+                      orientation = "y", width = 0) +
+        geom_point(aes(shape = shape_code, size = direction != "Not significant")) +
+        facet_wrap(~ hist_label, nrow = 1) +
+        coord_cartesian(xlim = c(-cap, cap)) +
+        scale_shape_manual(values = c(point = 16, hi = 62, lo = 60), guide = "none") +  # 62='>' 60='<'
+        scale_color_manual(values = dir_colors, name = NULL,
+                            guide = guide_legend(override.aes = list(linewidth = 1.2, size = 3))) +
+        scale_linewidth_manual(values = c(`TRUE` = 0.9, `FALSE` = 0.5), guide = "none") +
+        scale_size_manual(values = c(`TRUE` = 2.6, `FALSE` = 1.8), guide = "none") +
+        # cell-type panel: relabel keys -> display names via feature_labels;
+        # niche panel passes waiver() so numeric niche IDs stay as-is
+        scale_y_discrete(labels = feature_labels) +
+        labs(
+            title = title_text,
+            subtitle = paste0("Beta-binomial one-vs-rest log-odds (95% CI; x capped at ±", cap,
+                              ", arrows = overflow). Colored at q < ", q_cutoff, " (ranking only)."),
+            x = "Log-odds (histology − rest)", y = NULL
+        ) +
+        theme_classic(base_size = 13) +
+        theme(
+            panel.grid.major.x = element_line(color = "grey92", linewidth = 0.3),
+            strip.background = element_rect(fill = "grey95", color = "grey80", linewidth = 0.3),
+            strip.text = element_text(face = "bold", size = 10.5),
+            axis.line = element_line(color = "black", linewidth = 0.35),
+            axis.ticks = element_line(color = "black", linewidth = 0.35),
+            axis.text.y = element_text(size = 10),
+            axis.text.x = element_text(angle = 30, hjust = 1),
+            panel.spacing.x = unit(0.9, "lines"),
+            axis.title.x = element_text(size = 11, margin = margin(t = 8)),
+            plot.title = element_text(face = "bold", size = 15, margin = margin(b = 2)),
+            plot.subtitle = element_text(color = "grey30", size = 10.5, margin = margin(b = 10)),
+            legend.position = "bottom",
+            legend.text = element_text(size = 10),
+            legend.margin = margin(t = -4),
+            plot.margin = margin(10, 14, 10, 10)
+        )
+}
+
+plot_enrichment_forest(celltype_histology_enrichment, "cell_type", "Cell-type enrichment by tumor histology", feature_labels = lineage_display)
+```
+
+```{r}
+#| fig-height: 6.5
+plot_enrichment_forest(niche_histology_enrichment, "niche_type", "Niche-type enrichment by tumor histology")
+```
