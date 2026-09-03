@@ -115,19 +115,25 @@ pairwise_categorical_continuous_enrichment_wilcox_test = function(dcast_df, num_
                 !all(is.na(vec_y_x)) && !all(is.na(vec_y_not_x)) &&
                 length(unique(na.omit(vec_y_x))) > 1 && length(unique(na.omit(vec_y_not_x))) > 1
             ){
+                # conf.int is already computed by wilcox.test() below; return
+                # it too (ci_low/ci_high) instead of discarding it, since a
+                # forest-plot-style view of these results needs the interval,
+                # not just the point estimate/p-value.
                 wilcox_test_var = wilcox.test(vec_y_x, vec_y_not_x, conf.int = TRUE)
                 return(c(
                     categorical_col = as.character(x), continuous_cols = as.character(y),
                     N_var1 = sum(dcast_df[[categorical_col]] == x), N_var2 = mean(vec_y_x),
                     N_var1var2 = sum(dcast_df[[categorical_col]] == x) * mean(vec_y_x),
                     p_value = wilcox_test_var$p.value,
-                    delta = mean(vec_y_x) - mean(vec_y_not_x)
+                    delta = mean(vec_y_x) - mean(vec_y_not_x),
+                    ci_low = wilcox_test_var$conf.int[1],
+                    ci_high = wilcox_test_var$conf.int[2]
                 ))
             }else{
                 return(c(
                     categorical_col = as.character(x), continuous_cols = as.character(y),
                     N_var1 = NA, N_var2 = NA, N_var1var2 = NA,
-                    p_value = NA, delta = NA
+                    p_value = NA, delta = NA, ci_low = NA, ci_high = NA
                 ))
             }
         }, grid_df$categorical_col, grid_df$continuous_col,
@@ -135,10 +141,10 @@ pairwise_categorical_continuous_enrichment_wilcox_test = function(dcast_df, num_
         mc.cores = num_cores
     )))[
         , c(
-            'N_var1','N_var2','N_var1var2','p_value','delta','q_value'
+            'N_var1','N_var2','N_var1var2','p_value','delta','ci_low','ci_high','q_value'
         ) := list(
-            as.numeric(N_var1), as.numeric(N_var2), as.numeric(N_var1var2), 
-            as.numeric(p_value), as.numeric(delta), 
+            as.numeric(N_var1), as.numeric(N_var2), as.numeric(N_var1var2),
+            as.numeric(p_value), as.numeric(delta), as.numeric(ci_low), as.numeric(ci_high),
             p.adjust(as.numeric(p_value), method = padj_method)
         )
     ]

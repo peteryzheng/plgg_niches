@@ -11,7 +11,11 @@ niche/banksy_workflow/logs/*
 */*/*in_space_proseg.html
 *.zip
 # large derived data files -- regenerate from the notebooks
+sc_integration/ENVI/2_spatial_imputation/PA/MAPK_overlap_scores.csv
 sc_integration/ENVI/2_spatial_imputation/PA/myeloid_signature_scores.csv
 sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure.tsv
-sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure_parta_results.tsv
-sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure_partb_results.tsv
+# Q1/Q2 result tables -- regenerate on render of 2_MAPK_adj.qmd
+sc_integration/ENVI/2_spatial_imputation/PA/mapk_by_niche_summary.tsv
+sc_integration/ENVI/2_spatial_imputation/PA/mapk_patient_cell_type_significance.tsv
+sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure_nested_results.tsv
+sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure_covariate_results.tsv

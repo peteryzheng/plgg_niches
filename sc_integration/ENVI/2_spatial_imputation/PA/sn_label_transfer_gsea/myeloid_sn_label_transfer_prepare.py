@@ -99,7 +99,7 @@ def make_coembedding_plot(
     sp_norm = sp_series.str.strip()
 
     # Panel 1: SN latent with original source labels.
-    sn_other_mask = ~sn_original_norm.isin(SN_MYELOID_SOURCE_LABELS_NORM).to_numpy()
+    sn_other_mask = ~sn_original_norm.isin(SN_MYELOID_SOURCE_LABELS_NORM).fillna(False).to_numpy(dtype=bool)
     if np.any(sn_other_mask):
         axes[0].scatter(
             sn_latent_all[sn_other_mask, 0],
@@ -111,7 +111,7 @@ def make_coembedding_plot(
             linewidths=0,
         )
     for label in SN_MYELOID_SOURCE_LABELS:
-        mask = (sn_original_norm == label.lower()).to_numpy()
+        mask = (sn_original_norm == label.lower()).fillna(False).to_numpy(dtype=bool)
         if np.any(mask):
             axes[0].scatter(
                 sn_latent_all[mask, 0],
@@ -159,7 +159,7 @@ def make_coembedding_plot(
     axes[1].legend(loc="upper right", fontsize=8)
 
     # Panel 3: Spatial latent with original Myeloid 1/2 labels.
-    sp_target_mask = sp_norm.isin(TARGET_GROUPS).fillna(False).to_numpy()
+    sp_target_mask = sp_norm.isin(TARGET_GROUPS).fillna(False).to_numpy(dtype=bool)
     sp_other_mask = ~sp_target_mask
     if np.any(sp_other_mask):
         axes[2].scatter(
@@ -172,7 +172,7 @@ def make_coembedding_plot(
             linewidths=0,
         )
     for group in TARGET_GROUPS:
-        mask = (sp_norm == group).fillna(False).to_numpy()
+        mask = (sp_norm == group).fillna(False).to_numpy(dtype=bool)
         if np.any(mask):
             axes[2].scatter(
                 sp_latent_all[mask, 0],
@@ -246,7 +246,7 @@ def summarize_sample(sample_id: str, sn_path: str, spatial_path: str, output_dir
 
         sp_group = sp_adata.obs["Fine.Cell.Type.UMAP"].astype("string")
         sp_latent_all = np.asarray(sp_adata.obsm["latent_umap"])[:, :2]
-        sp_mask = sp_group.isin(TARGET_GROUPS).fillna(False).to_numpy()
+        sp_mask = sp_group.isin(TARGET_GROUPS).fillna(False).to_numpy(dtype=bool)
         sp_labels = sp_group[sp_mask].astype(str).to_numpy()
         sp_latent = sp_latent_all[sp_mask, :]
 
@@ -255,7 +255,7 @@ def summarize_sample(sample_id: str, sn_path: str, spatial_path: str, output_dir
 
         sn_annot = sn_adata.obs["annot_v1"].astype("string")
         sn_annot_norm = sn_annot.str.strip().str.lower()
-        sn_mask = sn_annot_norm.isin(SN_MYELOID_SOURCE_LABELS_NORM).fillna(False).to_numpy()
+        sn_mask = sn_annot_norm.isin(SN_MYELOID_SOURCE_LABELS_NORM).fillna(False).to_numpy(dtype=bool)
         sn_idx = np.where(sn_mask)[0]
         if sn_idx.size == 0:
             raise ValueError(

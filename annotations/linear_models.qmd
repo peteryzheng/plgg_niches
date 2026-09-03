@@ -80,7 +80,7 @@ if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
 }
 
 source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
-source(paste0(workdir,'/youyun/plgg/code/helpers/pathology_mixed_models.R'))
+source(paste0(workdir,'/youyun/plgg/code/helpers/enrichment_models.R'))
 ```
 
 
@@ -100,11 +100,11 @@ Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xeniu
 ```{r}
 banksy_subset_rds_path = file.path(
     workdir, "youyun/plgg/data/Xenium_annotations",
-    "banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_subset.rds"
 )
 banksy_full_rds_path = file.path(
     workdir, "youyun/plgg/data/Xenium_annotations",
-    "banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds"
 )
 banksy_rds_path = if (grepl('mount',workdir)) banksy_subset_rds_path else banksy_full_rds_path
 
@@ -156,16 +156,16 @@ colData(banksy_embeddings)$observation_id = build_observation_id(
     pathology_annotation = colData(banksy_embeddings)$pathology_annotation
 )
 
-# Load the cell type clusters annotation
-prelim_annotation_res1 = fread(paste0(
-    workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
-))
-
-# specify the cluster names 
-# this is mainly to keep track of which resolution we are using
-cell_res = 1
+# cluster names for the final object (res_ct=0.2 / res_ni=0.5). Cell type comes
+# from the object's OWN automated marker-AUC call (`cell_type_<clust>`), NOT the
+# old res1 banksy_proseg_cell_cluster_annotation.tsv (its cluster numbering was
+# for a different resolution and would mis-map onto these clusters) -- mirrors
+# celltype_niche_histology_enrichment.qmd. lineage_display gives pretty labels.
+source(paste0(workdir, "youyun/plgg/code/helpers/cell_type_display.R"))
+cell_res = 0.2
 cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
-niche_res = 1
+cell_type_col = paste0('cell_type_', cell_clust_name)
+niche_res = 0.5
 niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
 
 # # filter the banksy object to only include the cells with annotated cell types
@@ -183,16 +183,11 @@ niche_color_manual = structure(
     pals::polychrome()[c(1:length(cluster_classes))],
     names = sample(cluster_classes)
 )
-# for niche resolution 0.5
-# niches_to_show = c(1:11, 13, 14, 16, 17)
-# for niche resolution 1
-niches_to_show = c(1:20, 22:25)
+# show whatever niches the final object actually has (res_ni=0.5)
+niches_to_show = cluster_classes
 
-cell_type_to_test = 'Coarse Cell Type'
-# cell_type_to_test = 'Fine Cell Type'
-# cell_type_to_test = 'Fine Cell Type UMAP'
-
-cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
+# cell type classes = the object's own lineage calls (astro_glial, radial_glia, ...)
+cell_type_class = sort(unique(as.character(colData(banksy_embeddings)[[cell_type_col]])))
 cell_type_color_manual = structure(
     pals::alphabet()[c(1:length(cell_type_class))],
     names = cell_type_class
@@ -262,14 +257,15 @@ First we will clean up the data. Then we will calculate the proportion of each c
 
 ```{r}
 sparsity_threshold = 0.0025
-modeling_data_ct = as.data.table(merge(
-    colData(banksy_embeddings)[
-        c('cell_id','sample_id', 'histology','alteration', cell_clust_name, 'pathology_annotation', 'region_id', 'observation_id')
-    ], prelim_annotation_res1[, .(cluster, cell_type = get(cell_type_to_test))],
-    by.x = cell_clust_name, by.y = 'cluster', all.x = TRUE
-))[, `:=`(
+# cell_type = the object's own marker-AUC lineage call (cell_type_col), not a
+# join against the old res1 annotation TSV (cluster numbering would mis-map).
+modeling_data_ct = as.data.table(colData(banksy_embeddings)[
+    c('cell_id','sample_id', 'histology','alteration', cell_type_col, 'pathology_annotation', 'region_id', 'observation_id')
+])
+setnames(modeling_data_ct, cell_type_col, 'cell_type')
+modeling_data_ct[, `:=`(
     cell_id = paste0(cell_id, '__', sample_id),
-    cell_type = fifelse(is.na(cell_type), 'Other', cell_type),
+    cell_type = fifelse(is.na(cell_type), 'Other', as.character(cell_type)),
     pathology_annotation = relevel(factor(pathology_annotation), ref = "unannotated"),
     region_id = as.character(region_id),
     observation_id = as.character(observation_id)
@@ -408,7 +404,7 @@ We now use a unified count-based beta-binomial mixed-effects pipeline with expli
 ```{r}
 pathology_rules = data.table(
     analysis_id = c("PA", "CLN", "CN", "GG"),
-    ref_region = c("unannotated", "Cerebellum, molecular layer", "Neuropil zone", "unannotated"),
+    ref_region = c("unannotated", "Cerebellum, molecular layer", "unannotated", "unannotated"),
     histology_regex = c("pilo", NA_character_, "central", NA_character_),
     pathology_exclude_regex = c("dominant", NA_character_, "Lipid", NA_character_),
     pathology_include_regex = c(NA_character_, NA_character_, NA_character_, NA_character_)

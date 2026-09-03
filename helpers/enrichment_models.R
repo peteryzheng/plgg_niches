@@ -78,7 +78,7 @@ build_feature_count_dt = function(
     return(out_dt[])
 }
 
-classify_model_status = function(fit_obj, warning_log, coef_dt) {
+classify_model_status = function(fit_obj, warning_log, coef_dt, expect_random_effect = TRUE) {
     reason_codes = c()
     fatal_reasons = c()
     random_effect_sd = NA_real_
@@ -113,21 +113,26 @@ classify_model_status = function(fit_obj, warning_log, coef_dt) {
         fatal_reasons = c(fatal_reasons, "non_pd_hessian")
     }
 
-    random_effect_sd = tryCatch({
-        vc = glmmTMB::VarCorr(fit_obj)$cond
-        if (length(vc) == 0) {
-            NA_real_
-        } else {
-            first_group = vc[[1]]
-            sd_vec = attr(first_group, "stddev")
-            if (is.null(sd_vec) || length(sd_vec) == 0) NA_real_ else as.numeric(sd_vec[1])
-        }
-    }, error = function(e) NA_real_)
+    # Only assess the random-effect SD when a random intercept was actually fit.
+    # For between-sample groupings (histology) we deliberately omit the RI, so a
+    # missing/near-zero RE SD is expected, not a defect -- don't flag it.
+    if (expect_random_effect) {
+        random_effect_sd = tryCatch({
+            vc = glmmTMB::VarCorr(fit_obj)$cond
+            if (length(vc) == 0) {
+                NA_real_
+            } else {
+                first_group = vc[[1]]
+                sd_vec = attr(first_group, "stddev")
+                if (is.null(sd_vec) || length(sd_vec) == 0) NA_real_ else as.numeric(sd_vec[1])
+            }
+        }, error = function(e) NA_real_)
 
-    if (is.na(random_effect_sd)) {
-        reason_codes = c(reason_codes, "random_effect_sd_na")
-    } else if (random_effect_sd < 1e-6) {
-        reason_codes = c(reason_codes, "near_zero_random_effect_sd")
+        if (is.na(random_effect_sd)) {
+            reason_codes = c(reason_codes, "random_effect_sd_na")
+        } else if (random_effect_sd < 1e-6) {
+            reason_codes = c(reason_codes, "near_zero_random_effect_sd")
+        }
     }
 
     if (length(warning_log) > 0) {
@@ -175,7 +180,9 @@ fit_feature_betabinom = function(
     feature_name,
     ref_region,
     sample_col = "sample_id",
-    region_col = "pathology_annotation"
+    region_col = "pathology_annotation",
+    fixed_effect_col = region_col,      # column supplying the fixed effect (region / histology / indicator)
+    random_effect_col = sample_col      # grouping for (1 | .); NULL omits the random intercept entirely
 ) {
     if (!requireNamespace("glmmTMB", quietly = TRUE)) {
         stop("The glmmTMB package is required for beta-binomial mixed effects models.")
@@ -199,14 +206,22 @@ fit_feature_betabinom = function(
         ))
     }
 
+    # Fixed effect is always carried internally as `pathology_annotation` so the
+    # formula and term-stripping below stay identical regardless of which source
+    # column supplies it (a real region, histology, or a binary indicator).
     model_dt = dt[
         , .(
             k = as.integer(k),
             n = as.integer(n),
-            sample_id = as.factor(get(sample_col)),
-            pathology_annotation = as.factor(get(region_col))
+            pathology_annotation = as.factor(get(fixed_effect_col))
         )
     ]
+    # Random-intercept grouping is optional: NULL drops the (1 | .) term (used for
+    # between-sample groupings like histology, one row per sample, where a sample
+    # RI is unidentifiable -- the beta-binomial dispersion carries that variance).
+    if (!is.null(random_effect_col)) {
+        model_dt[, sample_id := as.factor(dt[[random_effect_col]])]
+    }
 
     if (ref_region %in% levels(model_dt$pathology_annotation)) {
         model_dt[
@@ -214,10 +229,19 @@ fit_feature_betabinom = function(
         ]
     }
 
+    # Build the RHS dynamically; defaults reproduce the original literal
+    # `pathology_annotation + (1 | sample_id)` byte-for-byte (pathology unchanged).
+    formula_rhs = if (!is.null(random_effect_col)) {
+        "pathology_annotation + (1 | sample_id)"
+    } else {
+        "pathology_annotation"
+    }
+    model_formula = stats::as.formula(paste0("cbind(k, n - k) ~ ", formula_rhs))
+
     fit_obj = withCallingHandlers(
         tryCatch(
             glmmTMB::glmmTMB(
-                cbind(k, n - k) ~ pathology_annotation + (1 | sample_id),
+                model_formula,
                 data = model_dt,
                 family = glmmTMB::betabinomial(link = "logit")
             ),
@@ -305,7 +329,10 @@ fit_feature_betabinom = function(
         )
     ]
 
-    status_obj = classify_model_status(fit_obj, warning_log, coef_dt)
+    status_obj = classify_model_status(
+        fit_obj, warning_log, coef_dt,
+        expect_random_effect = !is.null(random_effect_col)
+    )
 
     return(list(
         coef_dt = coef_dt,
@@ -754,4 +781,67 @@ summarize_results_for_plot = function(results_dt, primary_only = TRUE) {
     }
 
     return(dt[])
+}
+
+
+# One-vs-rest histology enrichment via beta-binomial, WITHOUT a random intercept.
+# Histology is a between-sample grouping (each sample is exactly one histology,
+# one aggregate row per sample), so a sample random intercept is unidentifiable;
+# the beta-binomial overdispersion carries the sample-level variance instead.
+# For each (feature, histology) it fits cbind(k, n-k) ~ is_histology on the
+# per-sample counts (is_histology = this histology vs the rest). Returns the same
+# result schema the pathology path produces, so one forest-plot function serves
+# both. `count_dt` is the output of build_feature_count_dt() with
+# observation_col = "sample_id", region_col = "histology" (one row per sample x
+# feature, k = feature cells in the sample, n = total cells in the sample).
+fit_feature_histology_set = function(count_dt, sig_threshold = 0.25) {
+    dt = data.table::as.data.table(count_dt)
+    features = sort(unique(dt$feature))
+    histologies = sort(unique(dt$histology))
+    rows = list()
+    for (f in features) {
+        sub_f = dt[feature == f]
+        for (h in histologies) {
+            sub = data.table::copy(sub_f)
+            # binary indicator: this histology vs. the rest (reference = FALSE)
+            sub[, is_histology := factor(histology == h, levels = c(FALSE, TRUE))]
+            n_samples = sub[histology == h, data.table::uniqueN(sample_id)]
+            fit = fit_feature_betabinom(
+                count_dt = sub,
+                feature_name = f,
+                ref_region = "FALSE",
+                fixed_effect_col = "is_histology",
+                random_effect_col = NULL          # <- no RI (between-sample factor)
+            )
+            row = data.table::data.table(
+                feature = as.character(f), histology = as.character(h),
+                n_samples = as.integer(n_samples),
+                estimate_log_odds = NA_real_, se = NA_real_, p_value = NA_real_,
+                model_status = fit$model_status, status_reason = fit$status_reason,
+                warning_log = fit$warning_log, fit_error = fit$fit_error
+            )
+            if (nrow(fit$coef_dt) > 0) {
+                hit = fit$coef_dt[annotation_region == "TRUE"]
+                if (nrow(hit) == 1) {
+                    row[, `:=`(estimate_log_odds = hit$estimate_log_odds,
+                               se = hit$se, p_value = hit$p_value)]
+                }
+            }
+            rows[[length(rows) + 1L]] = row
+        }
+    }
+    res = data.table::rbindlist(rows, fill = TRUE)
+    # BH across all (feature, histology) tests in this modality, then call at q<0.25
+    res[, q_value := stats::p.adjust(p_value, method = "BH")]
+    res[, `:=`(ci_low = estimate_log_odds - 1.96 * se,
+               ci_high = estimate_log_odds + 1.96 * se)]
+    res[, sign_call := data.table::fifelse(
+        model_status == "pass" & !is.na(q_value) & q_value < sig_threshold & estimate_log_odds > 0,
+        "enriched",
+        data.table::fifelse(
+            model_status == "pass" & !is.na(q_value) & q_value < sig_threshold & estimate_log_odds < 0,
+            "depleted", "not_significant"
+        )
+    )]
+    return(res[])
 }
