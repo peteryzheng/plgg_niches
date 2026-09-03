@@ -1,5 +1,5 @@
 ---
-title: "Modeling of Cell Type Proportions with MAPK Activation"
+title: "Myeloid & MAPK programs across PA glial niches (Q1 + Q2)"
 author: "Peter Youyun Zheng"
 date: today
 date-format: long
@@ -14,7 +14,7 @@ format:
         embed-resources: true
 engine: knitr
 knitr:
-    opts_chunk: 
+    opts_chunk:
         results: hold
         R.options:
             width: 120
@@ -22,7 +22,34 @@ knitr:
 
 # Introduction
 
-Here we will be using linear models to test the association between cell types and MAPK activation. We previously generated imputed MAPK overlap geneset score on the xenium data.
+This notebook works on the finalized (res_ct = 0.2 / res_ni = 0.5) pathology-annotated
+BANKSY object, restricted to the 4 pilocytic astrocytoma (PA) samples. It covers:
+
+- **Q1 — how does MAPK differ between the two PA glial niches?** Within astrocytes and
+  OPCs (the PA tumor lineage) we compare MAPK across three groups — **niche 3 vs niche 5
+  vs everything else** — because the two PA glial niches behave oppositely, so lumping
+  them (or a single PA-niche-vs-rest contrast) masks the difference. (Testing niche-level
+  *mean* MAPK would be circular: glia are MAPK-high regardless of niche.)
+- **MAPK vs. neighbor composition (restored)** — as a focal astrocyte/OPC becomes more
+  MAPK-active, does the cell-type make-up of its local neighborhood change? The original
+  pooled weighted binomial GLM `neighbor_prop ~ MAPK_overlap_score + sample_id` (volcano),
+  plus a per-patient panel showing how consistent each shift is across the four drivers.
+- **Q2 — do myeloid gene programs shift with the glial neighborhood?** For each
+  myeloid cell we classify its glial neighborhood into
+  {near PA-niche glia / near other glia / no glial neighbor} and compare 56
+  myeloid programs across the three, then ask whether PA-niche proximity adds
+  anything beyond the glial cells' own MAPK dose. *(Model design under revision.)*
+
+All cell-type labels are shown through the finalized display vocabulary
+(`helpers/cell_type_display.R`): spatial snake_case via `lineage_display` and
+single-nucleus labels via `sn_lineage_display`, so the spatial and single-nucleus facets
+of the patient x cell-type heatmap share columns.
+
+It is **object-free**: every cell annotation (cell type, niche, sample, histology,
+alteration, x/y centroid) is read from the Phase-0 metadata TSV
+(`export_new_object_cell_metadata.R`), and the imputed scores from
+`MAPK_overlap_scores.csv` / `myeloid_signature_scores.csv` (Phase 1,
+`1_PA_MAPK_scores.qmd`). Nothing here re-loads the 5 GB BANKSY object.
 
 ```{r}
 #| echo: FALSE
@@ -30,133 +57,89 @@ Here we will be using linear models to test the association between cell types a
 library(data.table)
 library(ggplot2)
 library(knitr)
-
-library(Banksy)
-library(SummarizedExperiment)
-library(SpatialExperiment)
-library(scuttle)
-library(scater)
-library(cowplot)
-library(ggplot2)
-library(harmony)
-library(scran)
-library(Seurat)
 library(dbscan)
-library(circlize)
-library(Seurat)
-library(scales)
-library(htmlwidgets)
 library(ggrepel)
+library(scales)
+library(cowplot)
 library(rcartocolor)
+library(pals)       # polychrome() niche palette, keyed like celltype_niche_histology_enrichment.qmd
 
-
-# local vs remote
+# workdir resolves per-machine from HOME (argos = /mnt/storage/dept/medonc/beroukhim/)
 if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
-    # in a local mac, the home directory is usuaully at '/Users/[username]'
     workdir <- "~/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
-} else if (Sys.getenv("HOME") == "/PHShome/yz762"){
-    # in eristwo, the home directory is at /PHShome/yz762
+} else if (Sys.getenv("HOME") == "/PHShome/yz762") {
     workdir <- "/data/beroukhim1/"
-} else if (Sys.getenv("HOME") == "/home/yz762"){
-    # on the new server, the home directory is at /home/yz762
+} else if (Sys.getenv("HOME") == "/home/yz762") {
     workdir <- "/mnt/storage/dept/medonc/beroukhim/"
 } else {
-    # in dipg or uger, the home directory is '/home/unix/[username]'
     workdir <- "/xchip/beroukhimlab/"
 }
 
-source(paste0(workdir,'/youyun/plgg/code/helpers/test_enrichment.R'))
+# absolute path to this analysis dir (all output TSVs land here)
+out_dir = paste0(workdir, 'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/')
+
+# Finalized display-name lookups (spatial snake_case + single-nucleus labels -> the same
+# plotting vocabulary) so every figure shows finalized names AND the spatial vs
+# single-nucleus facets of the patient x cell-type heatmap share columns. Lightweight
+# source: cell_type_display.R has no library() calls. Provides lineage_display (spatial)
+# and sn_lineage_display (single-nucleus, force-aligned Lymphoid->T cells, Stromal->Endothelial).
+source(paste0(workdir, 'youyun/plgg/code/helpers/cell_type_display.R'))
+# disp(): spatial snake_case key -> display name; unknown keys (e.g. the sparsity-collapse
+# 'Other') pass through unchanged. disp_sn(): single-nucleus label -> same display vocabulary.
+disp    = function(x) ifelse(x %in% names(lineage_display),    unname(lineage_display[x]),    x)
+disp_sn = function(x) ifelse(x %in% names(sn_lineage_display), unname(sn_lineage_display[x]), x)
+
+# Shared figure theme, matching the polished per-patient neighbor-composition volcano:
+# light grey panels, faint major grid, bold blank-background facet strips. Applied to both
+# the volcano and the Q1 niche plots so the whole notebook reads consistently.
+ref_theme = theme_minimal(base_size = 13) +
+    theme(axis.text = element_text(size = 9, color = 'grey40'),
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(color = 'grey92', linewidth = 0.4),
+          panel.background = element_rect(fill = 'grey98', color = NA),
+          strip.text = element_text(face = 'bold', size = 11, color = 'grey15', lineheight = 1.15),
+          strip.background = element_blank(),
+          panel.spacing = unit(0.8, 'lines'),
+          plot.title = element_text(face = 'bold', size = 15, margin = margin(b = 3)),
+          plot.subtitle = element_text(color = 'grey40', size = 11, margin = margin(b = 10)),
+          legend.position = 'bottom', legend.text = element_text(size = 10))
 ```
 
-
-# Preperations
-
-## Loading the data
-
-The objects are here:
-
-RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
-
-    -   `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds`
-
-Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
-
+# Load metadata + imputed scores
 
 ```{r}
-# load the banksy embeddings
-banksy_embeddings <- readRDS(ifelse(
-    !Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng"), paste0(
-        workdir, "youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
-    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215_annotated.rds"
-))
-colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
+pa_ids = c('188570', '258482', '320784', '328368')   # the 4 PA samples; all analysis restricted here
+glial_types = c('astro_glial', 'opc', 'radial_glia')  # glial lineages, finalized lowercase labels
 
-# Load the cell type clusters annotation
-prelim_annotation_res1 = fread(paste0(
-    workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
-))
-
-# specify the cluster names 
-# this is mainly to keep track of which resolution we are using
-cell_res = 1
-cell_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.2_k50_res%.1f',cell_res))
-niche_res = 1
-niche_clust_name = gsub('.0$','',sprintf('clust_Harmony_BANKSY_lam0.8_k50_res%.1f',niche_res))
-
-# # filter the banksy object to only include the cells with annotated cell types
-# annotated_cell_clusters = sort(unique(prelim_annotation_res1$cluster))
-# banksy_embeddings = banksy_embeddings[,colData(banksy_embeddings)[,cell_clust_name] %in% annotated_cell_clusters]
-```
-
-
-## Build the color palette for all niches and cell types downstream
-
-```{r}
-set.seed(5555)
-cluster_classes = levels(colData(banksy_embeddings)[[niche_clust_name]])
-niche_color_manual = structure(
-    pals::polychrome()[c(1:length(cluster_classes))],
-    names = sample(cluster_classes)
+# Phase-0 metadata TSV: single source of truth for cell_type / niche / sample /
+# histology / alteration / spatial centroids, all read straight from the finalized
+# object's own colData (no external cluster-annotation join). See
+# export_new_object_cell_metadata.R and memory reference_new_banksy_object_columns.
+cell_meta = fread(
+    paste0(workdir, 'youyun/plgg/data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv'),
+    colClasses = list(character = c('sample_id', 'niche', 'ct_cluster'))
 )
-# for niche resolution 0.5
-# niches_to_show = c(1:11, 13, 14, 16, 17)
-# for niche resolution 1
-niches_to_show = c(1:20, 22:25)
+cell_meta_pa = cell_meta[sample_id %in% pa_ids]        # every downstream table derives from this
+cat('Cohort cells:', nrow(cell_meta), '| PA cells:', nrow(cell_meta_pa), '\n')
 
-cell_type_to_test = 'Fine Cell Type UMAP'
-cell_type_to_test = 'Fine Cell Type'
-cell_type_to_test = 'Coarse Cell Type'
-
-cell_type_class = sort(unique(prelim_annotation_res1[[cell_type_to_test]]))
-cell_type_color_manual = structure(
-    pals::alphabet()[c(1:length(cell_type_class))],
-    names = cell_type_class
-)
+# Niche palette: identical construction to celltype_niche_histology_enrichment.qmd
+# (pals::polychrome() keyed to cohort niches, numerically sorted) so niche colors match
+# that figure. Used for the Q1 niche plots below.
+niche_levels_all = as.character(sort(as.integer(unique(cell_meta$niche))))
+niche_color_manual = setNames(pals::polychrome()[seq_along(niche_levels_all)], niche_levels_all)
+cat('PA cell-type counts:\n'); print(cell_meta_pa[, .N, cell_type][order(-N)])
 ```
 
 ## MAPK score
 
 ```{r}
-mapk_scores = fread(paste0(workdir,'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/MAPK_overlap_scores.csv'))
-```
+# MAPK_overlap_scores.csv: spatial (ENVI-imputed) + single-nucleus rows, each with
+# cell_id, MAPK_overlap_score, cell_type (spatial = new lowercase labels; sn =
+# annot_v0). Regenerated in Phase 1 against the new object's own labels.
+mapk_scores = fread(paste0(out_dir, 'MAPK_overlap_scores.csv'))
 
-# Which cell types are significantly MAPK-high (or -low), within each patient
-
-`sc.tl.score_genes` fits its control-gene baseline independently per sample (see
-`1_PA_MAPK_scores.qmd`), so raw score magnitude is not comparable *across*
-patients -- a patient with a systematically shifted baseline (e.g. from
-per-sample SCTransform scaling) will look "MAPK-high" everywhere even with no
-real pathway difference. To sidestep that, we test each cell type against the
-*other* cells in the *same* patient/type (two-sided Mann-Whitney -- higher OR
-lower than the rest), which only relies on that patient's own internal
-ranking, not its absolute scale.
-
-This section only needs `mapk_scores`, so it runs without loading the (large)
-BANKSY object below.
-
-```{r}
-# sample id + driver alteration lookup. `sample` is formatted as e.g.
-# "188570 pilocytic astrocytoma"; the id is always the leading digits.
+# sample id + driver alteration lookup. `sample` is formatted "188570 pilocytic
+# astrocytoma"; the id is always the leading digits.
 mapk_scores[, sample_id := gsub('^([0-9]+).*', '\\1', sample)]
 mapk_scores[, alteration := fcase(
     sample_id == '188570', 'KIAA1549::BRAF',
@@ -164,47 +147,36 @@ mapk_scores[, alteration := fcase(
     sample_id == '320784', 'FAM131B::BRAF',
     sample_id == '328368', 'RAF1::TOP2B'
 )]
-# fixed sample/alteration display order (numeric sample id order), reused by the heatmaps below
+# fixed sample/alteration display order (numeric sample id order), reused by heatmaps below
 alteration_levels = c('KIAA1549::BRAF', 'FGFR1 ITD', 'FAM131B::BRAF', 'RAF1::TOP2B')
 
-# NOTE: spatial cell types come from `Fine.Cell.Type.UMAP` (Xenium/BANKSY
-# clustering, with subtypes e.g. "Astrocyte 1"/"Astrocyte 2", "OPC 1"); sn cell
-# types come from `annot_v1` (a coarser Seurat reference annotation: just
-# "Astrocytes", "OPC"). These are two different annotation pipelines at two
-# different resolutions -- they are not the same vocabulary, so don't expect
-# spatial/sn categories to line up 1:1 below; compare shape/ranking within a
-# panel, not exact labels across panels.
-
-MIN_N_GROUP = 20  # drop (patient, cell type) groups too small to test reliably
-
-# fread reads a blank CSV field as "" rather than NA for character columns, so
-# is.na(cell_type) alone would silently keep these rows in the "rest of the
-# patient" background group (unlike pandas' dropna, which treats blanks as NaN)
+# fread reads a blank CSV field as "" not NA, so normalize before is.na() filtering
 mapk_scores[cell_type == '', cell_type := NA]
+```
+
+# Which cell types are significantly MAPK-high (or -low), within each patient
+
+`sc.tl.score_genes` fits its control-gene baseline independently per sample, so
+raw score magnitude is not comparable *across* patients. We test each cell type
+against the *other* cells in the *same* patient/modality (two-sided Mann-Whitney),
+which relies only on that patient's internal ranking, not its absolute scale.
+
+```{r}
+MIN_N_GROUP = 20   # drop (patient, cell type) groups too small to test reliably
 
 patient_sig_combos = unique(mapk_scores[!is.na(cell_type), .(type, sample_id, cell_type)])
 
 patient_sig_results = rbindlist(mapply(function(ty, sid, ct) {
-    in_group = mapk_scores[type == ty & sample_id == sid & cell_type == ct, MAPK_overlap_score]
+    in_group  = mapk_scores[type == ty & sample_id == sid & cell_type == ct, MAPK_overlap_score]
     out_group = mapk_scores[type == ty & sample_id == sid & cell_type != ct, MAPK_overlap_score]
     if (length(in_group) < MIN_N_GROUP || length(out_group) < MIN_N_GROUP) return(NULL)
 
-    # exact = FALSE: use the normal approximation, since the exact Mann-Whitney
-    # null distribution is infeasible at these group sizes (up to ~1e5 cells).
-    # two-sided: we want to flag cell types that are significantly MAPK-LOW
-    # too, not just MAPK-high -- see effect below.
+    # normal approximation (exact null infeasible at ~1e5 cells); two-sided so we
+    # also flag significantly MAPK-LOW cell types
     test = wilcox.test(in_group, out_group, alternative = 'two.sided', exact = FALSE)
     n1 = length(in_group); n2 = length(out_group)
-    # rank-biserial effect size from the U statistic: -1 = in_group always
-    # lower than the rest, 0 = no difference, +1 = in_group always higher.
-    # Unlike a one-sided test, a two-sided-significant row CAN have a negative
-    # effect (genuinely MAPK-low) -- the heatmap below uses a diverging
-    # red/grey/blue scale specifically so those aren't collapsed into "not
-    # significant" grey.
-    # as.numeric() before multiplying: n1*n2 as plain R integers can silently
-    # overflow 32-bit int (NA, no warning surfaced downstream) once group
-    # sizes climb into the tens of thousands -- doesn't happen at current
-    # per-patient group sizes, but cheap to guard against for good.
+    # rank-biserial effect size: -1 = in_group always lower, 0 = no diff, +1 = always higher.
+    # as.numeric() guards against 32-bit int overflow of n1*n2 at large group sizes.
     effect = 2 * unname(test$statistic) / (as.numeric(n1) * as.numeric(n2)) - 1
 
     data.table(
@@ -214,75 +186,49 @@ patient_sig_results = rbindlist(mapply(function(ty, sid, ct) {
     )
 }, patient_sig_combos$type, patient_sig_combos$sample_id, patient_sig_combos$cell_type, SIMPLIFY = FALSE))
 
-# BH-correct within each patient x type family -- that's the natural "family of
-# tests" here (a per-patient discovery list), not a correction across patients
+# BH within each patient x modality family (the natural per-patient discovery list)
 patient_sig_results[, q := p.adjust(p, method = 'BH'), .(type, sample_id)]
 patient_sig_results = merge(patient_sig_results, unique(mapk_scores[, .(sample_id, alteration)]), by = 'sample_id')
 patient_sig_results[, alteration := factor(alteration, levels = alteration_levels)]
 
-fwrite(
-    patient_sig_results,
-    paste0(workdir, 'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/mapk_patient_cell_type_significance.tsv'),
-    sep = '\t'
-)
+# Reconcile the two modality vocabularies to a single display vocabulary so the same
+# biological cell type lands in the same heatmap column across the spatial and
+# single-nucleus facets: spatial (lowercase snake_case) via disp(), single-nucleus
+# (annot_v0) via disp_sn() (force-aligned Lymphoid->T cells, Stromal->Endothelial).
+patient_sig_results[, cell_type_disp := fifelse(type == 'spatial', disp(cell_type), disp_sn(cell_type))]
+
+fwrite(patient_sig_results, paste0(out_dir, 'mapk_patient_cell_type_significance.tsv'), sep = '\t')
 ```
 
 ## Heatmap: patient x cell type
 
 ```{r}
-# Patient (row) x cell type (column) heatmap, one ggplot per grouping, faceted
-# by data modality (spatial vs sn) instead of two separate plots. Cell type is
-# now on the same (coarse, harmonized) vocabulary in both modalities -- see
-# 1_PA_MAPK_scores.qmd -- so a single shared column order/x-axis is meaningful
-# across facets, not just within one.
-#
-# Fill = rank-biserial effect size for cell types significant at q < 0.05
-# (diverging blue/white/red: blue = significantly MAPK-low, red = MAPK-high,
-# saturation = how separated); grey = tested but not significant. A cell type
-# absent from a modality's vocabulary (e.g. "RGC" in sn) simply has no tile in
-# that facet. Columns are ranked by mean effect (descending), so the most
-# consistently MAPK-high cell types read leftmost and the most consistently
-# MAPK-low ones read rightmost -- ties (e.g. never significant either way)
-# broken by total number of patient x modality significant hits.
+# Patient (row) x cell type (column) heatmap, faceted by modality (spatial vs sn).
+# Fill = rank-biserial effect for cell types significant at q<0.05 (blue = MAPK-low,
+# red = MAPK-high); grey = tested but n.s. Columns ranked by mean effect.
 plot_patient_sig_heatmap = function(
     dt, subtitle = '', title_size = 15, title_wrap = NULL, legend_position = 'right',
     legend_breaks = waiver(), title_override = NULL
 ) {
     dt_sub = copy(dt)
-    col_rank = dt_sub[, .(
-        n_sig = sum(q < 0.05), mean_effect = mean(effect)
-    ), cell_type][order(-mean_effect, -n_sig)]
-    dt_sub[, cell_type := factor(cell_type, levels = col_rank$cell_type)]
-    # only cells significant at q < 0.05 get a graded fill (can be negative --
-    # two-sided test, see above); everything else (tested-but-not-significant)
-    # falls back to `na.value` below
+    # rank/plot on the reconciled display label so spatial & sn facets share columns
+    col_rank = dt_sub[, .(n_sig = sum(q < 0.05), mean_effect = mean(effect)), cell_type_disp][order(-mean_effect, -n_sig)]
+    dt_sub[, cell_type_disp := factor(cell_type_disp, levels = col_rank$cell_type_disp)]
     dt_sub[, fill_effect := ifelse(q < 0.05, effect, NA_real_)]
     dt_sub[, modality := factor(
         fifelse(type == 'spatial', 'Spatial (ENVI-imputed)', 'Single-nucleus (observed)'),
         levels = c('Spatial (ENVI-imputed)', 'Single-nucleus (observed)')
     )]
 
-    # title_override bypasses the constructed "MAPK-high/-low..." title
-    # entirely -- for narrow figures a short purpose-built title is more
-    # reliable than wrapping the (long, subtitle-dependent) default one
-    title_text = if (!is.null(title_override)) {
-        title_override
-    } else {
-        paste0('MAPK-high/-low cell types by patient', subtitle)
-    }
-    # for narrow figures, wrap the title so it can't run past the plot edge
-    # (base strwrap rather than stringr, no new dependency needed for this)
-    if (!is.null(title_wrap)) {
-        title_text = paste(strwrap(title_text, width = title_wrap), collapse = '\n')
-    }
+    title_text = if (!is.null(title_override)) title_override else paste0('MAPK-high/-low cell types by patient', subtitle)
+    if (!is.null(title_wrap)) title_text = paste(strwrap(title_text, width = title_wrap), collapse = '\n')
 
-    ggplot(dt_sub, aes(x = cell_type, y = alteration, fill = fill_effect)) +
+    ggplot(dt_sub, aes(x = cell_type_disp, y = alteration, fill = fill_effect)) +
         geom_tile(color = 'white', linewidth = 1.1) +
         facet_wrap(~ modality, ncol = 1) +
         scale_fill_gradient2(
             low = '#2166ac', mid = '#f7f7f7', high = '#b2182b', midpoint = 0,
-            na.value = 'grey92', limits = c(-1, 1), breaks = legend_breaks,
-            name = 'Effect size\n(q < 0.05)'
+            na.value = 'grey92', limits = c(-1, 1), breaks = legend_breaks, name = 'Effect size\n(q < 0.05)'
         ) +
         scale_x_discrete(expand = expansion(add = 0.6)) +
         scale_y_discrete(expand = expansion(add = 0.6)) +
@@ -313,14 +259,14 @@ plot_patient_sig_heatmap(patient_sig_results)
 ```{r}
 #| fig-width: 7.5
 #| fig-height: 6
-# Zoomed: OPC/astrocyte lineage only -- the tumor-relevant populations in PA
-# (an OPC/astrocytic-lineage tumor), as opposed to microenvironment/immune cell
-# types. "undetermined" is included here too: it's an sn-only cell-typing
-# artifact category (never appears in spatial data), not a real cell type, but
-# it's still part of the same "poorly-typed tumor-adjacent" grouping question.
-tumor_lineage_regex = 'Astro|OPC|undetermined'
+# Zoomed to the OPC/astrocyte lineage -- the tumor-relevant populations in PA
+# (an OPC/astrocytic-lineage tumor). ignore.case + the underscore labels so this
+# matches BOTH spatial (astro_glial/opc) and sn (Astrocyte/OPC). radial_glia is
+# excluded here (user request). "undetermined" is a genuine spatial cell type here
+# (not an sn-only artifact), kept in this "poorly-typed tumor-adjacent" grouping.
+tumor_lineage_regex = 'astro|opc|undetermined'
 plot_patient_sig_heatmap(
-    patient_sig_results[grepl(tumor_lineage_regex, cell_type)],
+    patient_sig_results[grepl(tumor_lineage_regex, cell_type, ignore.case = TRUE)],
     ' -- OPC/astrocyte lineage', title_wrap = 46
 )
 ```
@@ -328,667 +274,755 @@ plot_patient_sig_heatmap(
 ```{r}
 #| fig-width: 4.2
 #| fig-height: 6
-# Same OPC/astrocyte zoom, spatial only, at half the width of the combined
-# figure above -- title is wrapped and the legend moved below the tiles so
-# neither runs past the narrower plot edge.
+# Same lineage zoom, spatial only, narrower. radial_glia excluded (user request).
 plot_patient_sig_heatmap(
-    patient_sig_results[type == 'spatial' & grepl('Astro|OPC', cell_type)],
+    patient_sig_results[type == 'spatial' & grepl('astro|opc', cell_type, ignore.case = TRUE)],
     title_size = 13, legend_position = 'bottom', legend_breaks = c(-1, 0, 1),
     title_override = 'OPC/astrocyte -- spatial'
 )
 ```
 
-# Visualize MAPK by niche
+# Derive PA glial niches (programmatic, not hardcoded)
+
+A niche qualifies as a **PA glial niche** if it is BOTH:
+
+- **(a) PA-enriched at q < 0.05** in `niche_histology_enrichment.tsv` (glmmTMB
+  log-odds vs cohort baseline). We use the odds-ratio enrichment, not raw PA
+  fraction, so a niche that is glial simply because a PA sample contributes many
+  of its cells does not spuriously qualify.
+- **(b) glial-rich**: its PA glial fraction (astro_glial + opc + radial_glia)
+  exceeds the whole-cohort glial baseline.
 
 ```{r}
-cell_niches = as.data.table(colData(banksy_embeddings[
-    , colData(banksy_embeddings)$histology == 'pilocytic astrocytoma'
-])[, c('alteration',niche_clust_name)], keep.rownames = 'cell_id')[
-    , alteration := fcase(
-        grepl('188570', cell_id), 'KIAA1549::BRAF',
-        grepl('258482', cell_id), 'FGFR1 ITD',
-        grepl('320784', cell_id), 'FAM131B::BRAF',
-        grepl('328368', cell_id), 'RAF1::TOP2B'
-    )
-]
-setnames(cell_niches, c(niche_clust_name), c('niche_type'))
-# select only the original columns from mapk_scores: it now also carries
-# sample_id/alteration (added above), which would otherwise collide with
-# cell_niches' own (independently-derived) versions of those same columns
-mapk_scores_w_niches = merge(
-    mapk_scores[, .(cell_id, sample, type, cell_type, MAPK_overlap_score)], cell_niches,
-    by.x = 'cell_id', by.y = 'cell_id', all.y = TRUE
-)[
-    , sample_id := gsub('.*__','',cell_id)
-][
-    , niche_type := ifelse(
-        # niche_type %in% c(1,2,3,5,7,9,19,11,14,16,18,19,22,27),
-        niche_type %in% c(7, 18, 22),
-        niche_type, 'Other'
-    )
-]
+cohort_glial_frac = cell_meta[, mean(cell_type %in% glial_types)]   # baseline across all 11 samples
 
-# Save the per cell type x niche summary (mean/SE) so downstream reporting
-# can reuse it without re-loading the full BANKSY object.
-mapk_by_niche_summary = mapk_scores_w_niches[
-    grepl('Astro|OPC', cell_type) & niche_type != 'Other',
-    .(
-        MAPK_overlap_score_mean = mean(MAPK_overlap_score),
-        MAPK_overlap_score_se = sd(MAPK_overlap_score)/sqrt(.N),
-        n_cells = .N
-    ), .(cell_type, niche_type = factor(as.numeric(niche_type)))
-]
-fwrite(
-    mapk_by_niche_summary,
-    paste0(workdir, 'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/mapk_by_niche_summary.tsv'),
-    sep = '\t'
+# (b) per-niche PA glial composition
+niche_comp = cell_meta_pa[, .(
+    n_cells    = .N,
+    glial_frac = mean(cell_type %in% glial_types),
+    opc_frac   = mean(cell_type == 'opc'),
+    astro_frac = mean(cell_type == 'astro_glial'),
+    myeloid_frac = mean(cell_type == 'myeloid')
+), niche][order(-glial_frac)]
+
+# (a) PA enrichment from the existing niche-histology model
+enr = fread(paste0(workdir, 'youyun/plgg/code/niche/proseg_output_analysis/niche_histology_enrichment.tsv'))
+pa_enr = enr[histology == 'pilocytic astrocytoma',
+             .(niche = as.character(niche_type), logOR = estimate_log_odds,
+               q = q_value, sign_call, model_status)]
+
+enriched_niches   = pa_enr[sign_call == 'enriched' & q < 0.05 & model_status == 'pass', niche]
+glial_rich_niches = niche_comp[glial_frac > cohort_glial_frac, niche]
+pa_glial_niches   = intersect(enriched_niches, glial_rich_niches)   # the derived set, used everywhere below
+
+cat('Cohort glial baseline fraction:', round(cohort_glial_frac, 3), '\n')
+cat('PA-enriched niches (q<0.05):', paste(sort(as.integer(enriched_niches)), collapse = ', '), '\n')
+cat('==> PA GLIAL NICHES (enriched AND glial-rich):', paste(sort(as.integer(pa_glial_niches)), collapse = ', '), '\n')
+
+# report the qualifying niches with their enrichment + composition
+kable(
+    merge(niche_comp, pa_enr, by = 'niche')[niche %in% pa_glial_niches][order(-logOR)],
+    digits = 3, caption = 'Derived PA glial niches: enrichment (logOR, q) + PA composition'
 )
-
-ggplot(
-    mapk_by_niche_summary, aes(
-        x = factor(cell_type), y = MAPK_overlap_score_mean
-    )
-) +
-    geom_point(
-        aes(group = niche_type, color = niche_type),
-        position = position_dodge(width = 0.8)
-    ) +
-    geom_errorbar(
-        aes(
-            y = MAPK_overlap_score_mean,
-            ymin = MAPK_overlap_score_mean - MAPK_overlap_score_se,
-            ymax = MAPK_overlap_score_mean + MAPK_overlap_score_se,
-            color = niche_type,
-            group = interaction(cell_type, niche_type)
-        ),
-        position = position_dodge(width = 0.8),
-        width = 0.2, size = 1
-    ) +
-    theme_bw(base_size = 20) +
-    theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = 'bottom'
-    ) +
-    labs(
-        title = "MAPK Activation by Niche Type",
-        x = "Cell Type",
-        y = "MAPK Activation Score"
-    ) +
-    scale_color_carto_d(name = "Niche Type", palette = "Vivid") +
-    guides(
-        fill = guide_legend(title = "Niche Type", nrow = 2, byrow = TRUE)
-    )
 ```
 
-# Neighborhood analysis
+# Q1 -- MAPK across PA glial niches: niche 3 vs niche 5 vs everything else
 
-## Setting up Neighborhood Analysis
+The two PA glial niches (3 and 5) behave differently, so rather than lumping them we
+compare MAPK *within* astrocytes and OPCs across three mutually exclusive groups:
+**niche 3**, **niche 5**, and **everything else** (all niches other than 3 and 5 = the
+non-PA-glial background). MAPK is z-scored per patient before fitting (scores are
+per-sample-baselined, so raw magnitudes are not cross-patient comparable). Niche
+membership comes from BANKSY spatial clustering while MAPK comes from ENVI imputation --
+different matrices, so this contrast is not mechanically circular.
 
-Here we will look at the niches in the data and annotate them using the cell types of self and neighbors.
+**Interpretation frame:** MAPK-high glia in a PA-enriched niche is *consistent with*
+tumor identity, not proof (inferCNV unconfirmed; the panel is shared upstream input to
+both BANKSY and ENVI). We restrict to astrocytes and OPCs (the PA tumor lineage); with
+n = 4 PA samples the readout is effect size + directional consistency across patients,
+not cohort-level significance.
+
+```{r}
+focal_glia = c('astro_glial', 'opc')   # user: only astrocytes and OPCs (drop sparse radial_glia)
+
+# focal glia (PA) joined to spatial MAPK; z-score MAPK per patient
+q1_dt = merge(
+    cell_meta_pa[cell_type %in% focal_glia, .(cell_id, sample_id, cell_type, niche)],
+    mapk_scores[type == 'spatial', .(cell_id, MAPK_overlap_score)],
+    by = 'cell_id'
+)
+q1_dt[, mapk_z := (MAPK_overlap_score - mean(MAPK_overlap_score)) / sd(MAPK_overlap_score), by = sample_id]
+# driver alteration on each focal cell (x-axis + per-driver brackets in the niche plots below)
+q1_dt = merge(q1_dt, unique(mapk_scores[, .(sample_id, alteration)]), by = 'sample_id')
+q1_dt[, alteration := factor(alteration, levels = alteration_levels)]
+
+# three mutually exclusive groups. 'background' (all niches other than 3 and 5) is the
+# reference level, so each niche's lm coefficient is that niche's MAPK shift vs the
+# non-PA-glial background, and a relevel gives the direct niche-5-vs-niche-3 contrast.
+q1_dt[, niche_group := fcase(niche == '3', 'niche3', niche == '5', 'niche5', default = 'background')]
+q1_dt[, niche_group := factor(niche_group, levels = c('background', 'niche3', 'niche5'))]
+
+MIN_N_Q1 = 20   # need >=20 focal cells in EACH of the three groups to fit the contrast
+q1_combos = unique(q1_dt[, .(sample_id, cell_type)])
+
+# per (focal cell type, sample): lm(mapk_z ~ niche_group). Pull both niche-vs-background
+# coefficients, plus a refit with niche3 as reference for the niche-5-vs-niche-3 contrast.
+q1_results = rbindlist(mapply(function(sid, ct) {
+    dt = q1_dt[sample_id == sid & cell_type == ct]
+    n_bg = dt[niche_group == 'background', .N]
+    n_n3 = dt[niche_group == 'niche3', .N]
+    n_n5 = dt[niche_group == 'niche5', .N]
+    if (n_bg < MIN_N_Q1 || n_n3 < MIN_N_Q1 || n_n5 < MIN_N_Q1) return(NULL)   # all 3 groups required
+    m   = lm(mapk_z ~ niche_group, data = dt)                             # ref = background
+    m35 = lm(mapk_z ~ relevel(niche_group, ref = 'niche3'), data = dt)    # ref = niche3 (n5 vs n3)
+    co   = as.data.table(summary(m)$coefficients,   keep.rownames = 'term')
+    co35 = as.data.table(summary(m35)$coefficients, keep.rownames = 'term')
+    pick = function(tab, key) tab[grepl(key, term, fixed = TRUE)][1]       # single matching coefficient row
+    r3 = pick(co, 'niche3'); r5 = pick(co, 'niche5'); r53 = pick(co35, 'niche5')
+    data.table(
+        sample_id = sid, cell_type = ct,
+        n_background = n_bg, n_niche3 = n_n3, n_niche5 = n_n5,
+        beta_niche3 = r3$Estimate, se_niche3 = r3[['Std. Error']], p_niche3 = r3[['Pr(>|t|)']],
+        beta_niche5 = r5$Estimate, se_niche5 = r5[['Std. Error']], p_niche5 = r5[['Pr(>|t|)']],
+        beta_n5_vs_n3 = r53$Estimate, p_n5_vs_n3 = r53[['Pr(>|t|)']]
+    )
+}, q1_combos$sample_id, q1_combos$cell_type, SIMPLIFY = FALSE))
+
+q1_results = merge(q1_results, unique(mapk_scores[, .(sample_id, alteration)]), by = 'sample_id')
+q1_results[, alteration := factor(alteration, levels = alteration_levels)]
+q1_results[, cell_type_disp := disp(cell_type)]
+fwrite(q1_results, paste0(out_dir, 'mapk_q1_niche_three_group.tsv'), sep = '\t')
+
+# long form of the two niche-vs-background effects, for BH, the summary, and plotting
+q1_long = melt(
+    q1_results,
+    id.vars = c('sample_id', 'cell_type', 'cell_type_disp', 'alteration'),
+    measure.vars = list(beta = c('beta_niche3', 'beta_niche5'),
+                        se   = c('se_niche3',   'se_niche5'),
+                        p    = c('p_niche3',    'p_niche5')),
+    variable.name = 'niche_idx'
+)
+q1_long[, niche := fifelse(as.integer(niche_idx) == 1L, 'niche 3', 'niche 5')]   # melt index 1->niche3, 2->niche5
+q1_long[, q := p.adjust(p, method = 'BH'), by = sample_id]   # per-sample BH over both contrasts
+
+# across-patient readout (n=4): directional consistency of each niche-vs-background effect
+q1_consistency = q1_long[!is.na(beta), .(
+    n_samples = .N,
+    n_pos     = sum(beta > 0),
+    n_neg     = sum(beta < 0),
+    mean_beta = mean(beta)
+), by = .(cell_type_disp, niche)]
+q1_consistency[, consistent := n_samples > 0 & (n_pos == n_samples | n_neg == n_samples)]
+cat('Q1 across-patient consistency (beta = niche MAPK-z vs non-PA-glial background):\n')
+print(q1_consistency[order(cell_type_disp, niche)])
+kable(q1_results[order(cell_type_disp, alteration),
+      .(cell_type_disp, alteration, n_niche3, n_niche5, n_background,
+        beta_niche3, beta_niche5, beta_n5_vs_n3)],
+      digits = 3, caption = 'Q1: MAPK-z per group vs background, and niche-5-vs-niche-3, per patient')
+```
+
+```{r}
+# Reusable niche plot (shared by the 3- and 4-group versions).
+#   groups_map : named char vector niche_id -> group label; niches not listed fall into
+#                'everything else' (so the reference set differs between the 3- and 4-group calls).
+# x = driver; within each driver a pointrange per niche (dot = mean, line = +/- SD of the
+# within-patient MAPK z-score); brackets over each driver compare each niche vs 'everything
+# else' by a per-driver per-cell Wilcoxon on mapk_z (user's chosen test). Niche colors from
+# niche_color_manual (polychrome), matching celltype_niche_histology_enrichment.qmd.
+q1_niche_plot = function(groups_map, group_levels, title, out_stub) {
+    G = length(group_levels); W = 0.75
+    d = copy(q1_dt)
+    d[, grp := fifelse(as.character(niche) %in% names(groups_map),
+                       groups_map[as.character(niche)], 'everything else')]
+    d[, grp := factor(grp, levels = group_levels)]
+    d[, cell_type_disp := disp(cell_type)]
+
+    # per (cell type, driver, niche) mean +/- SE of within-patient MAPK z
+    gm = d[, .(mean_z = mean(mapk_z), se = sd(mapk_z) / sqrt(.N), n = .N), by = .(cell_type_disp, alteration, grp)]
+
+    # per-driver per-cell Wilcoxon: each niche vs 'everything else', within (cell type, driver)
+    niches = setdiff(group_levels, 'everything else')
+    br = rbindlist(lapply(unique(gm$cell_type_disp), function(ctd)
+        rbindlist(lapply(alteration_levels, function(drv) {
+            y = d[cell_type_disp == ctd & alteration == drv & grp == 'everything else', mapk_z]
+            rbindlist(lapply(niches, function(g) {
+                x = d[cell_type_disp == ctd & alteration == drv & grp == g, mapk_z]
+                if (length(x) < 10 || length(y) < 10) return(NULL)   # too few cells to test
+                data.table(cell_type_disp = ctd, alteration = drv, grp = g, p = wilcox.test(x, y)$p.value)
+            }))
+        }))))
+    br[, p.signif := fcase(p < 1e-3, '***', p < 1e-2, '**', p < 5e-2, '*', default = 'ns')]
+    br[, alteration := factor(alteration, levels = alteration_levels)]
+    # dodge geometry: group g over total width W sits at category center + this offset;
+    # used to draw each bracket from its niche's dodged point across to the everything-else point.
+    dodge_off = function(g, gg, ww) ww * ((2 * g - 1 - gg) / (2 * gg))
+    br[, xc := as.integer(alteration)]; br[, g_idx := match(grp, group_levels)]
+    br[, `:=`(x1 = xc + dodge_off(g_idx, G, W), x2 = xc + dodge_off(G, G, W))]
+    # bracket heights above the data, staggered by niche; na.rm since a sparse (driver x niche)
+    # group can have n=1 -> se=NA, which would otherwise NA out the whole facet's y-range
+    yr = gm[, .(hi = max(mean_z + se, na.rm = TRUE), lo = min(mean_z - se, na.rm = TRUE)), by = cell_type_disp]
+    yr[, span := hi - lo]; br = merge(br, yr, by = 'cell_type_disp')
+    br[, ytick := 0.025 * span]; br[, y := hi + 0.08 * span + (g_idx - 1) * 0.10 * span]
+
+    fwrite(gm, paste0(out_dir, out_stub, '_means.tsv'), sep = '\t')
+    fwrite(br, paste0(out_dir, out_stub, '_brackets.tsv'), sep = '\t')
+
+    # niche group colors from the cohort polychrome palette (+ grey background)
+    q1_pal = c(niche_color_manual[c('3', '5', '7')], 'grey70')
+    names(q1_pal) = c('niche 3', 'niche 5', 'niche 7', 'everything else')
+    ggplot(gm, aes(x = alteration, y = mean_z, color = grp)) +
+        geom_hline(yintercept = 0, linetype = 'dashed', color = 'grey60', linewidth = 0.5) +
+        geom_pointrange(aes(ymin = mean_z - se, ymax = mean_z + se), position = position_dodge(width = W), size = 0.45) +
+        # geom_blank forces the free y-scale to include the top brackets
+        geom_blank(data = br, aes(x = xc, y = y + 0.04 * span), inherit.aes = FALSE) +
+        geom_segment(data = br, aes(x = x1, xend = x2, y = y, yend = y), inherit.aes = FALSE, linewidth = 0.35, color = 'grey35') +
+        geom_segment(data = br, aes(x = x1, xend = x1, y = y, yend = y - ytick), inherit.aes = FALSE, linewidth = 0.35, color = 'grey35') +
+        geom_segment(data = br, aes(x = x2, xend = x2, y = y, yend = y - ytick), inherit.aes = FALSE, linewidth = 0.35, color = 'grey35') +
+        geom_text(data = br, aes(x = (x1 + x2) / 2, y = y, label = p.signif), inherit.aes = FALSE, vjust = -0.1, size = 3, color = 'grey25') +
+        facet_wrap(~ cell_type_disp, nrow = 1, scales = 'free_y') +
+        scale_color_manual(values = q1_pal, name = NULL, breaks = group_levels) +
+        labs(title = title,
+             subtitle = 'dot = mean, line = +/- SE of within-patient MAPK z; brackets = per-driver per-cell Wilcoxon vs everything else (*** <.001 ** <.01 * <.05)',
+             x = NULL, y = 'MAPK (z-scored within patient)') +
+        ref_theme + theme(axis.text.x = element_text(angle = 25, hjust = 1, size = 10, color = 'grey20'))
+}
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 6
+# niche 3 vs niche 5 vs everything else (everything else = niches other than 3 and 5)
+q1_niche_plot(
+    groups_map  = c('3' = 'niche 3', '5' = 'niche 5'),
+    group_levels = c('niche 3', 'niche 5', 'everything else'),
+    title = 'MAPK Activity by Niche',
+    out_stub = 'mapk_q1_niche_three_group'
+)
+```
+
+```{r}
+#| fig-width: 11
+#| fig-height: 6
+# niche 3 vs niche 5 vs niche 7 vs everything else (everything else = niches other than 3,5,7).
+# Niche 7 is NOT a PA-enriched glial niche -- included as a comparison group (user request).
+q1_niche_plot(
+    groups_map  = c('3' = 'niche 3', '5' = 'niche 5', '7' = 'niche 7'),
+    group_levels = c('niche 3', 'niche 5', 'niche 7', 'everything else'),
+    title = 'MAPK Activity by Niche',
+    out_stub = 'mapk_q1_niche_four_group'
+)
+```
+
+# Neighborhood graph (per-sample kNN)
 
 ```{r}
 k_geom = 15
-locs = spatialCoords(banksy_embeddings[, colData(banksy_embeddings)$histology == 'pilocytic astrocytoma'])
-knn = dbscan::kNN(x = locs, k = k_geom)
-knnDT <- data.table(
-    from = rep(seq_len(nrow(knn$id)), k_geom),
-    from_id = rep(rownames(knn$id), k_geom),
-    to = as.vector(knn$id),
-    to_id = rownames(knn$id)[as.vector(knn$id)],
-    distance = as.vector(knn$dist)
-)
-cell_cell_type_dt = data.table(
-    cell_id = rownames(colData(banksy_embeddings[])),
-    cell_type = as.character(colData(banksy_embeddings)[,cell_clust_name]),
-    sample_id = colData(banksy_embeddings)$sample_id,
-    histology = colData(banksy_embeddings)$histology
-)[histology == 'pilocytic astrocytoma']
-
-sparsity_threshold = 0.01
-cell_cell_type_dt[
-    , num_cells_per_sample := .N, .(sample_id)
-][
-    , cell_type := ifelse(
-        .N/num_cells_per_sample < sparsity_threshold |
-            is.na(cell_type), 'Other', cell_type
-    ),.(sample_id, cell_type)
-]
-```
-
-# Cell Cell Adjacency Analysis
-
-To do this, we compare each niche's cell cell adjacency to all other niches' cell cell adjacency. 
-
-```{r}
-cell_type_assignment_vector = structure(
-    c(prelim_annotation_res1[[cell_type_to_test]], 'Other'),
-    names = c(prelim_annotation_res1$cluster,'Other')
-)
-adjacencies = knnDT[,.(from_id,to_id,distance)][
-    cell_cell_type_dt[,.(cell_id,cell_type_to = cell_type)], 
-    on = c('to_id' = 'cell_id')
-][
-    cell_cell_type_dt[,.(
-        cell_id, cell_type_from = cell_type, sample_id, histology
-    )], on = c('from_id' = 'cell_id')
-][
-    , c('cell_type_test_from','cell_type_test_to') := list(
-        cell_type_assignment_vector[cell_type_from],
-        cell_type_assignment_vector[cell_type_to]
+# Build the kNN graph PER SAMPLE. Xenium coordinates are per-slide-local, so a
+# single graph over all PA cells would create cross-sample false neighbors and
+# corrupt every myeloid->glial edge. dbscan::kNN$id is n x k (column-major), so
+# rep(cell_id, k) aligns row-i's k neighbors with as.vector(knn$id).
+build_sample_knn = function(sdt) {
+    locs = as.matrix(sdt[, .(x, y)])
+    knn = dbscan::kNN(x = locs, k = k_geom)
+    data.table(
+        from_id   = rep(sdt$cell_id, k_geom),
+        to_id     = sdt$cell_id[as.vector(knn$id)],
+        distance  = as.vector(knn$dist),
+        sample_id = sdt$sample_id[1]
     )
-]
+}
+knnDT = rbindlist(lapply(split(cell_meta_pa, by = 'sample_id'), build_sample_knn))
+
+# annotate each edge with from/to cell type, straight from the TSV (no cluster->label map)
+adjacencies = merge(knnDT, cell_meta_pa[, .(to_id = cell_id, cell_type_to = cell_type)], by = 'to_id')
+adjacencies = merge(adjacencies, cell_meta_pa[, .(from_id = cell_id, cell_type_from = cell_type)], by = 'from_id')
+# sanity: per-sample construction must produce zero cross-sample edges
+stopifnot(adjacencies[gsub('.*__', '', from_id) != gsub('.*__', '', to_id), .N] == 0)
+cat('kNN edges:', nrow(adjacencies), '| myeloid source cells:',
+    adjacencies[cell_type_from == 'myeloid', uniqueN(from_id)], '\n')
 ```
 
-# Modeling cell type proportions with MAPK activation
+# MAPK activation vs. neighbor composition
+
+The original neighbor-composition analysis: as a focal astrocyte/OPC becomes more
+MAPK-active, does the cell-type make-up of its local (k = 15) neighborhood change? For
+each focal cell we take the proportion of its neighbors of each (collapsed) type and fit
+the exact model + volcano we had before -- a weighted binomial GLM
+`neighbor_prop ~ MAPK_overlap_score + sample_id` (RAW imputed MAPK; `sample_id` pools the
+4 patients), one model per neighbor cell type -- ported object-free (rebuilt from the
+`adjacencies` kNN table + `MAPK_overlap_scores.csv`; no BANKSY object).
+
+**Note on inference.** These GLMs are fit *per cell* (tens of thousands), so the p-values
+are anticonservative (pseudoreplication, per `feedback_percell_pseudoreplication`); read
+the volcano for the *direction and relative size* of neighbor-composition shifts, and the
+per-patient panel below for how consistent each shift is across the four drivers.
 
 ```{r}
+# Object-free rebuild of the original `adjacencies_and_mapk`. Sparsity-collapse cell-type
+# labels (<1% of a sample's cells -> 'Other' for that sample) on BOTH the focal (from) and
+# neighbor (to) side, exactly as the original did before building the graph.
+sparsity_threshold = 0.01
+prev = cell_meta_pa[, .(n = .N), .(sample_id, cell_type)]
+prev[, frac := n / sum(n), sample_id]
+prev[, ct_c := ifelse(frac < sparsity_threshold | is.na(cell_type), 'Other', cell_type)]
+collapse_map = prev[, .(sample_id, cell_type, ct_c)]
+
+adj = merge(adjacencies, collapse_map[, .(sample_id, cell_type_from = cell_type, cff = ct_c)],
+            by = c('sample_id', 'cell_type_from'))
+adj = merge(adj, collapse_map[, .(sample_id, cell_type_to = cell_type, ctt = ct_c)],
+            by = c('sample_id', 'cell_type_to'))
+
+# per focal cell: proportion of its k neighbors of each collapsed type (wide), + RAW MAPK
 adjacencies_and_mapk = merge(
-    dcast(
-        adjacencies[,.(neighbor_prop = .N/k_geom),.(from_id, cell_type_test_from, cell_type_test_to, sample_id)],
-        from_id + cell_type_test_from + sample_id ~ cell_type_test_to,
-        value.var = 'neighbor_prop', fill = 0
-    ),
-    mapk_scores[,.(cell_id, MAPK_overlap_score)], by.x = 'from_id', by.y = 'cell_id'
+    dcast(adj[, .(neighbor_prop = .N / k_geom), .(from_id, cff, sample_id, ctt)],
+          from_id + cff + sample_id ~ ctt, value.var = 'neighbor_prop', fill = 0),
+    mapk_scores[type == 'spatial', .(cell_id, MAPK_overlap_score)],
+    by.x = 'from_id', by.y = 'cell_id'
 )[, weights := k_geom]
-cell_types_in_dt = setdiff(colnames(adjacencies_and_mapk), c('from_id', 'cell_type_test_from', 'sample_id', 'MAPK_overlap_score', 'weights'))
-cell_type_pairs_to_test = expand.grid(cell_type_from = cell_types_in_dt, cell_type_to = cell_types_in_dt)
+cell_types_in_dt = setdiff(colnames(adjacencies_and_mapk),
+                           c('from_id', 'cff', 'sample_id', 'MAPK_overlap_score', 'weights'))
 
-mapk_adj_results = rbindlist(mapply(
-    function(ct1, ct2) {
-        print(paste0("Testing ", ct1, " -> ", ct2))
-        if (nrow(adjacencies_and_mapk[cell_type_test_from == ct1]) == 0) {
-            message(sprintf("Cell type %s not found in the data!", ct1))
-            return(NULL)
-        }
-        if (all(adjacencies_and_mapk[[ct2]] == 0)) {
-            message(sprintf("Cell type %s has all zeros!", ct))
-            return(NULL)
-        }
-        
-        tmp_dt = adjacencies_and_mapk[cell_type_test_from == ct1]
-
-        if (length(unique(tmp_dt$sample_id)) == 1){
-            model = glm(
-                as.formula(paste0('`',ct2, "` ~ MAPK_overlap_score")),
-                data = tmp_dt, family = binomial(link = 'logit'), weights = weights
-            )   
-        } else {
-            model = glm(
-                as.formula(paste0('`',ct2, "` ~ MAPK_overlap_score + sample_id")),
-                data = tmp_dt, family = binomial(link = 'logit'), weights = weights
-            )
-        }
-        model_coef = as.data.frame(summary(model)$coefficients)
-        model_coef$variables = rownames(model_coef)
-        model_coef = as.data.table(model_coef)[variables == 'MAPK_overlap_score'][
-            ,c('neg_log10_p_value', 'effect','ct_from','ct_to') := list(
-                -log10(`Pr(>|z|)`), exp(Estimate),
-                ct1, ct2
-            )
-        ]
-        return(model_coef)
-    }, 
-    cell_type_pairs_to_test$cell_type_from, 
-    cell_type_pairs_to_test$cell_type_to, 
-    SIMPLIFY = FALSE
-))[
-    , q_value := p.adjust(`Pr(>|z|)`, method = 'BH')
-]
-
-# save so downstream reporting can reuse this without re-loading the BANKSY
-# object / re-fitting ~n_cell_types^2 GLMs
-fwrite(
-    mapk_adj_results,
-    paste0(workdir, 'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/mapk_adj_results.tsv'),
-    sep = '\t'
-)
+# --- POOLED model (the original): neighbor_prop[ct2] ~ MAPK + sample_id, over ALL pairs ---
+pooled_pairs = CJ(ct_from = cell_types_in_dt, ct_to = cell_types_in_dt, unique = TRUE)
+mapk_adj_results = rbindlist(mapply(function(ct1, ct2) {
+    tmp = adjacencies_and_mapk[cff == ct1]
+    if (nrow(tmp) == 0 || all(tmp[[ct2]] == 0)) return(NULL)
+    # original guard: a focal type present in only one sample can't take the sample_id
+    # covariate (single factor level), so drop it there
+    rhs = if (length(unique(tmp$sample_id)) == 1) '`%s` ~ MAPK_overlap_score'
+          else '`%s` ~ MAPK_overlap_score + sample_id'
+    m = glm(as.formula(sprintf(rhs, ct2)),
+            data = tmp, family = binomial(link = 'logit'), weights = weights)
+    co = as.data.table(summary(m)$coefficients, keep.rownames = 'variables')[variables == 'MAPK_overlap_score']
+    co[, .(ct_from = ct1, ct_to = ct2, Estimate, effect = exp(Estimate),
+           p_value = `Pr(>|z|)`, neg_log10_p_value = -log10(`Pr(>|z|)`))]
+}, pooled_pairs$ct_from, pooled_pairs$ct_to, SIMPLIFY = FALSE))
+mapk_adj_results[, q_value := p.adjust(p_value, method = 'BH')]
+mapk_adj_results[, `:=`(ct_from_disp = disp(ct_from), ct_to_disp = disp(ct_to))]
+fwrite(mapk_adj_results, paste0(out_dir, 'mapk_adj_results.tsv'), sep = '\t')
 ```
 
-# Results
-
 ```{r}
-ggplot(mapk_adj_results[grepl('Astro|OPC', ct_from)]) +
-    geom_point(aes(
-        x = Estimate, y = neg_log10_p_value,
-        color = ifelse(
-            q_value >= 0.05,'not significant',
-            ifelse(
-                as.numeric(effect) > 1, 'enriched','depleted'
-            )
-        ), alpha = 0.5
-    )) +
-    geom_text_repel(aes(
-        x = Estimate, y = neg_log10_p_value,
-        label = ifelse(q_value < 0.05, gsub('`','',ct_to), '')
-    ), max.overlaps = 100, force = 3) +
-    theme_linedraw() +
-    theme(
-        text = element_text(size = 15), 
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = 'right', 
-        panel.grid.minor = element_blank(),
-        panel.grid.major = element_blank()
-    ) + scale_color_manual(values = c(
-        'enriched' = 'red', 'depleted' = 'blue',
-        'not significant' = 'grey'
-    )) +
-    geom_vline(xintercept = 0, linetype = 'dashed', color = 'black') +
+#| fig-width: 12
+#| fig-height: 6
+# Pooled volcano, reference theme (ref_theme; enriched=red #b2182b, depleted=blue #2166ac,
+# n.s.=grey75; bold colored labels for q<0.05; xlim(-1,0.5)); focal astro/OPC, display names.
+vdt = mapk_adj_results[ct_from %in% focal_glia]
+vdt[, sig := ifelse(q_value >= 0.05, 'not significant', ifelse(as.numeric(effect) > 1, 'enriched', 'depleted'))]
+ggplot(vdt, aes(x = Estimate, y = neg_log10_p_value)) +
+    geom_vline(xintercept = 0, linetype = 'dashed', color = 'grey40', linewidth = 0.5) +
+    geom_point(aes(color = sig), size = 2, alpha = 0.8) +
+    geom_text_repel(aes(label = ifelse(q_value < 0.05, ct_to_disp, ''), color = sig),
+                    max.overlaps = 100, force = 4, size = 2.9, fontface = 'bold',
+                    segment.size = 0.3, segment.color = 'grey60', show.legend = FALSE) +
+    scale_color_manual(values = c('enriched' = '#b2182b', 'depleted' = '#2166ac', 'not significant' = 'grey75'), name = NULL) +
     xlim(-1, 0.5) +
-    labs(
-        title = "Effect of Imputed MAPK on Neighbor Cell Type Proportions",
-        x = "Effect size (log coefficient)",
-        y = "-log10(p-value)",
-        color = "Significance"
-    ) + facet_wrap(~ ct_from, nrow = 1)
+    facet_wrap(~ ct_from_disp, nrow = 1) +
+    labs(title = 'Neighbor cell-type composition vs. MAPK activation (pooled)',
+         subtitle = 'Pooled binomial GLM (neighbor_prop ~ MAPK + sample_id); x>0 = neighbor enriches as focal MAPK rises',
+         x = 'Effect size (log coefficient)', y = expression(-log[10](p))) +
+    ref_theme
 ```
 
 ## Per-patient neighborhood composition vs. MAPK activation
 
-The volcano above pools all 4 patients into one model per cell-type pair
-(with `sample_id` as a covariate), which asks "on average across patients,
-does a cell's neighbor composition track its MAPK score." Here we instead fit
-one model per (cell type, patient) -- no pooling, no covariate, since each
-fit is already a single patient -- to ask how that relationship varies by
-driver alteration. Restricted to OPC/Astrocyte (the tumor-lineage cell types)
-as the focal cell whose neighbors we're examining.
+The pooled volcano fits one model per neighbor type with `sample_id` as a covariate
+("on average across patients, does neighbor composition track MAPK"). Here we instead fit
+one model per (focal cell type, patient) -- no covariate, a single patient each -- to see
+how consistent the relationship is across the four driver alterations. The per-panel
+subtitle gives how many focal (OPC/astrocyte) cells backed that fit.
 
 ```{r}
-tumor_lineage_cell_types = c('Astrocyte', 'OPC')
-# adjacencies_and_mapk$sample_id carries factor levels from the full (11
-# sample, 5 histology) banksy_embeddings object; as.character + unique here
-# restricts to the samples actually present after the PA-only filter above
-sample_ids_present = sort(unique(as.character(adjacencies_and_mapk$sample_id)))
-sample_alteration_map = unique(mapk_scores[, .(sample_id, alteration)])
-
-by_patient_combos = expand.grid(
-    cell_type_from = tumor_lineage_cell_types,
-    cell_type_to = cell_types_in_dt,
-    sample_id = sample_ids_present,
-    stringsAsFactors = FALSE
-)
-
-mapk_adj_results_by_patient = rbindlist(mapply(
-    function(ct1, ct2, sid) {
-        tmp_dt = adjacencies_and_mapk[cell_type_test_from == ct1 & as.character(sample_id) == sid]
-        if (nrow(tmp_dt) == 0 || all(tmp_dt[[ct2]] == 0)) return(NULL)
-
-        # single-predictor model: no sample_id covariate needed since tmp_dt
-        # is already restricted to one patient
-        model = glm(
-            as.formula(paste0('`', ct2, '` ~ MAPK_overlap_score')),
-            data = tmp_dt, family = binomial(link = 'logit'), weights = weights
-        )
-        model_coef = as.data.frame(summary(model)$coefficients)
-        model_coef$variables = rownames(model_coef)
-        model_coef = as.data.table(model_coef)[variables == 'MAPK_overlap_score'][
-            # -log10(p) from the z-score directly in log-space (pnorm(...,
-            # log.p=TRUE)), not from Pr(>|z|) -- with these group sizes Pr(>|z|)
-            # can underflow to exactly 0 (double precision floor ~1e-308) for
-            # large |z|, which would otherwise make -log10(p) = Inf and break
-            # any plot axis built on it. The true -log10(p) is still finite
-            # (just very large) -- only the intermediate p-value underflows.
-            , c('neg_log10_p_value', 'effect', 'ct_from', 'ct_to', 'sample_id') := list(
-                -(log(2) + pnorm(-abs(`z value`), log.p = TRUE)) / log(10),
-                exp(Estimate), ct1, ct2, sid
-            )
-        ]
-        return(model_coef)
-    },
-    by_patient_combos$cell_type_from,
-    by_patient_combos$cell_type_to,
-    by_patient_combos$sample_id,
-    SIMPLIFY = FALSE
-))
-
-# BH-correct within each (cell type, patient) facet cell -- same convention as
-# the per-patient significance heatmap above: each facet is its own discovery
-# list, not corrected against the other 7 panels
-mapk_adj_results_by_patient[, q_value := p.adjust(`Pr(>|z|)`, method = 'BH'), .(ct_from, sample_id)]
-mapk_adj_results_by_patient = merge(mapk_adj_results_by_patient, sample_alteration_map, by = 'sample_id')
+# per-patient GLM: neighbor_prop[ct2] ~ MAPK_overlap_score (RAW), per (focal, neighbor, sample)
+sids = sort(unique(as.character(adjacencies_and_mapk$sample_id)))
+by_patient_combos = CJ(ct_from = focal_glia, ct_to = cell_types_in_dt, sample_id = sids, unique = TRUE)
+mapk_adj_results_by_patient = rbindlist(mapply(function(ct1, ct2, sid) {
+    tmp = adjacencies_and_mapk[cff == ct1 & sample_id == sid]
+    if (nrow(tmp) == 0 || all(tmp[[ct2]] == 0)) return(NULL)
+    m = glm(as.formula(sprintf('`%s` ~ MAPK_overlap_score', ct2)),
+            data = tmp, family = binomial(link = 'logit'), weights = weights)
+    co = as.data.table(summary(m)$coefficients, keep.rownames = 'variables')[variables == 'MAPK_overlap_score']
+    # underflow-safe -log10(p): some per-patient panels reach -log10(p) > 800, where Pr
+    # floors to 0; compute it in log-space from the z value instead.
+    co[, .(ct_from = ct1, ct_to = ct2, sample_id = sid, Estimate, effect = exp(Estimate),
+           p_value = `Pr(>|z|)`,
+           neg_log10_p_value = -(log(2) + pnorm(-abs(`z value`), log.p = TRUE)) / log(10))]
+}, by_patient_combos$ct_from, by_patient_combos$ct_to, by_patient_combos$sample_id, SIMPLIFY = FALSE))
+mapk_adj_results_by_patient[, q_value := p.adjust(p_value, method = 'BH'), .(ct_from, sample_id)]
+mapk_adj_results_by_patient = merge(mapk_adj_results_by_patient,
+                                    unique(mapk_scores[, .(sample_id, alteration)]), by = 'sample_id')
 mapk_adj_results_by_patient[, alteration := factor(alteration, levels = alteration_levels)]
-
-fwrite(
-    mapk_adj_results_by_patient,
-    paste0(workdir, 'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/mapk_adj_results_by_patient.tsv'),
-    sep = '\t'
-)
+mapk_adj_results_by_patient[, `:=`(ct_from_disp = disp(ct_from), ct_to_disp = disp(ct_to))]
+fwrite(mapk_adj_results_by_patient, paste0(out_dir, 'mapk_adj_results_by_patient.tsv'), sep = '\t')
 ```
 
 ```{r}
 #| fig-width: 13
 #| fig-height: 7.5
-# colors match the diverging red/blue used by the significance heatmaps above
-# (red = enriched, blue = depleted).
-#
-# facet_wrap, not facet_grid, for the free scales: facet_grid's scales='free'
-# only frees x PER COLUMN and y PER ROW (panels in the same row still share
-# one y-axis, same for columns and x) -- so one outlier panel (e.g. RAF1::TOP2B
-# / Astrocyte reaching -log10(p) ~800) was still stretching every other panel
-# in its row/column flat. facet_wrap's scales='free' gives each of the 8
-# panels its own fully independent x AND y range, which is what's actually
-# needed here (checked directly: Estimate range from [-0.03,0.01] to
-# [-1.46,0.14], -log10(p) up to >800 in some panels vs <10 in others).
-plot_dt = copy(mapk_adj_results_by_patient)
-
-# per-panel context: how many focal-cell-type (OPC/Astrocyte) cells are in
-# this patient's spatial sample, and what fraction of that sample they make
-# up -- shown in the strip subtitle so a null result can be read against how
-# much statistical power/tissue prevalence backed it
+# per-panel context: focal-cell count + % of the sample, in the strip subtitle so a null
+# panel can be read against how much tissue/power backed it (original convention).
 sp_composition = mapk_scores[type == 'spatial' & !is.na(cell_type)]
 sample_totals = sp_composition[, .(total_n = .N), sample_id]
-focal_composition = sp_composition[
-    cell_type %in% tumor_lineage_cell_types, .(n = .N), .(sample_id, cell_type)
-]
+focal_composition = sp_composition[cell_type %in% focal_glia, .(n = .N), .(sample_id, cell_type)]
 focal_composition = merge(focal_composition, sample_totals, by = 'sample_id')
 focal_composition[, pct := 100 * n / total_n]
 setnames(focal_composition, 'cell_type', 'ct_from')
 
-plot_dt[, sample_id := as.character(sample_id)]
-plot_dt = merge(plot_dt, focal_composition[, .(sample_id, ct_from, n, pct)], by = c('sample_id', 'ct_from'))
-plot_dt[, panel_subtitle := sprintf('n=%s (%.1f%% of sample)', format(n, big.mark = ','), pct)]
-plot_dt[, panel_label := paste0(ct_from, '  ·  ', alteration, '\n', panel_subtitle)]
-
-panel_levels = unique(plot_dt[order(
-    factor(ct_from, levels = tumor_lineage_cell_types), alteration
-), panel_label])
+plot_dt = merge(copy(mapk_adj_results_by_patient),
+                focal_composition[, .(sample_id, ct_from, n, pct)], by = c('sample_id', 'ct_from'))
+plot_dt[, panel_label := paste0(ct_from_disp, '  ·  ', alteration, '\n',
+                                sprintf('n=%s (%.1f%% of sample)', format(n, big.mark = ','), pct))]
+panel_levels = unique(plot_dt[order(factor(ct_from, levels = focal_glia), alteration), panel_label])
 plot_dt[, panel_label := factor(panel_label, levels = panel_levels)]
 
+# facet_wrap (not grid) for fully independent x AND y per panel -- one outlier panel
+# (-log10(p) up to ~800) would otherwise flatten the rest. Reference theme + styled labels.
+plot_dt[, sig := ifelse(q_value >= 0.05, 'not significant', ifelse(as.numeric(effect) > 1, 'enriched', 'depleted'))]
 ggplot(plot_dt, aes(x = Estimate, y = neg_log10_p_value)) +
-    geom_hline(
-        yintercept = -log10(0.05), linetype = 'dotted', color = 'grey55', linewidth = 0.4
-    ) +
+    geom_hline(yintercept = -log10(0.05), linetype = 'dotted', color = 'grey55', linewidth = 0.4) +
     geom_vline(xintercept = 0, linetype = 'dashed', color = 'grey40', linewidth = 0.5) +
-    geom_point(aes(color = ifelse(
-        q_value >= 0.05, 'not significant',
-        ifelse(as.numeric(effect) > 1, 'enriched', 'depleted')
-    )), size = 2, alpha = 0.7) +
-    geom_text_repel(aes(
-        label = ifelse(q_value < 0.05, gsub('`', '', ct_to), ''),
-        color = ifelse(as.numeric(effect) > 1, 'enriched', 'depleted')
-    ), max.overlaps = 100, force = 4, size = 2.8, fontface = 'bold',
-        segment.size = 0.3, segment.color = 'grey60', show.legend = FALSE) +
+    geom_point(aes(color = sig), size = 2, alpha = 0.7) +
+    geom_text_repel(aes(label = ifelse(q_value < 0.05, ct_to_disp, ''), color = sig),
+                    max.overlaps = 100, force = 4, size = 2.8, fontface = 'bold',
+                    segment.size = 0.3, segment.color = 'grey60', show.legend = FALSE) +
     facet_wrap(~ panel_label, scales = 'free', ncol = 4) +
-    scale_color_manual(values = c(
-        'enriched' = '#b2182b', 'depleted' = '#2166ac', 'not significant' = 'grey75'
-    )) +
-    labs(
-        title = 'Neighbor cell-type composition vs. MAPK activation, per patient',
-        subtitle = 'Panel: focal cell type (OPC/Astrocyte) · driver alteration  ·  dotted line: q = 0.05',
-        x = 'Effect size (log coefficient)', y = expression(-log[10](p)), color = NULL
-    ) +
-    theme_minimal(base_size = 13) +
-    theme(
-        axis.text = element_text(size = 8.5, color = 'grey40'),
-        panel.grid.minor = element_blank(),
-        panel.grid.major = element_line(color = 'grey92', linewidth = 0.4),
-        panel.background = element_rect(fill = 'grey98', color = NA),
-        strip.text = element_text(face = 'bold', size = 10.5, color = 'grey15', lineheight = 1.15),
-        strip.background = element_blank(),
-        panel.spacing = unit(0.8, 'lines'),
-        plot.title = element_text(face = 'bold', size = 16, margin = margin(b = 3)),
-        plot.subtitle = element_text(color = 'grey40', size = 11, margin = margin(b = 10)),
-        legend.position = 'bottom',
-        legend.text = element_text(size = 10)
-    )
+    scale_color_manual(values = c('enriched' = '#b2182b', 'depleted' = '#2166ac', 'not significant' = 'grey75'), name = NULL) +
+    labs(title = 'Neighbor cell-type composition vs. MAPK activation, per patient',
+         subtitle = 'Panel: focal cell type (OPC/Astrocyte) · driver alteration  ·  dotted line: q = 0.05',
+         x = 'Effect size (log coefficient)', y = expression(-log[10](p))) +
+    ref_theme
 ```
 
-# Myeloid glial-exposure analysis
+# Q2 -- Myeloid programs by glial neighborhood (nested 3-group)
 
-How does being near MAPK-high glial cells (OPC/Astrocyte) alter myeloid cell gene programs? We answer this in two parts using the k-NN graph already built above:
+For each myeloid cell we classify its glial neighborhood:
 
-- **Part A** — binary adjacency: does having *any* glial neighbor associate with a myeloid signature score? (all myeloid cells)
-- **Part B** — continuous MAPK dose: among myeloid cells with ≥2 glial neighbors, does the *mean MAPK level* of those neighbors track the myeloid signature score? (weighted least squares, `weights = n_glial_neighbors`, to down-weight cells with noisy exposure estimates)
+- **pa_niche_glia** -- >=1 glial neighbor whose niche is a PA glial niche
+- **other_glia** -- has glial neighbor(s), but none in a PA niche
+- **no_glial** -- no glial neighbor at all
 
-Signature scores come from `myeloid_signature_scores.csv` (56 signatures: 50 MSigDB Hallmark + 6 myeloid/immune literature sets; generated by `build_myeloid_signatures.py` + `1_PA_MAPK_scores.qmd`). Scores are z-scored within each patient before fitting so effect sizes are comparable across signatures.
+We fit two models per sample x signature:
 
-## Build glial exposure table
+- **Model 1 (primary, all myeloid cells):** `signature ~ exposure_group`,
+  reference = `other_glia`, so the `pa_niche_glia` coefficient is the direct
+  PA-specific effect (does PA-tumor-niche glial exposure shift the program beyond
+  generic glial exposure?).
+- **Model 2 (refinement, glia-adjacent cells only):**
+  `signature ~ (pa_niche_glia vs other_glia) + mean_glial_mapk`. The MAPK dose is
+  undefined for no-glial cells, so they are dropped here. This asks whether
+  PA-niche proximity adds anything *beyond* the glial cells' own MAPK level.
+
+Signatures (56: 50 MSigDB Hallmark + 6 myeloid/immune literature sets) are
+z-scored within each patient before fitting.
+
+**Inference framing (important).** The models are fit *per cell*, so with thousands
+of cells per group the per-cell p-values collapse and nearly every signature clears
+q < 0.05 within a sample. That per-cell hit count is **not** a cohort claim -- it is
+pseudoreplication. The real inferential unit here is the **sample (n = 4)**. We
+therefore read Q2 **descriptively / hypothesis-generating**: standardized effect
+size + directional consistency across the 4 PA samples, not cohort-level
+significance (`project_cohort_granularity`: n confounded, broad strokes only). For
+calibration, a 4/4 same-direction sign test is only p = 0.125, and ~7 of 56
+signatures would reach 4/4 by chance, so the all-4-consistent set is *suggestive
+above chance*, not individually significant.
+
+**Contrast structure.** Because the PA glial niches (3/5) hold most glial cells in
+PA, most glia-adjacent myeloid cells land in `pa_niche_glia` (a broad tumor-core
+tent) while `other_glia` is a smaller tumor-periphery group. This imbalance is the
+intended tumor-core-vs-periphery contrast, by design, not a defect.
+
+## Build myeloid glial-exposure table
 
 ```{r}
-glial_cell_types_target = c('Astrocyte', 'OPC')
+glial_mapk_lookup  = mapk_scores[type == 'spatial', .(cell_id, glial_mapk = MAPK_overlap_score)]
+glial_niche_lookup = cell_meta_pa[cell_type %in% glial_types, .(to_id = cell_id, to_niche = niche)]
 
-# MAPK scores of spatial cells, for looking up glial neighbors' activation levels
-glial_mapk_lookup = mapk_scores[type == 'spatial', .(cell_id, glial_mapk = MAPK_overlap_score)]
+# myeloid -> glial directed edges, tagged with each glial neighbor's niche + MAPK
+myeloid_glial_edges = adjacencies[cell_type_from == 'myeloid' & cell_type_to %in% glial_types]
+myeloid_glial_edges = merge(myeloid_glial_edges, glial_niche_lookup, by = 'to_id')
+myeloid_glial_edges = merge(myeloid_glial_edges, glial_mapk_lookup, by.x = 'to_id', by.y = 'cell_id')
+myeloid_glial_edges[, to_in_pa_niche := to_niche %in% pa_glial_niches]
 
-# All unique myeloid cells present in the PA spatial kNN graph
-all_myeloid_cells = unique(
-    adjacencies[cell_type_test_from == 'Myeloid', .(cell_id = from_id, sample_id)]
-)
+# aggregate per myeloid cell: glial-neighbor count, PA-niche-glial count, mean glial MAPK
+glial_agg = myeloid_glial_edges[, .(
+    n_glial         = .N,
+    n_pa_glial      = sum(to_in_pa_niche),
+    mean_glial_mapk = mean(glial_mapk)      # over ALL glial neighbors -> Model 2 dose covariate
+), .(cell_id = from_id, sample_id)]
 
-# Myeloid→glial directed edges enriched with the glial neighbor's MAPK score
-myeloid_glial_edges = adjacencies[
-    cell_type_test_from == 'Myeloid' & cell_type_test_to %in% glial_cell_types_target
-][
-    glial_mapk_lookup, on = c('to_id' = 'cell_id'), nomatch = NULL
-]
+# keep every myeloid cell, including those with zero glial neighbors
+all_myeloid = unique(adjacencies[cell_type_from == 'myeloid', .(cell_id = from_id, sample_id)])
+myeloid_exposure = merge(all_myeloid, glial_agg, by = c('cell_id', 'sample_id'), all.x = TRUE)
+myeloid_exposure[is.na(n_glial), `:=`(n_glial = 0L, n_pa_glial = 0L, mean_glial_mapk = NA_real_)]
+myeloid_exposure[, exposure_group := fcase(
+    n_pa_glial >= 1, 'pa_niche_glia',
+    n_glial   >= 1,  'other_glia',
+    default = 'no_glial'
+)]
+# reference = other_glia so the pa_niche_glia coefficient is the PA-specific effect
+myeloid_exposure[, exposure_group := factor(exposure_group, levels = c('other_glia', 'pa_niche_glia', 'no_glial'))]
+myeloid_exposure[, sample_id := as.character(sample_id)]
 
-# Aggregate per myeloid cell: count glial neighbors, average their MAPK
-glial_exposure_agg = myeloid_glial_edges[
-    , .(n_glial_neighbors = .N, mean_glial_mapk = mean(glial_mapk))
-    , .(cell_id = from_id, sample_id)
-]
-
-# Full join to keep myeloid cells with zero glial neighbors (important for Part A)
-myeloid_glial_exposure = merge(
-    all_myeloid_cells, glial_exposure_agg,
-    by = c('cell_id', 'sample_id'), all.x = TRUE
-)
-myeloid_glial_exposure[
-    is.na(n_glial_neighbors),
-    `:=`(n_glial_neighbors = 0L, mean_glial_mapk = NA_real_)
-][
-    , has_glial_neighbor := n_glial_neighbors >= 1
-]
-
-cat(sprintf(
-    'Myeloid cells total: %d | with ≥1 glial neighbor: %d (%.1f%%) | with ≥2: %d (%.1f%%)\n',
-    nrow(myeloid_glial_exposure),
-    sum(myeloid_glial_exposure$has_glial_neighbor),
-    100 * mean(myeloid_glial_exposure$has_glial_neighbor),
-    sum(myeloid_glial_exposure$n_glial_neighbors >= 2),
-    100 * mean(myeloid_glial_exposure$n_glial_neighbors >= 2)
-))
-
-fwrite(
-    myeloid_glial_exposure,
-    paste0(workdir, 'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure.tsv'),
-    sep = '\t'
-)
+# per-sample group counts (feasibility of Model 1 / Model 2 per sample)
+group_counts = dcast(myeloid_exposure[, .N, .(sample_id, exposure_group)],
+                     sample_id ~ exposure_group, value.var = 'N', fill = 0)
+cat('Q2 myeloid exposure-group counts per sample:\n'); print(group_counts)
+fwrite(myeloid_exposure, paste0(out_dir, 'myeloid_glial_exposure.tsv'), sep = '\t')
 ```
 
-## Load myeloid signature scores and join
+## Load myeloid signature scores and z-score per patient
 
 ```{r}
-# myeloid_signature_scores.csv: 45k myeloid cells × 56 score columns + cell_id + sample_id.
-# Generated by 1_PA_MAPK_scores.qmd (sc.tl.score_genes on spatial ENVI imputation).
-sig_scores = fread(paste0(
-    workdir, 'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/myeloid_signature_scores.csv'
-))
+# myeloid_signature_scores.csv: myeloid cells x 56 score columns + cell_id + sample_id
+# (Phase 1: sc.tl.score_genes on the spatial ENVI imputation, subset to new myeloid label).
+sig_scores = fread(paste0(out_dir, 'myeloid_signature_scores.csv'))
 score_cols = grep('_score$', names(sig_scores), value = TRUE)
+sig_scores[, sample_id := as.character(sample_id)]
 
-# Join with glial exposure; warn if match rate is low
 myeloid_data = merge(
-    myeloid_glial_exposure,
+    myeloid_exposure,
     sig_scores[, c('cell_id', 'sample_id', score_cols), with = FALSE],
     by = c('cell_id', 'sample_id')
 )
-cat(sprintf(
-    'Joined %d / %d myeloid cells to signature scores (%.1f%% match).\n',
-    nrow(myeloid_data), nrow(myeloid_glial_exposure),
-    100 * nrow(myeloid_data) / nrow(myeloid_glial_exposure)
-))
+cat(sprintf('Joined %d / %d myeloid cells to signature scores (%.1f%% match); %d signatures.\n',
+            nrow(myeloid_data), nrow(myeloid_exposure),
+            100 * nrow(myeloid_data) / nrow(myeloid_exposure), length(score_cols)))
 
-# Z-score each signature within each patient before fitting.
-# sc.tl.score_genes baselines are per-sample, so raw magnitudes are not
-# cross-patient comparable (same rationale as the MAPK significance section above).
+# z-score each signature within each patient (per-sample score_genes baselines)
 myeloid_data[
     , (score_cols) := lapply(.SD, function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE))
     , .SDcols = score_cols, by = sample_id
 ]
 ```
 
-## Part A: binary glial adjacency → myeloid signature scores
+## Fit both models
 
 ```{r}
 #| results: hold
-fit_lm_row = function(dt, sig_col, predictor_col, weight_col = NULL) {
-    fml = as.formula(paste0('`', sig_col, '` ~ `', predictor_col, '`'))
+MIN_N_GRP = 30   # min cells per contrasted group
+
+# Fit lm(sig ~ rhs) and return the single coefficient whose term == term_keep.
+# Name-based selection (unlike a single-predictor helper) so it works with the
+# 3-level factor and the covariate-adjusted model.
+fit_term_row = function(dt, sig_col, rhs, term_keep, weight_col = NULL) {
+    fml = as.formula(paste0('`', sig_col, '` ~ ', rhs))
     wts = if (!is.null(weight_col)) dt[[weight_col]] else NULL
     m = tryCatch(lm(fml, data = dt, weights = wts), error = function(e) NULL)
     if (is.null(m)) return(NULL)
-    coefs = as.data.frame(summary(m)$coefficients)
-    coefs$term = rownames(coefs)
-    row = as.data.table(coefs)[term == paste0('`', predictor_col, '`')]
-    if (nrow(row) == 0) return(NULL)
-    data.table(
-        signature   = sig_col,
-        Estimate    = row$Estimate,
-        SE          = row[['Std. Error']],
-        t_value     = row[['t value']],
-        p_value     = row[['Pr(>|t|)']],
-        r_squared   = summary(m)$r.squared,
-        n_cells     = nrow(dt)
-    )
+    co = as.data.table(summary(m)$coefficients, keep.rownames = 'term')
+    row = co[term == term_keep]
+    if (nrow(row) != 1) return(NULL)
+    data.table(signature = sig_col, Estimate = row$Estimate, SE = row[['Std. Error']],
+               t_value = row[['t value']], p_value = row[['Pr(>|t|)']], n_cells = nrow(dt))
 }
 
-combos_a = CJ(sample_id = unique(myeloid_data$sample_id), signature = score_cols)
-
-parta_results = rbindlist(mapply(
-    function(sid, sig) {
-        dt = myeloid_data[sample_id == sid, .SD, .SDcols = c(sig, 'has_glial_neighbor')]
-        dt = dt[complete.cases(dt)]
-        # require ≥30 cells and both glial/non-glial groups represented
-        if (nrow(dt) < 30 || length(unique(dt$has_glial_neighbor)) < 2) return(NULL)
-        res = fit_lm_row(dt, sig, 'has_glial_neighbor')
-        if (!is.null(res)) res[, sample_id := sid]
-        res
-    },
-    combos_a$sample_id, combos_a$signature, SIMPLIFY = FALSE
-))
-
-parta_results[, q_value := p.adjust(p_value, method = 'BH'), by = sample_id]
-parta_results = merge(parta_results, unique(mapk_scores[, .(sample_id, alteration)]), by = 'sample_id')
-parta_results[, alteration := factor(alteration, levels = alteration_levels)]
-
-fwrite(
-    parta_results,
-    paste0(workdir, 'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure_parta_results.tsv'),
-    sep = '\t'
+# empty, correctly-typed results table (so BH/merge don't error if nothing fits)
+empty_results = function() data.table(
+    signature = character(0), Estimate = numeric(0), SE = numeric(0), t_value = numeric(0),
+    p_value = numeric(0), n_cells = integer(0), sample_id = character(0),
+    q_value = numeric(0), alteration = factor(character(0), levels = alteration_levels)
 )
-cat('Part A: significant (q<0.05) signature-patient hits:', sum(parta_results$q_value < 0.05, na.rm = TRUE), '\n')
+
+finalize = function(res, path) {
+    if (nrow(res) == 0 || !'sample_id' %in% names(res)) {
+        res = empty_results()
+    } else {
+        res[, q_value := p.adjust(p_value, method = 'BH'), by = sample_id]
+        res = merge(res, unique(mapk_scores[, .(sample_id, alteration)]), by = 'sample_id')
+        res[, alteration := factor(alteration, levels = alteration_levels)]
+    }
+    fwrite(res, path, sep = '\t')
+    res
+}
+
+samples = unique(myeloid_data$sample_id)
+
+# --- Model 1: 3-group, all myeloid cells, PA-niche-glia vs other-glia ---------
+combos = CJ(sample_id = samples, signature = score_cols)
+nested_results = rbindlist(mapply(function(sid, sig) {
+    dt = myeloid_data[sample_id == sid, .SD, .SDcols = c(sig, 'exposure_group')]
+    dt = dt[complete.cases(dt)]
+    dt[, exposure_group := droplevels(exposure_group)]
+    # need both the reference (other_glia) and pa_niche_glia populated
+    if (dt[exposure_group == 'pa_niche_glia', .N] < MIN_N_GRP ||
+        dt[exposure_group == 'other_glia',   .N] < MIN_N_GRP) return(NULL)
+    res = fit_term_row(dt, sig, 'exposure_group', 'exposure_grouppa_niche_glia')
+    if (!is.null(res)) res[, sample_id := sid]
+    res
+}, combos$sample_id, combos$signature, SIMPLIFY = FALSE))
+nested_results = finalize(nested_results, paste0(out_dir, 'myeloid_glial_exposure_nested_results.tsv'))
+cat('Model 1 (3-group): significant (q<0.05) signature-patient hits:',
+    sum(nested_results$q_value < 0.05, na.rm = TRUE), '\n')
+
+# --- Model 2: covariate-adjusted, glia-adjacent cells only --------------------
+# drop no_glial (mean_glial_mapk undefined); binary pa vs other + MAPK dose
+adj_base = myeloid_data[exposure_group %in% c('pa_niche_glia', 'other_glia')]
+adj_base[, exposure_group := droplevels(exposure_group)]   # reference = other_glia
+covar_results = rbindlist(mapply(function(sid, sig) {
+    dt = adj_base[sample_id == sid, .SD, .SDcols = c(sig, 'exposure_group', 'mean_glial_mapk')]
+    dt = dt[complete.cases(dt)]
+    if (dt[exposure_group == 'pa_niche_glia', .N] < MIN_N_GRP ||
+        dt[exposure_group == 'other_glia',   .N] < MIN_N_GRP) return(NULL)
+    res = fit_term_row(dt, sig, 'exposure_group + mean_glial_mapk', 'exposure_grouppa_niche_glia')
+    if (!is.null(res)) res[, sample_id := sid]
+    res
+}, combos$sample_id, combos$signature, SIMPLIFY = FALSE))
+covar_results = finalize(covar_results, paste0(out_dir, 'myeloid_glial_exposure_covariate_results.tsv'))
+cat('Model 2 (MAPK-adjusted): significant (q<0.05) signature-patient hits:',
+    sum(covar_results$q_value < 0.05, na.rm = TRUE), '\n')
 ```
 
-## Part B: continuous glial MAPK dose → myeloid signature scores
+## Cohort readout: effect size + cross-sample consistency (the Q2 answer)
+
+The per-cell q<0.05 hit counts above are **within-sample descriptive only** and are
+dominated by pseudoreplication (thousands of cells per group ⇒ SEs collapse). The
+cohort-level Q2 answer is read off the **per-sample standardized effect sizes** and
+their **directional consistency across the 4 PA samples**. A signature is
+"all-4-consistent" if it was fittable in all 4 samples and every per-sample beta
+shares the same sign. Calibration: ~7 of 56 signatures would reach 4/4 by chance,
+so this set is *suggestive above chance*, not individually significant at n=4.
 
 ```{r}
-#| results: hold
-# Restrict to myeloid cells with ≥2 glial neighbors; weight by n_glial_neighbors
-# so cells with more neighbors (lower-noise mapk exposure estimates) pull harder.
-partb_base = myeloid_data[n_glial_neighbors >= 2]
+# Collapse per-sample betas to one row per signature: directional consistency +
+# mean standardized effect. Uses ALL fitted per-sample betas (not the per-cell
+# q-value), because the sample is the inferential unit here.
+q2_consistency = function(res, label) {
+    if (nrow(res) == 0) return(data.table(signature = character(0)))
+    s = res[!is.na(Estimate), .(
+        n_samples = .N,                       # samples where the contrast was fittable (N>=MIN_N_GRP)
+        n_pos     = sum(Estimate > 0),
+        n_neg     = sum(Estimate < 0),
+        mean_beta = mean(Estimate)            # mean standardized effect across samples
+    ), by = signature]
+    s[, consistent_4 := n_samples == 4L & (n_pos == 4L | n_neg == 4L)]
+    s[, model := label]
+    s[order(-consistent_4, -abs(mean_beta))]
+}
+nested_consistency = q2_consistency(nested_results, 'Model1_3group')
+covar_consistency  = q2_consistency(covar_results,  'Model2_MAPKadj')
 
-combos_b = CJ(sample_id = unique(partb_base$sample_id), signature = score_cols)
+# Q2 headline table: the all-4-consistent signatures under Model 1, most-affected first.
+headline = nested_consistency[consistent_4 == TRUE][order(-abs(mean_beta))]
+cat('All-4-sample-consistent signatures (Model 1):', nrow(headline),
+    '(vs ~7 expected by chance across 56)\n')
+kable(headline[, .(signature = sub('_score$', '', signature),
+                   direction = ifelse(mean_beta > 0, 'up', 'down'),
+                   mean_beta = round(mean_beta, 3))],
+      caption = 'Q2 headline: myeloid programs consistently shifted near PA-niche glia across all 4 PA samples')
 
-partb_results = rbindlist(mapply(
-    function(sid, sig) {
-        dt = partb_base[sample_id == sid, .SD,
-                        .SDcols = c(sig, 'mean_glial_mapk', 'n_glial_neighbors')]
-        dt = dt[complete.cases(dt)]
-        if (nrow(dt) < 30) return(NULL)
-        res = fit_lm_row(dt, sig, 'mean_glial_mapk', weight_col = 'n_glial_neighbors')
-        if (!is.null(res)) res[, sample_id := sid]
-        res
-    },
-    combos_b$sample_id, combos_b$signature, SIMPLIFY = FALSE
-))
-
-partb_results[, q_value := p.adjust(p_value, method = 'BH'), by = sample_id]
-partb_results = merge(partb_results, unique(mapk_scores[, .(sample_id, alteration)]), by = 'sample_id')
-partb_results[, alteration := factor(alteration, levels = alteration_levels)]
-
-fwrite(
-    partb_results,
-    paste0(workdir, 'youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA/myeloid_glial_exposure_partb_results.tsv'),
-    sep = '\t'
-)
-cat('Part B: significant (q<0.05) signature-patient hits:', sum(partb_results$q_value < 0.05, na.rm = TRUE), '\n')
+# Model 2 attenuation: how much does adjusting for neighbor-glial MAPK dose shrink
+# the PA-niche effect on this consistent set? Persistence (small attenuation) is the
+# evidence that PA-niche proximity is not merely a proxy for the glia's MAPK level.
+atten = merge(
+    headline[, .(signature, beta_m1 = mean_beta)],
+    covar_consistency[, .(signature, beta_m2 = mean_beta)],
+    by = 'signature')
+atten[, atten_pct := round(100 * (1 - beta_m2 / beta_m1), 1)]   # % shrink of |effect| under MAPK adjustment
+cat(sprintf('Model 2 attenuation over the consistent set: median %.0f%% (IQR %.0f-%.0f%%); %d/%d retain sign.\n',
+            median(atten$atten_pct, na.rm = TRUE),
+            quantile(atten$atten_pct, 0.25, na.rm = TRUE),
+            quantile(atten$atten_pct, 0.75, na.rm = TRUE),
+            atten[sign(beta_m2) == sign(beta_m1), .N], nrow(atten)))
+kable(atten[order(-abs(beta_m1)), .(signature = sub('_score$', '', signature),
+            beta_model1 = round(beta_m1, 3), beta_model2 = round(beta_m2, 3),
+            attenuation_pct = atten_pct)],
+      caption = 'PA-niche effect attenuates modestly but persists after adjusting for glial MAPK dose')
 ```
 
-## Heatmap: glial MAPK dose effect on myeloid signatures (Part B)
+**Reading this.** The PA-niche myeloid shift is carried by the all-4-consistent set,
+not by the raw per-cell hit count. Under MAPK adjustment (Model 2) those effects
+attenuate only modestly and keep their sign — so neighbor-glial MAPK dose explains
+part but not most of the signal, and PA-niche proximity is not simply a MAPK proxy.
 
-Signatures are sorted by mean |estimate| across patients (most-affected at top). Bold labels = myeloid/immune-specific signatures; plain = generic Hallmark (cell cycle, metabolism, etc.) included as specificity controls.
+### Interpretation
+
+The **20 of 56** signatures that move the same direction in all 4 PA samples (~7 expected
+by chance ⇒ ~3× enrichment; per-cell q is pseudoreplicated and not the claim) split into
+two coherent, biologically consistent themes — myeloid cells near PA-niche glia (the tumor
+core), relative to myeloid near other glia (periphery):
+
+- **Immunosuppressive / alternatively-activated TAM shift** — ↓ inflammatory response,
+  ↓ IFN-γ response, ↓ allograft rejection, ↓ homeostatic (TIM3-neg) microglia, ↓ FOSL2
+  regulon; ↑ complement, ↑ activated-microglia (MG_Act). A pull away from pro-inflammatory/
+  antigen-presenting microglia toward a complement-high, immunosuppressive-leaning TAM state.
+- **Metabolic reprogramming** — ↓ glycolysis, ↓ hypoxia, ↓ PI3K–AKT–mTOR, ↓ apoptosis;
+  ↑ heme metabolism, ↑ adipogenesis (lipid), ↑ xenobiotic metabolism, ↑ coagulation. A switch
+  from glycolytic/hypoxic signaling toward lipid/heme scavenging — the metabolic signature of
+  scavenger/anti-inflammatory macrophages.
+
+Because these persist under MAPK adjustment (Model 2: ~9% median attenuation, 20/20 keep
+sign), the phenotype tracks **PA-niche proximity itself, not the neighboring glia's MAPK
+dose**. Caveat: n = 4 (suggestive/hypothesis-generating, not cohort-significant), ENVI-imputed
+on a 266-gene panel.
+
+## Heatmaps
+
+Signatures sorted by mean |beta| across patients (most-affected at top). Bold
+rows = myeloid/immune-specific signatures; plain = generic Hallmark controls.
+Fill = standardized beta where the **within-sample** per-cell q < 0.05 (BH per
+patient); grey = n.s. The per-cell q here is descriptive within each sample (it is
+inflated by pseudoreplication) — the cohort-level answer is the all-4-consistent
+set in the table above, and these heatmaps show the per-sample effect **sizes** and
+their sign agreement across the 4 columns.
 
 ```{r}
 #| fig-width: 9
 #| fig-height: 14
-# Signatures considered myeloid/immune-specific (bold in plot)
 immune_sigs = c(
-    'HALLMARK_INFLAMMATORY_RESPONSE_score',
-    'HALLMARK_INTERFERON_GAMMA_RESPONSE_score',
-    'HALLMARK_INTERFERON_ALPHA_RESPONSE_score',
-    'HALLMARK_TNFA_SIGNALING_VIA_NFKB_score',
-    'HALLMARK_COMPLEMENT_score',
-    'HALLMARK_IL6_JAK_STAT3_SIGNALING_score',
-    'HALLMARK_IL2_STAT5_SIGNALING_score',
-    'HALLMARK_ALLOGRAFT_REJECTION_score',
-    'MG_Act_Tripathi_score',
-    'PA_TIM3pos_Microglia_score',
-    'PA_TIM3neg_Microglia_score',
-    'Bernstein_Complement_Immunosuppressive_score',
-    'Bernstein_Scavenger_Immunosuppressive_score',
+    'HALLMARK_INFLAMMATORY_RESPONSE_score', 'HALLMARK_INTERFERON_GAMMA_RESPONSE_score',
+    'HALLMARK_INTERFERON_ALPHA_RESPONSE_score', 'HALLMARK_TNFA_SIGNALING_VIA_NFKB_score',
+    'HALLMARK_COMPLEMENT_score', 'HALLMARK_IL6_JAK_STAT3_SIGNALING_score',
+    'HALLMARK_IL2_STAT5_SIGNALING_score', 'HALLMARK_ALLOGRAFT_REJECTION_score',
+    'MG_Act_Tripathi_score', 'PA_TIM3pos_Microglia_score', 'PA_TIM3neg_Microglia_score',
+    'Bernstein_Complement_Immunosuppressive_score', 'Bernstein_Scavenger_Immunosuppressive_score',
     'FOSL2_Regulon_Small_score'
 )
 
-plot_exposure_heatmap = function(results_dt, title) {
+plot_exposure_heatmap = function(results_dt, title, subtitle) {
+    if (nrow(results_dt) == 0) {
+        return(ggplot() +
+            annotate('text', x = 0.5, y = 0.5, size = 4.5, color = 'grey30',
+                     label = paste0(title, '\n\n(no fitted rows: contrasted groups under-populated in this cohort)')) +
+            theme_void())
+    }
     dt = copy(results_dt)
     dt[, sig_label := sub('_score$', '', signature)]
-    row_order = dt[
-        , .(mean_abs = mean(abs(Estimate), na.rm = TRUE)), sig_label
-    ][order(-mean_abs)]$sig_label
+    row_order = dt[, .(mean_abs = mean(abs(Estimate), na.rm = TRUE)), sig_label][order(-mean_abs)]$sig_label
     dt[, sig_label := factor(sig_label, levels = row_order)]
-    # only fill cells significant at q < 0.05; grey otherwise (matching
-    # the patient-significance heatmap convention above)
     dt[, fill_val := ifelse(q_value < 0.05, Estimate, NA_real_)]
-
     is_immune = sub('_score$', '', immune_sigs)
     face_vec = ifelse(levels(dt$sig_label) %in% is_immune, 'bold', 'plain')
 
     ggplot(dt, aes(x = alteration, y = sig_label, fill = fill_val)) +
         geom_tile(color = 'white', linewidth = 0.6) +
-        scale_fill_gradient2(
-            low = '#2166ac', mid = '#f7f7f7', high = '#b2182b', midpoint = 0,
-            na.value = 'grey92', limits = c(-1, 1),
-            name = 'Standardized\nbeta (q<0.05)'
-        ) +
+        scale_fill_gradient2(low = '#2166ac', mid = '#f7f7f7', high = '#b2182b', midpoint = 0,
+                             na.value = 'grey92', limits = c(-1, 1), name = 'Standardized\nbeta (q<0.05)') +
         scale_x_discrete(expand = expansion(add = 0.6)) +
         scale_y_discrete(expand = expansion(add = 0.6)) +
-        labs(
-            title = title,
-            subtitle = 'Fill: β from z-scored signature ~ mean glial MAPK (q<0.05 BH per patient); grey = n.s.\nBold rows = myeloid/immune-specific signatures; plain = generic Hallmark controls'
-        ) +
+        labs(title = title, subtitle = subtitle) +
         theme_minimal(base_size = 12) +
-        theme(
-            axis.title = element_blank(),
-            axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
-            axis.text.y = element_text(size = 8, face = face_vec),
-            panel.grid = element_blank(),
-            plot.title = element_text(face = 'bold', size = 14, margin = margin(b = 4)),
-            plot.subtitle = element_text(size = 9, color = 'grey40', margin = margin(b = 8)),
-            legend.title = element_text(size = 9),
-            legend.key.height = unit(1.4, 'lines')
-        )
+        theme(axis.title = element_blank(),
+              axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+              axis.text.y = element_text(size = 8, face = face_vec),
+              panel.grid = element_blank(),
+              plot.title = element_text(face = 'bold', size = 14, margin = margin(b = 4)),
+              plot.subtitle = element_text(size = 9, color = 'grey40', margin = margin(b = 8)),
+              legend.title = element_text(size = 9), legend.key.height = unit(1.4, 'lines'))
 }
 
 plot_exposure_heatmap(
-    partb_results,
-    'Effect of glial MAPK exposure on myeloid gene program scores (Part B)'
+    nested_results,
+    'Q2 Model 1: PA-niche-glial vs other-glial exposure on myeloid programs',
+    'Fill: beta for pa_niche_glia vs other_glia (reference), z-scored signature, all myeloid cells.\nBold = myeloid/immune-specific; plain = generic Hallmark controls.'
 )
 ```
 
 ```{r}
 #| fig-width: 9
 #| fig-height: 14
-# Part A for comparison: binary adjacency effect (same layout, different predictor)
 plot_exposure_heatmap(
-    parta_results,
-    'Effect of glial adjacency (binary) on myeloid gene program scores (Part A)'
+    covar_results,
+    'Q2 Model 2: PA-niche-glial effect adjusted for glial MAPK dose',
+    'Fill: beta for pa_niche_glia vs other_glia, adjusting for mean neighbor-glial MAPK (glia-adjacent cells only).\nSurviving signal = PA-niche proximity effect beyond the glial cells own MAPK level.'
 )
 ```
