@@ -1,0 +1,7 @@
+# build artifacts / scratch (not source)
+*.pdf
+deck-*.jpg
+prev-*.jpg
+prev1_*.jpg
+~$*.pptx
+src/__pycache__/
