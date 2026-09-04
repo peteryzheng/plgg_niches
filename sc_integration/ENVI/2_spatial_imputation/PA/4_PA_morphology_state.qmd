@@ -1,0 +1,632 @@
+---
+title: "PA morphology and cell state: compact vs myxoid"
+subtitle: "Do OPC, astrocyte, and myeloid cells upregulate a glycan-ECM program in loose (myxoid) regions?"
+author: "Peter Youyun Zheng"
+date: today
+date-format: long
+format:
+    html:
+        code-fold: true
+        page-layout: full
+        fig-width: 12
+        fig-height: 6
+        toc: true
+        toc-depth: 3
+        embed-resources: true
+jupyter: python3
+---
+
+# Introduction
+
+Deck-restructure keystone (edge 3 / analysis A2): **does morphology encode cell
+state?** Holding cell type constant, we ask whether OPC-lineage, astrocyte, and
+myeloid cells upregulate a **glycan-ECM program** in their ENVI-imputed
+transcriptome when they sit in **loose (myxoid)** vs **compact (fibrillary)**
+pathology regions. Myxoid = a glycan-rich matrix, so *driver → glycan/secretory
+state → myxoid morphology* would close the biphasic-PA loop.
+
+The ENVI objects are here: `data/sc_integration/ENVI_results_022626`.
+
+**How to read the results:**
+
+- **Inferential unit = sample, n = 3.** Each patient contributes one *pseudobulk*
+  mean per region, so the contrast is 3 compact vs 3 loose per cell type — cell-rich
+  patients cannot dominate. Sample 258482 has **no compact annotation** and drops
+  everywhere (usable: 188570, 320784, 328368).
+- **Two complementary readouts, reported together:** (i) unbiased preranked GSEA over
+  all ~7,880 MSigDB sets (FDR is BH-adjusted across the *entire* collection, then we
+  filter to glycan/ECM sets for display), and (ii) a curated 34-gene glycan-ECM score
+  read as **per-patient direction (x/3) + effect**. A result is "robust" only when
+  both agree.
+- **Effect sizes are small by construction** — `score_genes` is background-subtracted,
+  and ENVI imputation shrinks expression toward the conditional mean (attenuating
+  magnitudes). The rank-based **NES** and per-patient direction, not the raw delta, are
+  the effect readouts.
+- **The glycan axis is partly definitional** (myxoid *is* glycan-rich matrix) — so a hit
+  is confirmatory. The compact/myxoid transcriptional shift is also *broad* (many sets
+  move), so we focus on a **curated matrix-glycan panel** with a coherent biosynthesis-up
+  / catabolism-down pattern rather than on raw significance. Labels are broad lineages
+  (tumor identity proxy-based); imputed state is bounded by the 266-gene panel. (A SASP
+  axis was examined and dropped: curated-only, not GSEA-corroborated.)
+
+```{python}
+import os
+import subprocess
+import shutil
+import sys
+import re
+import glob
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import anndata as ad
+import scanpy as sc
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import seaborn as sns
+
+# ---- Publication-ready plotting defaults -----------------------------------
+sns.set_theme(style="white", context="talk", font_scale=1.35)
+mpl.rcParams.update({
+    "figure.dpi": 120,
+    "savefig.dpi": 300,
+    "savefig.bbox": "tight",
+    "axes.titleweight": "bold",
+    "axes.titlesize": 18,
+    "axes.labelsize": 16,
+    "xtick.labelsize": 16,
+    "ytick.labelsize": 15,
+    "legend.fontsize": 15,
+    "font.size": 16,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "font.family": "sans-serif",
+    "pdf.fonttype": 42,  # editable text in Illustrator
+})
+
+# Consistent semantic colors reused across every figure.
+REGION_COLORS = {"compact": "#4C72B0", "loose": "#C44E52"}   # compact=blue, myxoid=red
+UP_DOWN = {"up": "#C44E52", "down": "#4C72B0"}
+# FDR significance tiers (RdBu reds; grey = not significant).
+TIER_ORDER = ["q < 0.05", "q < 0.25", "n.s. (q ≥ 0.25)"]
+TIER_COLORS = {"q < 0.05": "#b2182b", "q < 0.25": "#ef8a62", "n.s. (q ≥ 0.25)": "#cfcfcf"}
+
+def fdr_tier(padj):
+    if padj < 0.05:
+        return "q < 0.05"
+    if padj < 0.25:
+        return "q < 0.25"
+    return "n.s. (q ≥ 0.25)"
+
+def fdr_stars(padj):
+    return "**" if padj < 0.05 else ("*" if padj < 0.25 else "")
+
+def prettify_set_name(s, maxlen=42):
+    # strip the MSigDB source prefix and title-case for a talk audience
+    for pre in ["GOBP_", "GOMF_", "GOCC_", "REACTOME_", "KEGG_MEDICUS_", "KEGG_", "WP_", "HALLMARK_"]:
+        if s.startswith(pre):
+            s = s[len(pre):]
+            break
+    s = s.replace("_", " ").strip().title()
+    # keep common acronyms upper
+    for ac in ["Ecm", "Gag", "Hs", "N Glycosylation", "O Glycosylation"]:
+        s = s.replace(ac, ac.upper().replace("N GLYCOSYLATION", "N-glycosylation").replace("O GLYCOSYLATION", "O-glycosylation"))
+    return s if len(s) <= maxlen else s[: maxlen - 1] + "…"
+
+def short_sample(name):
+    # "188570 pilocytic astrocytoma" -> "188570"
+    return str(name).split()[0]
+
+# local vs cluster (same HOME-based rule used across the PA notebooks)
+if os.path.expanduser('~') in ["/Users/youyun", "/Users/youyunzheng"]:
+    workdir = os.path.expanduser('~') + "/Documents/HMS/PhD/beroukhimlab/dfci_mount/"
+elif os.path.expanduser('~') == "/home/yz762":
+    workdir = "/mnt/storage/dept/medonc/beroukhim/"
+else:
+    workdir = "/data/beroukhim1/"
+
+# Finalized cell-type display vocabulary (mirrors helpers/cell_type_display.R::lineage_display).
+lineage_display = {"astro_glial": "Astrocytes", "opc": "OPC", "myeloid": "Myeloid"}
+
+REGION_MAP = {"Compact. fibrillary component": "compact", "Loose, myxoid component": "loose"}
+CELL_TYPES = ["opc", "astro_glial", "myeloid"]
+MIN_CELLS = 20  # must match morphology_state_prepare.py gating
+```
+
+# Run (or reuse) the pseudobulk + limma/fgsea pipeline
+
+The heavy lifting lives in a self-contained sibling folder (mirrors
+`spatial_imputation_gsea/`): `morphology_state_prepare.py` builds sample × region
+pseudobulk means per cell type, `morphology_state.R` runs limma (`~ sample + region`,
+compact = reference) + preranked fgsea over MSigDB. Cached: the pipeline re-runs only
+when its outputs are missing or `FORCE_PIPELINE = True`.
+
+```{python}
+pa_dir = Path(workdir) / "youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/PA"
+ms_dir = pa_dir / "morphology_state_gsea"
+fig_dir = ms_dir / "figures"
+ms_dir.mkdir(parents=True, exist_ok=True)
+fig_dir.mkdir(parents=True, exist_ok=True)
+
+FORCE_PIPELINE = False  # set True to rebuild pseudobulk + limma/fgsea from the h5ads
+gsea_out_path = ms_dir / "morphology_state_gsea_results.csv"
+
+if FORCE_PIPELINE or not gsea_out_path.exists():
+    prepare_path = ms_dir / "morphology_state_prepare.py"
+    rscript_path = ms_dir / "morphology_state.R"
+    for p in [prepare_path, rscript_path]:
+        if not p.exists():
+            raise FileNotFoundError(f"Missing pipeline script: {p}")
+
+    cmd_prepare = [sys.executable, str(prepare_path)]
+    print("Running:", " ".join(cmd_prepare))
+    run_prepare = subprocess.run(cmd_prepare, capture_output=True, text=True)
+    print(run_prepare.stdout)
+    if run_prepare.returncode != 0:
+        print(run_prepare.stderr)
+        raise RuntimeError("morphology-state Python prepare step failed.")
+
+    if shutil.which("Rscript") is not None:
+        cmd_r = [shutil.which("Rscript"), str(rscript_path)]
+    elif shutil.which("conda") is not None:
+        cmd_r = ["conda", "run", "-n", "spatial", "Rscript", str(rscript_path)]
+    else:
+        raise RuntimeError("Neither Rscript nor conda executable is available.")
+    print("Running:", " ".join(cmd_r))
+    run_r = subprocess.run(cmd_r, capture_output=True, text=True)
+    print(run_r.stdout)
+    if run_r.returncode != 0:
+        print(run_r.stderr)
+        raise RuntimeError("morphology-state R limma/fgsea step failed.")
+else:
+    print("Using cached GSEA outputs (set FORCE_PIPELINE=True to rebuild).")
+```
+
+```{python}
+# Load the R-stage outputs.
+ms_paths = {
+    "coverage": ms_dir / "morphology_state_coverage_summary.csv",
+    "shared_universe": ms_dir / "morphology_state_shared_universe.csv",
+    "limma_de": ms_dir / "morphology_state_limma_de.csv",
+    "genesets_filtered": ms_dir / "morphology_state_gene_sets_filtered.csv",
+    "gsea_results": ms_dir / "morphology_state_gsea_results.csv",
+    "cell_counts": ms_dir / "morphology_state_cell_counts.csv",
+}
+missing = [name for name, path in ms_paths.items() if not path.exists()]
+if missing:
+    raise FileNotFoundError(f"Missing morphology-state outputs: {missing}")
+
+shared_universe = pd.read_csv(ms_paths["shared_universe"])
+limma_de = pd.read_csv(ms_paths["limma_de"])
+gsea_results = pd.read_csv(ms_paths["gsea_results"])
+cell_counts = pd.read_csv(ms_paths["cell_counts"])
+
+print(f"Shared-universe size: {shared_universe.shape[0]}")
+print(f"Cell types in DE: {sorted(limma_de['cell_type'].unique())}")
+print(f"DE rows: {limma_de.shape[0]} | GSEA rows: {gsea_results.shape[0]}")
+```
+
+# Sample coverage: which patients pair across regions?
+
+Each cell type is tested on the patients with ≥ `MIN_CELLS` cells in **both** regions
+(dashed line). This is the n behind every downstream claim: **3 patients** everywhere
+(258482 contributes no compact-annotated cells).
+
+```{python}
+cc = cell_counts.copy()
+cc["cell_type_disp"] = cc["cell_type"].map(lambda c: lineage_display.get(c, c))
+cc["sample_short"] = cc["sample"].map(short_sample)
+
+plot_cc = cc.melt(
+    id_vars=["sample_short", "cell_type_disp"],
+    value_vars=["n_compact", "n_loose"], var_name="region", value_name="n_cells"
+)
+plot_cc["region"] = plot_cc["region"].map({"n_compact": "compact", "n_loose": "loose"})
+
+ct_order = [lineage_display[c] for c in CELL_TYPES]
+g = sns.catplot(
+    data=plot_cc, x="sample_short", y="n_cells", hue="region",
+    col="cell_type_disp", col_order=ct_order, kind="bar",
+    palette=REGION_COLORS, height=4.6, aspect=0.95, edgecolor="black", linewidth=0.5,
+)
+g.set_axis_labels("Patient", "Cells in region")
+g.set_titles("{col_name}")
+g.legend.set_title("Region")
+for ax in g.axes.flat:
+    ax.axhline(MIN_CELLS, color="0.4", ls="--", lw=1)
+g.figure.suptitle("PA cells per morphology region  ·  dashed = min-cell gate (20)",
+                  y=1.04, fontsize=19, fontweight="bold")
+g.savefig(fig_dir / "fig_coverage_cells_per_region.png")
+plt.show()
+```
+
+# How broad is the compact-vs-myxoid shift? (context for the p-values)
+
+Before reading glycan significance, gauge the background: of *all* ~7,880 tested sets,
+how many are significant (FDR is BH-adjusted across the whole collection). If a large
+fraction of the genome is significant, "glycan is significant" is weak on its own.
+
+```{python}
+# Global significance across ALL sets (loose > compact) per cell type.
+# NB: name this gsea_lc, NOT glob — `glob` is the imported module used below.
+gsea_lc = gsea_results[gsea_results["contrast"] == "loose > compact"].copy()
+glob_tab = (gsea_lc.groupby("cell_type")
+    .agg(n_sets=("padj", "size"),
+         pct_raw_p_lt_0p05=("pval", lambda x: round(100 * (x < 0.05).mean(), 1)),
+         n_q_lt_0p05=("padj", lambda x: int((x < 0.05).sum())),
+         n_q_lt_0p25=("padj", lambda x: int((x < 0.25).sum())))
+    .reindex(CELL_TYPES))
+glob_tab.index = [lineage_display[c] for c in glob_tab.index]
+print("Across ALL MSigDB sets (loose > compact); chance ~5% at raw p<0.05:")
+glob_tab
+```
+
+The compact/myxoid difference is **broad** (myeloid: ~27% of all sets at raw p<0.05,
+≫ 5%) — expected for two very different niches. So we do not rest on "glycan is
+significant." We rest on (i) glycan genes sitting near the **top** of the genome-wide
+shift (see effect-in-context below) and (ii) the **curated, biologically-coherent**
+pattern next.
+
+# Curated matrix-glycan / ECM enrichment
+
+The broad keyword theme mixes genuine matrix biology (proteoglycans, GAG/heparan/
+chondroitin/dermatan-sulfate, ECM organization) with generic protein-glycosylation sets
+(N-/O-glycan, "glycosyl compound metabolism") that are not myxoid-matrix and move
+inconsistently. Here we restrict to a **curated matrix-glycan panel**, grouped by biology.
+NES > 0 = up in myxoid; `**` q<0.05, `*` q<0.25. The pattern is a net **matrix
+accumulation** signature: biosynthesis / structure up, catabolism down.
+
+```{python}
+# Curated, focused matrix-glycan / ECM sets (subset of the keyword theme), grouped so the
+# myxoid pattern is legible. All were tested genome-wide; we just select + arrange them.
+CURATED_SETS = {
+    "GAG / proteoglycan biosynthesis & ECM structure": [
+        "REACTOME_ECM_PROTEOGLYCANS",
+        "REACTOME_EXTRACELLULAR_MATRIX_ORGANIZATION",
+        "GOBP_EXTRACELLULAR_MATRIX_ASSEMBLY",
+        "GOBP_EXTRACELLULAR_MATRIX_CONSTITUENT_SECRETION",
+        "KEGG_ECM_RECEPTOR_INTERACTION",
+        "GOBP_PROTEOGLYCAN_BIOSYNTHETIC_PROCESS",
+        "REACTOME_HEPARAN_SULFATE_HEPARIN_HS_GAG_METABOLISM",
+        "KEGG_GLYCOSAMINOGLYCAN_BIOSYNTHESIS_HEPARAN_SULFATE",
+        "REACTOME_CHONDROITIN_SULFATE_DERMATAN_SULFATE_METABOLISM",
+        "REACTOME_DERMATAN_SULFATE_BIOSYNTHESIS",
+        "REACTOME_CHONDROITIN_SULFATE_BIOSYNTHESIS",
+        "REACTOME_GLYCOSAMINOGLYCAN_METABOLISM",
+    ],
+    "GAG / proteoglycan catabolism (degradation)": [
+        "GOBP_PROTEOGLYCAN_CATABOLIC_PROCESS",
+        "GOBP_GLYCOSAMINOGLYCAN_CATABOLIC_PROCESS",
+        "WP_GLYCOSAMINOGLYCAN_DEGRADATION",
+        "KEGG_GLYCOSAMINOGLYCAN_DEGRADATION",
+    ],
+}
+
+# Assemble NES + FDR for each curated set x cell type (loose > compact).
+rows = []
+for group, sets in CURATED_SETS.items():
+    for s in sets:
+        for ct in CELL_TYPES:
+            r = gsea_lc[(gsea_lc["cell_type"] == ct) & (gsea_lc["set_name"] == s)]
+            rows.append({
+                "group": group, "set_name": s, "cell_type": ct,
+                "NES": float(r["NES"].iloc[0]) if len(r) else np.nan,
+                "padj": float(r["padj"].iloc[0]) if len(r) else np.nan,
+            })
+cur = pd.DataFrame(rows)
+cur["ct_disp"] = cur["cell_type"].map(lineage_display)
+cur["label"] = cur["set_name"].map(prettify_set_name)
+
+# Row order: biosynthesis block then catabolism block; record group boundaries.
+row_order, group_spans, cursor = [], [], 0
+for group, sets in CURATED_SETS.items():
+    labs = [prettify_set_name(s) for s in sets]
+    row_order += labs
+    group_spans.append((group, cursor, cursor + len(labs)))
+    cursor += len(labs)
+
+nes_mat = cur.pivot_table(index="label", columns="ct_disp", values="NES").reindex(index=row_order, columns=ct_order)
+padj_mat = cur.pivot_table(index="label", columns="ct_disp", values="padj").reindex(index=row_order, columns=ct_order)
+star_mat = padj_mat.applymap(lambda p: "**" if (pd.notna(p) and p < 0.05) else ("*" if (pd.notna(p) and p < 0.25) else ""))
+
+# short right-edge group tags (colorbar moved to the bottom, so no overlap)
+GROUP_SHORT = {
+    "GAG / proteoglycan biosynthesis & ECM structure": "Biosynthesis / ECM structure  ↑",
+    "GAG / proteoglycan catabolism (degradation)": "Catabolism  ↓",
+}
+# Transposed layout: programs (gene sets) on x-axis, cell types on y-axis.
+nes_t = nes_mat.T.reindex(index=ct_order, columns=row_order)
+star_t = star_mat.T.reindex(index=ct_order, columns=row_order)
+nrows_h, ncol_h = nes_t.shape
+fig, ax = plt.subplots(figsize=(0.85 * ncol_h + 3.0, 0.62 * nrows_h + 4.6))
+sns.heatmap(nes_t, ax=ax, cmap="RdBu_r", center=0, vmin=-2.2, vmax=2.2,
+            annot=star_t.values, fmt="", annot_kws={"fontsize": 18, "fontweight": "bold", "color": "black"},
+            linewidths=0.6, linecolor="white", cbar_kws={"label": "NES  (→ up in myxoid)", "shrink": 0.7})
+# vertical divider between the biosynthesis and catabolism column blocks
+for _, start, end in group_spans[:-1]:
+    ax.vlines(end, 0, nrows_h, color="black", lw=2.5)
+# group labels in a band just above the heatmap (title sits higher via pad)
+trans = ax.get_xaxis_transform()
+for group, start, end in group_spans:
+    ax.text((start + end) / 2, 1.02, GROUP_SHORT[group], transform=trans,
+            ha="center", va="bottom", fontsize=15, fontweight="bold")
+ax.set_xlabel(""); ax.set_ylabel("")
+ax.set_xticklabels(nes_t.columns, rotation=40, ha="right", fontsize=13)
+ax.set_yticklabels(nes_t.index, rotation=0, fontsize=18)
+ax.set_title("Curated matrix-glycan / ECM enrichment: myxoid vs compact    ** q<0.05   * q<0.25",
+             fontsize=16, fontweight="bold", pad=48)
+fig.savefig(fig_dir / "fig_gsea_curated_matrix_glycan.png")
+plt.show()
+```
+
+```{python}
+# Curated sets reaching FDR<0.25 in any lineage, for the record.
+cur_sig = cur[cur["padj"] < 0.25].copy()
+cur_sig["direction"] = np.where(cur_sig["NES"] > 0, "up in myxoid", "down in myxoid")
+print(f"Curated matrix-glycan sets with FDR<0.25 (loose>compact): {cur_sig.shape[0]} rows")
+(cur_sig.sort_values(["group", "ct_disp", "padj"])
+        [["group", "ct_disp", "label", "NES", "padj", "direction"]]
+        .rename(columns={"ct_disp": "cell_type", "label": "set"})
+        .reset_index(drop=True))
+```
+
+# Curated glycan-ECM score: per-patient compact → myxoid
+
+The 34-gene glycan-ECM panel (proteoglycans, hyaluronan synthases, GAG/glycosylation
+enzymes), scored per cell with `sc.tl.score_genes` (background-subtracted), then averaged
+to one value per patient×region. The claim rests on **per-patient direction (x/3)**, not
+the raw delta magnitude. Cached to TSV — recompute with `FORCE_SCORING = True`.
+
+```{python}
+GLYCAN_ECM_GENES = [
+    "HAS1", "HAS2", "HAS3", "HAPLN1", "HAPLN2",
+    "VCAN", "BCAN", "ACAN", "NCAN", "LUM",
+    "SPOCK1", "SPOCK2", "SPOCK3", "BGN", "DCN", "FMOD", "PRELP",
+    "SDC1", "SDC2", "GPC3", "TNC", "FN1", "SPP1",
+    "CHSY1", "CHPF", "CSGALNACT1", "XYLT1",
+    "B3GNT2", "B4GALT1", "MGAT5", "ST6GAL1", "ST3GAL1", "FUT8", "GALNT1",
+]
+
+FORCE_SCORING = False
+means_cache = ms_dir / "morphology_state_glycan_score_means.tsv"
+gene_cache = ms_dir / "morphology_state_glycan_gene_means.tsv"
+
+# Metadata + h5ad list are cheap; only the h5ad *reads* are heavy and cache-gated.
+cell_meta = pd.read_csv(
+    workdir + "youyun/plgg/data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv",
+    sep="\t", usecols=["cell_id", "cell_type", "pathology_annotation"]
+).set_index("cell_id")
+cell_meta["region"] = cell_meta["pathology_annotation"].map(REGION_MAP)
+
+data_root = None
+for cand in ["youyun/plgg/data/sc_integration/ENVI_results_022626",
+             "youyun/plgg/data/sc_integration/ENVI_results"]:
+    if (Path(workdir) / cand).exists():
+        data_root = Path(workdir) / cand
+        break
+spatial_files = sorted(glob.glob(str(data_root / "*astrocytoma_spatial_envi.h5ad")))
+
+if not FORCE_SCORING and means_cache.exists() and gene_cache.exists():
+    sig_means = pd.read_csv(means_cache, sep="\t")
+    gene_means = pd.read_csv(gene_cache, sep="\t")
+    print("Loaded cached glycan score/gene means (set FORCE_SCORING=True to recompute).")
+else:
+    print(f"Scoring glycan-ECM on {len(spatial_files)} h5ads (heavy)...")
+    score_rows, gene_rows = [], []
+    for f in spatial_files:
+        sample_name = re.sub("_spatial_envi.h5ad$", "", Path(f).name).replace("_", " ")
+        adata = sc.read(f)
+        # obsm['imputation'] columns are the ~18k imputed genes (NOT the 266 var_names).
+        imp = adata.obsm["imputation"]
+        if isinstance(imp, pd.DataFrame):
+            genes = pd.Index(imp.columns).astype(str).str.upper(); X = imp.to_numpy()
+        else:
+            genes = pd.Index(adata.var_names).astype(str).str.upper(); X = np.asarray(imp)
+        keep = ~genes.duplicated(keep="first"); genes = genes[keep]; X = X[:, keep]
+
+        impute = ad.AnnData(X=X); impute.var_names = genes
+        obs_names = pd.Index(adata.obs_names)
+        ct_vec = obs_names.map(cell_meta["cell_type"]).to_numpy()
+        reg_vec = obs_names.map(cell_meta["region"]).to_numpy()
+        impute.obs["cell_type"] = ct_vec
+        impute.obs["region"] = reg_vec
+
+        present = [g for g in GLYCAN_ECM_GENES if g in set(genes)]
+        sc.tl.score_genes(impute, gene_list=present, score_name="glycan_ecm_score", use_raw=False)
+
+        # (a) per patient x cell_type x region mean score
+        obs = impute.obs
+        keep_cells = obs["cell_type"].isin(CELL_TYPES) & obs["region"].isin(["compact", "loose"])
+        for (ct, reg), grp in obs[keep_cells].groupby(["cell_type", "region"]):
+            score_rows.append({"sample": sample_name, "cell_type": ct, "region": reg,
+                               "n_cells": len(grp), "glycan_ecm_score": float(grp["glycan_ecm_score"].mean())})
+
+        # (b) per-gene mean imputed expression (same h5ad pass -> no extra loads)
+        gidx = genes.get_indexer(present)
+        for ct in CELL_TYPES:
+            for reg in ["compact", "loose"]:
+                mask = (ct_vec == ct) & (reg_vec == reg)
+                if mask.sum() < MIN_CELLS:
+                    continue
+                means = np.nanmean(X[np.ix_(mask, gidx)], axis=0)
+                for gname, m in zip(present, means):
+                    gene_rows.append({"sample": sample_name, "cell_type": ct, "region": reg,
+                                      "gene": gname, "mean_expr": float(m)})
+
+    sig_means = pd.DataFrame(score_rows)
+    gene_means = pd.DataFrame(gene_rows)
+    sig_means.to_csv(means_cache, sep="\t", index=False)
+    gene_means.to_csv(gene_cache, sep="\t", index=False)
+    print(f"Cached: {len(sig_means)} score rows, {len(gene_means)} gene rows.")
+```
+
+```{python}
+# Per-patient loose - compact delta (only pairs clearing the gate in BOTH regions).
+wide = sig_means.pivot_table(index=["sample", "cell_type"], columns="region",
+                             values=["glycan_ecm_score", "n_cells"], aggfunc="first")
+rows = []
+for (sample, ct), r in wide.iterrows():
+    n_c, n_l = r.get(("n_cells", "compact"), np.nan), r.get(("n_cells", "loose"), np.nan)
+    if not (n_c >= MIN_CELLS and n_l >= MIN_CELLS):
+        continue
+    s_c, s_l = r[("glycan_ecm_score", "compact")], r[("glycan_ecm_score", "loose")]
+    rows.append({"sample": sample, "cell_type": ct, "score_compact": s_c, "score_loose": s_l,
+                 "delta_loose_minus_compact": s_l - s_c, "n_compact": int(n_c), "n_loose": int(n_l)})
+deltas = pd.DataFrame(rows)
+deltas["cell_type_disp"] = deltas["cell_type"].map(lambda c: lineage_display.get(c, c))
+
+summary = (deltas.groupby(["cell_type"])
+           .agg(n_samples=("delta_loose_minus_compact", "size"),
+                n_up=("delta_loose_minus_compact", lambda x: int((x > 0).sum())),
+                mean_delta=("delta_loose_minus_compact", "mean")).reset_index())
+summary["cell_type_disp"] = summary["cell_type"].map(lambda c: lineage_display.get(c, c))
+# best curated matrix-glycan GSEA FDR per cell type, to annotate the per-patient plot
+best_q = cur.groupby("cell_type")["padj"].min()
+summary["best_glycan_gsea_q"] = summary["cell_type"].map(best_q)
+
+deltas.to_csv(ms_dir / "morphology_state_curated_signature_deltas.tsv", sep="\t", index=False)
+summary.to_csv(ms_dir / "morphology_state_curated_signature_summary.tsv", sep="\t", index=False)
+summary[["cell_type_disp", "n_samples", "n_up", "mean_delta", "best_glycan_gsea_q"]]
+```
+
+## Effect size in context
+
+The per-patient delta is small in *absolute* terms, but that is not a scoring artifact:
+the raw glycan-panel expression delta ≈ the background-subtracted score delta (so
+`score_genes` is not squishing the group difference), and the panel sits near the **top**
+of the genome-wide shift. Small magnitude reflects ENVI shrinkage + only part of the panel
+moving, not a wrong signal.
+
+```{python}
+# (i) raw glycan panel delta vs score delta; (ii) where the glycan panel's mean logFC
+# falls within the genome-wide loose-vs-compact shift (percentile).
+paired_samples = set(deltas["sample"])
+gmp = gene_means[gene_means["sample"].isin(paired_samples)]
+eic = []
+for ct in CELL_TYPES:
+    sub = gmp[gmp["cell_type"] == ct]
+    piv = sub.pivot_table(index=["gene", "sample"], columns="region", values="mean_expr")
+    raw_delta = (piv["loose"] - piv["compact"]).mean()
+    score_delta = deltas.loc[deltas["cell_type"] == ct, "delta_loose_minus_compact"].mean()
+    d = limma_de[limma_de["cell_type"] == ct]
+    gd = d[d["gene"].isin(GLYCAN_ECM_GENES)]
+    glymean = gd["logFC_loose_vs_compact"].mean()
+    pct = 100 * (d["logFC_loose_vs_compact"] < glymean).mean()
+    eic.append({
+        "cell_type": lineage_display[ct],
+        "raw_panel_delta": round(raw_delta, 4),
+        "score_delta": round(score_delta, 4),
+        "n_genes_up_of_34": int((gd["logFC_loose_vs_compact"] > 0).sum()),
+        "panel_logFC_genome_percentile": round(pct, 0),
+    })
+pd.DataFrame(eic)
+```
+
+```{python}
+# Paired per-patient plot (glycan-ECM only): compact -> loose, one line per patient.
+cts_d = [c for c in CELL_TYPES if c in set(deltas["cell_type"])]
+fig, axes = plt.subplots(1, len(cts_d), figsize=(5.2 * len(cts_d), 5.6), squeeze=False)
+for ax, ct in zip(axes[0], cts_d):
+    sub = deltas[deltas["cell_type"] == ct]
+    for _, r in sub.iterrows():
+        col = UP_DOWN["up"] if r["delta_loose_minus_compact"] > 0 else UP_DOWN["down"]
+        ax.plot([0, 1], [r["score_compact"], r["score_loose"]], "-o", color=col,
+                alpha=0.9, markersize=8, markeredgecolor="black", markeredgewidth=0.5, lw=2)
+    # bold mean line
+    ax.plot([0, 1], [sub["score_compact"].mean(), sub["score_loose"].mean()],
+            "-", color="black", lw=2.5, alpha=0.9, zorder=5)
+    ax.set_xticks([0, 1]); ax.set_xticklabels(["compact", "myxoid"])
+    ax.set_xlim(-0.3, 1.3)
+    ax.set_ylabel("glycan-ECM score" if ct == cts_d[0] else "")
+    ax.set_title(lineage_display.get(ct, ct))
+    s = summary[summary["cell_type"] == ct].iloc[0]
+    q = s["best_glycan_gsea_q"]
+    txt = f"{int(s['n_up'])}/{int(s['n_samples'])} ↑ in myxoid\nΔ̄ = {s['mean_delta']:+.4f}\nGSEA q = {q:.1e}"
+    ax.text(0.03, 0.97, txt, transform=ax.transAxes, ha="left", va="top", fontsize=13,
+            bbox=dict(boxstyle="round", fc="white", ec="0.7"))
+fig.suptitle("Glycan-ECM score per patient  ·  compact → myxoid  (black = cohort mean)",
+             y=1.04, fontsize=19, fontweight="bold")
+fig.tight_layout()
+fig.savefig(fig_dir / "fig_glycan_score_paired.png")
+plt.show()
+```
+
+# Glycan-ECM gene expression: compact vs myxoid, per patient
+
+Mean imputed expression of the panel genes, z-scored per gene across patient×region
+columns. Columns grouped by region (compact block | myxoid block) so a consistent
+red-shift in the myxoid block reads directly.
+
+```{python}
+# restrict to the 3 paired patients so compact|myxoid blocks are symmetric
+gm = gene_means[gene_means["sample"].isin(set(deltas["sample"]))].copy()
+gm["sample_short"] = gm["sample"].map(short_sample)
+gm["col"] = gm["sample_short"] + " · " + gm["region"]
+
+n_ct = len(CELL_TYPES)
+fig, axes = plt.subplots(1, n_ct, figsize=(6.4 * n_ct, 11), squeeze=False)
+for ax, ct in zip(axes[0], CELL_TYPES):
+    sub = gm[gm["cell_type"] == ct]
+    mat = sub.pivot_table(index="gene", columns="col", values="mean_expr", aggfunc="mean")
+    # order columns: all compact then all loose; z-score per gene
+    comp_cols = sorted([c for c in mat.columns if c.endswith("compact")])
+    loose_cols = sorted([c for c in mat.columns if c.endswith("loose")])
+    cols = comp_cols + loose_cols
+    mat = mat[cols]
+    z = mat.sub(mat.mean(axis=1), axis=0).div(mat.std(axis=1, ddof=0).replace(0, np.nan), axis=0).fillna(0)
+    # order genes by myxoid-minus-compact mean z (most myxoid-up on top)
+    order = (z[loose_cols].mean(axis=1) - z[comp_cols].mean(axis=1)).sort_values(ascending=False).index
+    z = z.reindex(order)
+    hm = sns.heatmap(z, ax=ax, cmap="vlag", center=0, vmin=-1.5, vmax=1.5,
+                     cbar=(ct == CELL_TYPES[-1]), cbar_kws={"shrink": 0.4, "label": "z-score"},
+                     linewidths=0.3, linecolor="white")
+    ax.axvline(len(comp_cols), color="black", lw=2)  # compact | myxoid divider
+    ax.set_title(lineage_display.get(ct, ct))
+    ax.set_xlabel(""); ax.set_ylabel("")
+    ax.set_xticklabels([c.replace(" · compact", "\ncompact").replace(" · loose", "\nmyxoid")
+                        for c in cols], fontsize=12, rotation=0)
+    ax.tick_params(axis="y", labelsize=11)
+fig.suptitle("Glycan-ECM panel genes  ·  compact | myxoid  (z per gene; sorted by myxoid enrichment)",
+             y=1.02, fontsize=19, fontweight="bold")
+fig.tight_layout()
+fig.savefig(fig_dir / "fig_glycan_gene_heatmap.png")
+plt.show()
+```
+
+# Output manifest
+
+```{python}
+outputs = list(ms_paths.values()) + [
+    ms_dir / "morphology_state_curated_signature_deltas.tsv",
+    ms_dir / "morphology_state_curated_signature_summary.tsv",
+    ms_dir / "morphology_state_glycan_score_means.tsv",
+    ms_dir / "morphology_state_glycan_gene_means.tsv",
+    fig_dir / "fig_coverage_cells_per_region.png",
+    fig_dir / "fig_gsea_curated_matrix_glycan.png",
+    fig_dir / "fig_glycan_score_paired.png",
+    fig_dir / "fig_glycan_gene_heatmap.png",
+]
+pd.DataFrame({"file": [p.name for p in outputs], "path": [str(p) for p in outputs],
+             "exists": [p.exists() for p in outputs]})
+```
+
+# Notes
+
+- **3-vs-3 paired pseudobulk.** Per cell type, limma fits `~ sample + region` on 3
+  compact + 3 loose patient means (compact = reference); fgsea ranks all 18,077 genes by
+  the moderated *t*. Patients are weighted equally, so no single patient dominates.
+- **Two readouts, reported together.** Curated matrix-glycan GSEA (biosynthesis/structure
+  UP, catabolism DOWN = net matrix accumulation) + curated 34-gene score (per-patient
+  direction). The genome-wide compact/myxoid shift is broad (myeloid ~27% of sets at raw
+  p<0.05), so the *curated coherence* + glycan's top-percentile position — not raw
+  significance — carry the claim.
+- **Effect magnitudes are small by construction** (background-subtracted `score_genes` +
+  ENVI imputation shrinkage). NES and per-patient direction are the effect readouts, not
+  the raw delta. The glycan axis is partly definitional (myxoid = glycan-rich matrix).
+- **Caching:** `FORCE_PIPELINE` rebuilds pseudobulk+limma+fgsea; `FORCE_SCORING` rebuilds
+  the per-cell scoring from the h5ads. Both default to reusing cached TSVs, so plot edits
+  render fast.
+- Cell-type display names follow `helpers/cell_type_display.R`
+  (`astro_glial`→Astrocytes, `opc`→OPC, `myeloid`→Myeloid).
+```
