@@ -4,4 +4,14 @@ deck-*.jpg
 prev-*.jpg
 prev1_*.jpg
 ~$*.pptx
+# Phase-1 spine mockup output (src/mockup_spine.js is the source)
+mockup_spine.pptx
+# macOS resource-fork artifacts (mounted FS)
+._*
+# fuse temp files (mounted FS)
+.fuse_hidden*
 src/__pycache__/
+# sandbox shadow copies (Bash tool)
+*.sb-*
+# stray legacy scaffold (not part of the deck build)
+plgg_xenium_skeleton.pptx
