@@ -45,7 +45,9 @@ if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
 
 # Introduction
 
-- Input single-nucleus AnnData: `youyun/plgg/data/single_cell/Extended_sndata_filtered.h5ad`
+- Input single-nucleus AnnData: `youyun/plgg/data/single_cell/Extended_sndata_final.h5ad`
+  (produced by `subset_h5ad_by_csv.py`: `Extended_sndata_filtered.h5ad` subset to the cells in
+  `adata_metadata_final.csv`, with all shared obs columns overwritten by the final CSV metadata)
 - Sample-to-histology mapping source:
   `youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds`
 - Output directory: `youyun/plgg/data/sc_integration/`
@@ -57,7 +59,7 @@ and writes one sample-specific h5ad per mapping row with filename:
 # Parameters
 
 ```{r}
-input_h5ad <- paste0(workdir, "youyun/plgg/data/single_cell/Extended_sndata_filtered.h5ad")
+input_h5ad <- paste0(workdir, "youyun/plgg/data/single_cell/Extended_sndata_final.h5ad")
 output_dir <- paste0(workdir, "youyun/plgg/data/sc_integration/")
 output_log_tsv <- paste0(output_dir, "h5ad_2_sample_h5ad_log.tsv")
 
@@ -127,138 +129,166 @@ if "orig.ident" not in adata.obs.columns:
 orig_ident = adata.obs["orig.ident"].astype(str).to_numpy()
 logs = []
 
-# try:
-#     for row in sample_histology.itertuples(index=False):
-#         sid = str(row.sample_id)
-#         hist = str(row.histology)
-#         hist_safe = hist.replace(" ", "_")
-#         out_file = output_dir / f"{sid}_{hist_safe}_sn.h5ad"
+try:
+    # One output h5ad per (sample_id, histology) mapping row. Filenames embed the
+    # histology token, which is load-bearing for downstream ENVI globs.
+    for row in sample_histology.itertuples(index=False):
+        sid = str(row.sample_id)
+        hist = str(row.histology)
+        hist_safe = hist.replace(" ", "_")
+        out_file = output_dir / f"{sid}_{hist_safe}_sn.h5ad"
 
-#         mask = (orig_ident == sid)
-#         n_cells = int(mask.sum())
+        mask = (orig_ident == sid)
+        n_cells = int(mask.sum())
 
-#         if n_cells == 0:
-#             logs.append({
-#                 "sample_id": sid,
-#                 "histology": hist,
-#                 "n_cells": n_cells,
-#                 "status": "missing_in_h5ad",
-#                 "outfile": str(out_file),
-#             })
-#             continue
+        # Sample present in the mapping but absent from the (filtered) h5ad.
+        if n_cells == 0:
+            logs.append({
+                "sample_id": sid,
+                "histology": hist,
+                "n_cells": n_cells,
+                "status": "missing_in_h5ad",
+                "outfile": str(out_file),
+            })
+            continue
 
-#         sub = adata[mask].to_memory()
-#         sub_sample_ids = pd.Index(sub.obs["orig.ident"].astype(str).unique())
-#         if len(sub_sample_ids) != 1 or sub_sample_ids[0] != sid:
-#             logs.append({
-#                 "sample_id": sid,
-#                 "histology": hist,
-#                 "n_cells": n_cells,
-#                 "status": "sample_mismatch",
-#                 "outfile": str(out_file),
-#             })
-#             continue
+        sub = adata[mask].to_memory()
+        # Guard: the subset must contain exactly this one sample_id.
+        sub_sample_ids = pd.Index(sub.obs["orig.ident"].astype(str).unique())
+        if len(sub_sample_ids) != 1 or sub_sample_ids[0] != sid:
+            logs.append({
+                "sample_id": sid,
+                "histology": hist,
+                "n_cells": n_cells,
+                "status": "sample_mismatch",
+                "outfile": str(out_file),
+            })
+            continue
 
-#         sub.write_h5ad(out_file, compression="gzip")
-#         logs.append({
-#             "sample_id": sid,
-#             "histology": hist,
-#             "n_cells": n_cells,
-#             "status": "written",
-#             "outfile": str(out_file),
-#         })
-# finally:
-#     if hasattr(adata, "file") and adata.file is not None:
-#         adata.file.close()
+        sub.write_h5ad(out_file, compression="gzip")
+        logs.append({
+            "sample_id": sid,
+            "histology": hist,
+            "n_cells": n_cells,
+            "status": "written",
+            "outfile": str(out_file),
+        })
+finally:
+    if hasattr(adata, "file") and adata.file is not None:
+        adata.file.close()
 
-# log_df = pd.DataFrame(logs)
-# log_df.to_csv(output_log_tsv, sep="\t", index=False)
+log_df = pd.DataFrame(logs)
+log_df.to_csv(output_log_tsv, sep="\t", index=False)
 
-# print(log_df)
-# print("\nStatus counts:")
-# print(log_df["status"].value_counts(dropna=False))
+print(log_df)
+print("\nStatus counts:")
+print(log_df["status"].value_counts(dropna=False))
 ```
 
 # Quick compatibility check (first 3 written files)
 
 ```{python}
-# check_rows = []
-# written = log_df.loc[log_df["status"] == "written", "outfile"].head(3).tolist()
+check_rows = []
+written = log_df.loc[log_df["status"] == "written", "outfile"].head(3).tolist()
 
-# for f in written:
-#     adx = ad.read_h5ad(f, backed="r")
-#     try:
-#         check_rows.append({
-#             "outfile": f,
-#             "n_obs": int(adx.n_obs),
-#             "n_vars": int(adx.n_vars),
-#             "n_obs_orig_ident": int(adx.obs["orig.ident"].astype(str).nunique()),
-#             "n_layers": len(adx.layers.keys()),
-#             "n_obsm": len(adx.obsm.keys()),
-#         })
-#     finally:
-#         if hasattr(adx, "file") and adx.file is not None:
-#             adx.file.close()
+for f in written:
+    adx = ad.read_h5ad(f, backed="r")
+    try:
+        check_rows.append({
+            "outfile": f,
+            "n_obs": int(adx.n_obs),
+            "n_vars": int(adx.n_vars),
+            "n_obs_orig_ident": int(adx.obs["orig.ident"].astype(str).nunique()),
+            "n_layers": len(adx.layers.keys()),
+            "n_obsm": len(adx.obsm.keys()),
+        })
+    finally:
+        if hasattr(adx, "file") and adx.file is not None:
+            adx.file.close()
 
-# pd.DataFrame(check_rows)
+pd.DataFrame(check_rows)
 ```
 
-# Come up with a list of 2048 HVGs for PA Samples Together
+# Per–tumor-type lists of 2048 HVGs
 
-we will subset the object to all PA samples together, and then use `scanpy.pp.highly_variable_genes` to get the top 2048 HVGs across all PA samples. This will be used for the PA spatial imputation step later on, where we will subset the object to only the PA samples and only these 2048 HVGs before running the imputation.
+For each tumor type we subset the (filtered) object to that type's samples and use
+`scanpy.pp.highly_variable_genes` to get the top 2048 HVGs across those samples. Each list feeds
+the corresponding ENVI spatial-imputation step, where the object is subset to that type's samples
+and these 2048 HVGs before imputation. Output: `<CODE>_top2048_HVGs.tsv` with CODE in PA/GG/CN/CL,
+matching the `2_spatial_imputation/{PA,GG,CN,CL}/` folders.
 
 ```{python}
 import scanpy as sc
 
-# Identify pilocytic astrocytoma (PA) sample IDs from BANKSY-derived mapping
-sample_histology_pa = sample_histology.copy()
-sample_histology_pa["histology"] = sample_histology_pa["histology"].astype(str)
-sample_histology_pa["sample_id"] = sample_histology_pa["sample_id"].astype(str)
+# Short codes matching the downstream 2_spatial_imputation/{PA,GG,CN,CL}/ folders.
+histology_code = {
+    "pilocytic astrocytoma": "PA",
+    "ganglioglioma": "GG",
+    "central neurocytoma": "CN",
+    "cerebellar liponeurocytoma": "CL",
+}
 
-pa_sample_ids = (
-    sample_histology_pa.loc[
-        sample_histology_pa["histology"].str.contains("pilocytic astrocytoma", case=False, na=False),
-        "sample_id"
-    ]
-    .drop_duplicates()
-    .tolist()
-)
+def code_for(histology):
+    # Prefer the explicit map; fall back to an uppercased initials slug so a new histology still
+    # yields a stable filename token instead of failing.
+    key = histology.strip().lower()
+    if key in histology_code:
+        return histology_code[key]
+    return "_".join(word[:1] for word in key.split()).upper() or "NA"
 
-if len(pa_sample_ids) == 0:
-    raise ValueError("No PA samples found in sample_histology mapping.")
+sample_histology_hvg = sample_histology.copy()
+sample_histology_hvg["histology"] = sample_histology_hvg["histology"].astype(str)
+sample_histology_hvg["sample_id"] = sample_histology_hvg["sample_id"].astype(str)
 
+# One 2048-HVG list per tumor type present in the mapping. Open the backed object once and
+# subset per histology to keep memory low (each type is <=~14k cells).
 adata = ad.read_h5ad(input_h5ad, backed="r")
+hvg_summary = []
 try:
     orig_ident = adata.obs["orig.ident"].astype(str).to_numpy()
-    pa_mask = pd.Series(orig_ident).isin(pa_sample_ids).to_numpy()
-    n_pa_cells = int(pa_mask.sum())
-    if n_pa_cells == 0:
-        raise ValueError("No PA cells found in input_h5ad after filtering with PA sample IDs.")
+    for histology in sorted(sample_histology_hvg["histology"].unique()):
+        code = code_for(histology)
+        type_sample_ids = (
+            sample_histology_hvg.loc[
+                sample_histology_hvg["histology"] == histology, "sample_id"
+            ]
+            .drop_duplicates()
+            .tolist()
+        )
+        type_mask = pd.Series(orig_ident).isin(type_sample_ids).to_numpy()
+        n_cells = int(type_mask.sum())
+        if n_cells == 0:
+            print(f"Skipping {histology} ({code}): no cells in input_h5ad.")
+            continue
 
-    adata_pa = adata[pa_mask].to_memory()
+        adata_type = adata[type_mask].to_memory()
+        adata_type.var_names_make_unique()
+        sc.pp.highly_variable_genes(adata_type, n_top_genes=2048, inplace=True)
+
+        # Rank-sort so the TSV lists the strongest HVGs first.
+        if "highly_variable_rank" in adata_type.var.columns:
+            hvg_df = adata_type.var.sort_values("highly_variable_rank")
+        else:
+            hvg_df = adata_type.var.sort_index()
+        if hvg_df.shape[0] != 2048:
+            print(f"Warning: {code} expected 2048 HVGs but got {hvg_df.shape[0]}.")
+
+        hvg_df.insert(0, "gene", hvg_df.index.astype(str))
+        hvg_tsv = output_dir / f"{code}_top2048_HVGs.tsv"
+        hvg_df.to_csv(hvg_tsv, sep="\t", index=False)
+
+        hvg_summary.append({
+            "histology": histology,
+            "code": code,
+            "n_samples": len(type_sample_ids),
+            "n_cells": n_cells,
+            "n_hvgs": int(hvg_df.shape[0]),
+            "outfile": str(hvg_tsv),
+        })
+        print(f"{code} ({histology}): {len(type_sample_ids)} samples, {n_cells} cells -> {hvg_tsv}")
 finally:
     if hasattr(adata, "file") and adata.file is not None:
         adata.file.close()
 
-adata_pa.var_names_make_unique()
-sc.pp.highly_variable_genes(adata_pa, n_top_genes=2048, inplace=True)
-
-if "highly_variable_rank" in adata_pa.var.columns:
-    pa_hvg_df = adata_pa.var.sort_values("highly_variable_rank")
-else:
-    pa_hvg_df = adata_pa.var.sort_index()
-
-if pa_hvg_df.shape[0] != 2048:
-    print(f"Warning: expected 2048 HVGs but got {pa_hvg_df.shape[0]}.")
-
-pa_hvg_df.insert(0, "gene", pa_hvg_df.index.astype(str))
-
-pa_hvg_tsv = output_dir / "PA_top2048_HVGs.tsv"
-
-pa_hvg_df.to_csv(pa_hvg_tsv, sep="\t", index=False)
-
-print(f"PA samples: {len(pa_sample_ids)}")
-print(f"PA cells: {n_pa_cells}")
-print(f"HVG list written: {pa_hvg_tsv}")
-print(pa_hvg_df.head())
+pd.DataFrame(hvg_summary)
 ```

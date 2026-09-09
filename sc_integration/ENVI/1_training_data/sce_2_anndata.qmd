@@ -48,11 +48,20 @@ if (Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng")) {
 
 # Introduction
 
--   RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds`
+Convert the **latest annotated BANKSY `SpatialExperiment`** into per-sample spatial
+AnnData objects (`<sample_id>_<histology>_spatial.h5ad`) -- the spatial side of each
+ENVI training pair (the single-nucleus side comes from `h5ad_2_sample_h5ad.qmd`).
 
--   subset version here: `/data/beroukhim1/youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds`
+-   Input object (same one used by
+    `niche/proseg_output_analysis/celltype_niche_histology_enrichment.qmd`):
+    `youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kct_50_resct_0.5,1_kni_50_resni_0.5,1/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134.rds`
+    (final res_ct=0.2 / res_ni=0.5 annotated object).
 
-We will convert this into an AnnData object for use in Python
+Cell type and niche are read **directly from the object's own colData** (finalized
+`cell_type_clust_...res0.2` / `clust_...res0.5`), the same recipe as
+`export_new_object_cell_metadata.R`. The old
+`banksy_proseg_cell_cluster_annotation.tsv` merge is dropped -- its cluster numbers
+do not map onto this object.
 
 # Data Conversion
 
@@ -146,60 +155,69 @@ spe2anndata <- function(obj, outFile = NULL, main_layer = "counts", transfer_lay
 ```
 
 ```{r}
-banksy_embeddings <- readRDS(ifelse(
-    basename(workdir) != 'dfci_mount', paste0(
-        workdir, "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kc1_30_kc2_50_res1_0.75_res2_1/banksy_clusters_connected_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
-    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_subset_k_geom_15_30_pc_20_lam_0.2_0.8_k_leiden_30_50_res_0.75_1_20241230_232215.rds"
-))
-colData(banksy_embeddings)$sample_id <- factor(colData(banksy_embeddings)$sample_id)
-colData(banksy_embeddings)$alteration = ifelse(is.na(colData(banksy_embeddings)$alteration), 'NA', colData(banksy_embeddings)$alteration)
-cell_type_mapping = fread(paste0(
-    workdir,'youyun/plgg/data/xenium_cell_types/banksy_proseg_cell_cluster_annotation.tsv'
+# Latest annotated BANKSY object (same object as the enrichment notebook). Lives on
+# the cluster storage, reachable via workdir on both the mac mount and argos.
+banksy_embeddings <- readRDS(paste0(
+    workdir,
+    "youyun/plgg/data/banksy_param_search/k1_15_k2_30_lambda1_0.2_lambda2_0.8_npcs_20_kct_50_resct_0.5,1_kni_50_resni_0.5,1/",
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134.rds"
 ))
 
-sample_histology = as.data.table(unique(colData(banksy_embeddings)[,c('sample_id','histology')]))
+# assays present -> confirms the expression layer used as X below (fail fast if the
+# expected layer name changed in this object rather than silently exporting the wrong one)
+cat("assayNames:", paste(assayNames(banksy_embeddings), collapse = ", "), "\n")
+cat("reducedDimNames:", paste(reducedDimNames(banksy_embeddings), collapse = ", "), "\n")
+main_layer <- "normcounts"   # prior ENVI convention: log-normalized expression as X
+stopifnot(main_layer %in% assayNames(banksy_embeddings))
 
-mapply(
-    function(x, y){
-        # subset to one sample of interest
-        banksy_embeddings_sample <- banksy_embeddings[,
-            colData(banksy_embeddings)$sample_id == x
-        ]
+# Finalized cell type + niche read straight from the object's own colData (same recipe
+# as export_new_object_cell_metadata.R). No join against the stale
+# banksy_proseg_cell_cluster_annotation.tsv -- its cluster numbers don't map here.
+# These give the canonical `cell_type`/`niche` obs columns the downstream notebooks and
+# the cell_metadata TSV use; the full-length source columns still ride along via spe2anndata.
+banksy_embeddings$cell_type <- as.character(banksy_embeddings$cell_type_clust_Harmony_BANKSY_lam0.2_k50_res0.2)
+banksy_embeddings$niche     <- as.character(banksy_embeddings$clust_Harmony_BANKSY_lam0.8_k50_res0.5)
+# sample_id stored numeric in this object -> character for a clean per-sample subset + filename token
+banksy_embeddings$sample_id <- as.character(banksy_embeddings$sample_id)
 
-        # merge the metadata into the coldata
-        original_order = colnames(banksy_embeddings_sample)
-        merged_metadata = merge(
-            as.data.table(colData(banksy_embeddings_sample))[
-                ,.(clust_Harmony_BANKSY_lam0.2_k50_res1 = as.numeric(as.character(clust_Harmony_BANKSY_lam0.2_k50_res1)), cell_id_copy = cell_id)
-            ], cell_type_mapping,
-            by.x = "clust_Harmony_BANKSY_lam0.2_k50_res1",
-            by.y = "cluster", all.x = TRUE
-        )[match(gsub('__.*','', original_order), cell_id_copy)]
-        colData(banksy_embeddings_sample) = cbind(
-            colData(banksy_embeddings_sample),
-            merged_metadata
-        )
+# anndata can't write an obs column that mixes strings with NA (e.g. `alteration`):
+# it errors with "Can't implicitly convert non-string objects to strings". Coerce every
+# character/factor colData column to character with NA -> "NA" so the h5ad write succeeds.
+# (The old converter special-cased only `alteration`; this generalizes it to all such cols.)
+cd_fix <- colData(banksy_embeddings)
+for (col in colnames(cd_fix)) {
+    v <- cd_fix[[col]]
+    if (is.factor(v) || is.character(v)) {
+        v <- as.character(v)
+        v[is.na(v)] <- "NA"
+        cd_fix[[col]] <- v
+    }
+}
+colData(banksy_embeddings) <- cd_fix
 
-        if(!all(colData(banksy_embeddings_sample)$cell_id == colData(banksy_embeddings_sample)$cell_id_copy)){
-            stop("cell_id does not match the original order")
-        } else {
-            message("cell_id matches the original order")
-            rownames(colData(banksy_embeddings_sample)) <- original_order
-        }
+sample_histology <- as.data.table(unique(colData(banksy_embeddings)[, c("sample_id", "histology")]))
+sample_histology[, sample_id := as.character(sample_id)]
+sample_histology[, histology := as.character(histology)]
 
+use_condaenv('/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/envs/spatial')
 
-        use_condaenv('/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/envs/spatial')
+# One spatial h5ad per (sample, histology); obs_names = colnames = cell_id
+# ('barcode-1__sampleID'), which is how downstream re-joins labels by cell_id.
+invisible(mapply(
+    function(x, y) {
+        spe_sample <- banksy_embeddings[, banksy_embeddings$sample_id == x]
         spe2anndata(
-            banksy_embeddings_sample, outFile = paste0(
+            spe_sample,
+            outFile = paste0(
                 workdir, "youyun/plgg/data/sc_integration/",
-                x,'_',gsub(' ', '_', y), "_spatial.h5ad"
-            ), main_layer = "normcounts",
-            drop_single_values = FALSE
+                x, '_', gsub(' ', '_', y), "_spatial.h5ad"
+            ),
+            main_layer = main_layer,
+            drop_single_values = FALSE   # keep per-sample-constant cols (histology, cell_type, ...)
         )
-
-        return(NULL)
+        NULL
     },
     sample_histology$sample_id,
     sample_histology$histology
-)
+))
 ```
