@@ -22,7 +22,8 @@ from stalign_nucleus import NEW_DIR, NOTEBOOKS, N_WIN, WIN_SPACING_UM, SVS_PAGE,
 from nucleus_windows import DATA, GROUP, Z_CONF, MIN_CELLS, meta_path, dapi_path
 
 SCRIPTS = ["nucleus_core.py", "nucleus_windows.py", "stalign_nucleus.py", "run_all.sh", "label_impact.py", "cohort_figures.py",
-           "overlay_before_after.py", "diag_detection.py", "diag_old_landmarks.py", "replay_old_stalign.py", "provenance.py"]
+           "overlay_before_after.py", "diag_detection.py", "diag_old_landmarks.py", "replay_old_stalign.py", "diag_jpg_frame.py",
+           "provenance.py"]
 PACKAGES = ["STalign", "torch", "numpy", "scipy", "scikit-image", "tifffile", "imagecodecs", "pandas", "geopandas", "shapely"]
 
 
@@ -60,9 +61,10 @@ def main():
     # cohort-level QC tables and figures (label_impact.py, cohort_figures.py)
     files += [("qc_label_impact", "all", qc / f) for f in ["label_impact.tsv", "label_retention.tsv"]]
     files += [("figure", "all", f) for f in sorted((NEW_DIR / "figures").glob("*.jpg")) + sorted((NEW_DIR / "figures").glob("*.png"))]
-    # diagnostics of the old map and of the nucleus check (diag_detection.py, diag_old_landmarks.py, replay_old_stalign.py)
-    for sub in ("detection", "landmarks", "replay_old"):
-        files += [(f"diag_{sub}", "all", f) for f in sorted((qc / sub).glob("*")) if f.suffix in (".tsv", ".gz", ".png", ".jpg", ".npz")]
+    # diagnostics of the old map and of the nucleus check (diag_detection.py, diag_old_landmarks.py, replay_old_stalign.py,
+    # diag_jpg_frame.py) and the 1-thread rerun of PA320784 (determinism across thread counts)
+    for sub in ("detection", "landmarks", "replay_old", "frame", "trial_repro_1thread"):
+        files += [(f"diag_{sub}", "all", f) for f in sorted((qc / sub).glob("*")) if f.suffix in (".tsv", ".gz", ".png", ".jpg", ".npz", ".csv")]
     paths = sorted({p for _, _, p in files})
     missing = [str(p) for p in paths if not Path(p).exists()]
     with ThreadPoolExecutor(4) as ex:                       # ~9 GB of images: hash in parallel
@@ -87,6 +89,9 @@ def main():
                   "python annotations/STalign/nucleus_rerun/label_impact.py <NEW_DIR> <NEW_DIR>/qc <NEW_DIR>/qc/trial_affine_all",
                   "python annotations/STalign/nucleus_rerun/cohort_figures.py <NEW_DIR> <NEW_DIR>/qc <NEW_DIR>/figures <NEW_DIR>/qc/trial_affine_all",
                   "python annotations/STalign/nucleus_rerun/diag_detection.py",
+                  "python annotations/STalign/nucleus_rerun/diag_detection.py --threshold-area",
+                  "python annotations/STalign/nucleus_rerun/diag_jpg_frame.py",
+                  "python annotations/STalign/nucleus_rerun/stalign_nucleus.py PA320784 --threads 1 --tag repro_1thread",
                   "python annotations/STalign/nucleus_rerun/diag_old_landmarks.py",
                   "python annotations/STalign/nucleus_rerun/replay_old_stalign.py <sample> {original,true,true_grid} [--threads 1 --tag 1thread]",
                   "python annotations/STalign/nucleus_rerun/replay_old_stalign.py --figure",

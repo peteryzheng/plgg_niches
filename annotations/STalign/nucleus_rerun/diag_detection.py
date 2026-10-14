@@ -17,10 +17,14 @@
 # (1 = as strong as under a typical matched nucleus, 0 = nothing). other_rel is the readable one: in tissue the
 # Otsu threshold mostly separates tissue from glass, not nucleus from background.
 # --figure-only redraws the figure and summary from detection_peaks.tsv.gz without re-reading images.
+# --threshold-area reruns the accounting with the DAPI Otsu threshold taken from the unpadded window only (the
+# same area as the H&E threshold; the validation uses the padded search area) and writes threshold_area.tsv:
+# per sample, peak counts and class shares under both thresholds.
 # Outputs (NEW_DIR/qc/detection/): detection_peaks.tsv.gz (one row per peak), detection_summary.tsv,
 # fig_detection.png, detect_example_<sample>.jpg (patient H&E: SendUserFile / Notion only).
 # Usage: python diag_detection.py [sample ...]     (default: all 11)
 #        python diag_detection.py --figure-only
+#        python diag_detection.py --threshold-area [sample ...]
 import sys
 from pathlib import Path
 import numpy as np, pandas as pd
@@ -42,10 +46,11 @@ MATCH, NEAR, BORDER = 2.5, 6.0, 8.0          # um
 CLASSES = ["paired", "duplicate", "near_miss", "no_partner"]
 
 
-def called(img, sigma_px, min_dist_px):
-    """peaks() plus what it computes internally: smoothed image and Otsu threshold."""
+def called(img, sigma_px, min_dist_px, thr_region=None):
+    """peaks() plus what it computes internally: smoothed image and Otsu threshold. thr_region (a pair of
+    slices) takes the threshold from that part of the image only; peaks are still called everywhere."""
     sm = ndi.gaussian_filter(img, sigma_px)
-    thr = filters.threshold_otsu(sm)
+    thr = filters.threshold_otsu(sm if thr_region is None else sm[thr_region])
     pk = feature.peak_local_max(sm, min_distance=int(min_dist_px), threshold_abs=thr, exclude_border=False)
     return pk, sm, thr
 
@@ -66,7 +71,7 @@ def classify(a, b):
     return lab(da, pa), da, lab(db, pb), db, ib
 
 
-def run_sample(s):
+def run_sample(s, dapi_thr="padded"):
     mp = Mapping(meta_path(s, NEW_DIR))
     w = pd.read_csv(NEW_DIR / f"qc/windows_after_{s}.tsv", sep="\t")
     w = w[(w.role == "heldout") & w.n_he.ge(20)]
@@ -90,7 +95,11 @@ def run_sample(s):
         y0, y1 = cu[:, 1].min() - SHIFT_UM, cu[:, 1].max() + SHIFT_UM
         r0, c0 = int(y0 / DAPI_UM), int(x0 / DAPI_UM)
         img = dapi.read(r0, c0, int((y1 - y0) / DAPI_UM), int((x1 - x0) / DAPI_UM))
-        dp, dsm, dthr = called(img, 1.0 / DAPI_UM, NUC_MIN_DIST_UM / DAPI_UM)
+        # dapi_thr="window": Otsu from the unpadded part of the read (the mapped window's bounding box)
+        pad = int(SHIFT_UM / DAPI_UM)
+        region = None if dapi_thr == "padded" else (slice(pad, img.shape[0] - pad), slice(pad, img.shape[1] - pad))
+        dp, dsm, dthr = called(img, 1.0 / DAPI_UM, NUC_MIN_DIST_UM / DAPI_UM, region)
+        extra = {} if region is None else dict(dapi_thr_ratio=dthr / filters.threshold_otsu(dsm))   # window / padded
         d_l0 = mp.to_l0(np.c_[(dp[:, 1] + c0) * DAPI_UM, (dp[:, 0] + r0) * DAPI_UM])
         ok = ~np.isnan(d_l0).any(1)
         dw, dstr = (d_l0[ok] - [cy - half0, cx - half0]) * MPP0, dsm[dp[ok, 0], dp[ok, 1]] / dthr
@@ -111,7 +120,7 @@ def run_sample(s):
                 ("DAPI", dw, m_dapi, dlab, ddist, dstr, hem_at_dapi, nn(dw))):
             rows.append(pd.DataFrame(dict(sample=s, window=int(r.window), modality=mod, cls=lab[m],
                                           nearest_other_um=dist[m], strength=st[m], other_signal=other[m],
-                                          nearest_same_um=nns[m], row_um=pts[m, 0], col_um=pts[m, 1])))
+                                          nearest_same_um=nns[m], row_um=pts[m, 0], col_um=pts[m, 1], **extra)))
     t = pd.concat(rows, ignore_index=True)
     print(f"{s}: {t.window.nunique()} windows, {len(t)} peaks", flush=True)
     return t
@@ -214,8 +223,31 @@ def figure(t, out):
     fig.savefig(out, dpi=150, bbox_inches="tight"); plt.close(fig)
 
 
+def threshold_area(samples):
+    """Per sample, H&E and DAPI peak counts and class shares with the DAPI threshold from the padded search
+    area (as validated; read from detection_peaks.tsv.gz) vs from the window only (rerun here)."""
+    win = pd.concat([run_sample(s, dapi_thr="window") for s in samples], ignore_index=True)
+    pad = pd.read_csv(OUT / "detection_peaks.tsv.gz", sep="\t")
+    out = []
+    for name, t in (("padded", pad[pad["sample"].isin(samples)]), ("window", win)):
+        n = t.groupby(["sample", "modality"]).cls.value_counts().unstack(fill_value=0).reindex(columns=CLASSES, fill_value=0)
+        sh = n.div(n.sum(1), axis=0)
+        for s in samples:
+            out.append(dict(sample=s, dapi_threshold_area=name, n_he=n.loc[(s, "H&E")].sum(), n_dapi=n.loc[(s, "DAPI")].sum(),
+                            he_per_dapi=n.loc[(s, "H&E")].sum() / n.loc[(s, "DAPI")].sum(),
+                            **{f"he_{c}": sh.loc[(s, "H&E"), c] for c in ("paired", "near_miss", "no_partner")},
+                            **{f"dapi_{c}": sh.loc[(s, "DAPI"), c] for c in ("paired", "near_miss", "no_partner")},
+                            dapi_thr_window_over_padded=win.loc[win["sample"] == s].groupby("window").dapi_thr_ratio.first().median()
+                            if name == "window" else 1.0))
+    r = pd.DataFrame(out).sort_values(["sample", "dapi_threshold_area"])
+    r.to_csv(OUT / "threshold_area.tsv", sep="\t", index=False)
+    print(r.round(3).to_string(index=False))
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
+    if sys.argv[1:2] == ["--threshold-area"]:
+        return threshold_area(sys.argv[2:] or list(GROUP))
     if sys.argv[1:] == ["--figure-only"]:
         t = pd.read_csv(OUT / "detection_peaks.tsv.gz", sep="\t").drop(columns="other_rel", errors="ignore")
     else:

@@ -13,6 +13,9 @@
   after).
 - **Not done (user's call):** rerunning `annotations/STalign/add_annotations.R` on the new folder.
 - **Write-up with figures:** Notion page "stalign rerun".
+- **Code:** the pipeline as run is commit `7de415f` on this branch. Later commits add checks and
+  documentation only. `NEW_DIR/provenance.json` records the HEAD it was written from and the md5 of
+  every script.
 
 ### Reproduce
 
@@ -27,8 +30,11 @@ python annotations/STalign/nucleus_rerun/stalign_nucleus.py <sample> --niter1 0 
 # 2. label changes, figures, provenance manifest
 python annotations/STalign/nucleus_rerun/label_impact.py   $NEW_DIR $NEW_DIR/qc $NEW_DIR/qc/trial_affine_all
 python annotations/STalign/nucleus_rerun/cohort_figures.py $NEW_DIR $NEW_DIR/qc $NEW_DIR/figures $NEW_DIR/qc/trial_affine_all
-# 3. diagnostics behind the explanations (outputs in qc/detection, qc/landmarks, qc/replay_old)
+# 3. diagnostics behind the explanations (outputs in qc/detection, qc/landmarks, qc/replay_old, qc/frame)
 python annotations/STalign/nucleus_rerun/diag_detection.py         # one-to-one H&E/DAPI peak accounting (~15 min)
+python annotations/STalign/nucleus_rerun/diag_detection.py --threshold-area   # DAPI threshold from the window only
+python annotations/STalign/nucleus_rerun/diag_jpg_frame.py         # JPG vs SVS, polygon outlines vs tissue edges
+python annotations/STalign/nucleus_rerun/stalign_nucleus.py PA320784 --threads 1 --tag repro_1thread   # determinism
 python annotations/STalign/nucleus_rerun/diag_old_landmarks.py     # the notebooks' hand landmarks vs truth
 for s in PA320784 CL42112 GG240468; do for l in original true true_grid; do   # old pipeline replays, ~6-11 min each
     python annotations/STalign/nucleus_rerun/replay_old_stalign.py $s $l --threads 2; done; done
@@ -56,6 +62,7 @@ python annotations/STalign/nucleus_rerun/provenance.py            # after commit
 | `diag_detection.py` | One-to-one accounting of H&E vs DAPI peaks, peak strength, cross-stain signal, example windows |
 | `diag_old_landmarks.py` | The original notebooks' hand landmarks vs their true positions; figures |
 | `replay_old_stalign.py` | Reruns the original notebook pipeline with hand, exact or grid-rounded landmarks |
+| `diag_jpg_frame.py` | Checks that the JPG is the SVS at level 0 / 7, and the polygon outlines against tissue edges |
 | `provenance.py` | Provenance manifest |
 
 ### Method (final)
@@ -66,6 +73,7 @@ python annotations/STalign/nucleus_rerun/provenance.py            # after commit
    - In a landmark window, the H&E centre is paired with the Xenium point the old map puts there,
      corrected by the measured offset.
    - A robust affine fit (`L_T_from_points` plus outlier rejection) gives the start.
+   - See "Landmarks used by this run" below.
 3. **LDDMM**, with the affine held fixed (epL = epT = 0) so only the velocity field adapts.
    - Images: H&E hematoxylin from the SVS against Xenium DAPI (log), both scaled 0–1.
    - Stage 1: about 4 µm/px, a = 200 µm, 150 iterations.
@@ -85,6 +93,69 @@ python annotations/STalign/nucleus_rerun/provenance.py            # after commit
   windows the old map could not measure sit 2.5–5.6 µm off under affine and about 1 µm under LDDMM.
 - The two variants assign a different label to ≤ 0.6% of cells in every sample.
 
+### Landmarks used by this run
+
+No landmark is placed by hand. `stalign_nucleus.py` finds them in the tissue:
+1. Up to 100 window centres are drawn at random cells (seed 0). Each window is 150 µm, holds at least
+   100 cells, and is at least 250 µm from the others, so small sections get fewer.
+2. In each window, nuclei are called in the H&E and in the DAPI (next section). The DAPI nuclei are
+   placed on the H&E through the **old** map. An FFT search over ±150 µm finds the offset d that best
+   overlays the two point patterns.
+3. A window is confident when the correlation peak has z ≥ 5. A random half of the confident windows
+   (seed 1) become landmarks; the other half are held out and used only for scoring.
+4. Each landmark pairs the H&E window centre c with the Xenium point that truly lies under it: the
+   old map's preimage of c + d. The old map only serves as a lookup between the two images, and its
+   error there is exactly what d measures.
+5. `robust_affine` fits L, T and drops pairs whose residual exceeds max(15 µm, median + 3 robust SD).
+   Only GG241670 lost any (5).
+6. LDDMM keeps every remaining pair in its landmark term, with σP = 0.5 µm.
+
+| Sample | Windows | Confident | Landmarks (rejected) | Held out | Affine residual at landmarks, median µm | Affine on held-out pairs, median µm |
+|---|---|---|---|---|---|---|
+| CL42112 | 100 | 90 | 45 | 45 | 0.9 | 0.7 |
+| CL67068 | 100 | 66 | 33 | 33 | 1.3 | 0.8 |
+| CL87352 | 100 | 83 | 41 | 42 | 0.6 | 0.6 |
+| CN51420 | 100 | 73 | 36 | 37 | 0.6 | 0.8 |
+| CN53398 | 100 | 55 | 27 | 28 | 0.6 | 0.8 |
+| GG240468 | 54 | 53 | 26 | 27 | 0.7 | 0.6 |
+| GG241670 | 100 | 77 | 33 (5) | 39 | 3.3 | 3.6 |
+| PA188570 | 77 | 75 | 37 | 38 | 0.6 | 0.7 |
+| PA258482 | 100 | 98 | 49 | 49 | 0.7 | 0.6 |
+| PA320784 | 40 | 40 | 20 | 20 | 0.7 | 0.8 |
+| PA328368 | 90 | 88 | 44 | 44 | 0.6 | 0.5 |
+
+(From `qc/run_<sample>.log`; window roles are in `qc/windows_before_roles_<sample>.tsv`.)
+- Where the old map was more than 150 µm off, no confident shift exists, so those windows never become
+  landmarks (for example the 200–600 µm corner of CL67068). The new map is re-measured there as an
+  independent check (Results).
+- "Affine on held-out pairs" scores the held-out pairs measured on the old map. GG241670 includes some
+  false correlation peaks there. The definitive score is the re-measurement on the new map (Results).
+
+### Frames: SVS, JPG and polygons
+
+- **The polygons are in SVS level-0 px.** Their coordinates span the SVS level 0: up to 85,866 ×
+  43,370 px on LGG1, whose level 0 is 89,640 × 46,004. The JPG is 12,806 px wide.
+- **The only polygon step is a fixed 1/7 scaling.** The notebooks scale the polygons by 1/7 into the
+  JPG frame (`s.geometry.scale(xfact=1/7, yfact=1/7, origin=(0,0))`) and label each cell by the
+  polygon containing its `STAlign_x/_y`. The polygons are never moved; STAlign is applied to cells.
+- **1/7 is exact.** The JPG is the SVS at level 0 / 7. At 66 patches (6 per section), phase correlation
+  of the JPG against the SVS gives offsets ≤ 0.73 µm (`diag_jpg_frame.py`, `qc/frame/jpg_vs_svs.tsv`).
+- **The new map never uses the JPG.** It is fitted in SVS level-0 µm, from the SVS hematoxylin. Cell
+  positions are written as level 0 / 7 to keep the `STAlign_x/_y` columns, and labels use polygons / 7,
+  so the containment test is effectively done in SVS level 0.
+- **Polygon outlines vs tissue edges** (`qc/frame/polygon_edges.tsv`). The test shifts the outlines
+  and finds where they best follow the JPG's tissue edges.
+  - In PA188570, PA320784, PA328368, CL42112 and CL87352, 66–92% of outline points lie within 26 µm
+    of an edge. There the best shift is 4–12 µm and gains ≤ 0.11 px of mean distance, so it is flat
+    around zero.
+  - Samples that share a GeoJSON file don't share an offset, which a frame error would cause.
+  - In GG240468, PA258482 and CN51420, few outline points follow an edge (18–36%), so the test is not
+    informative there.
+  - GG241670's six polygons (110 annotated cells) fit best 40 µm away. PA188570 and PA328368, from
+    the same file, don't. So this reflects how those outlines were drawn, not a frame shift.
+  - How precisely hand-drawn outlines follow the tissue is a property of the annotation, separate
+    from the registration.
+
 ### How nuclei are called in the window check (exact)
 
 This is `nucleus_windows.measure()`, with `peaks()` and `best_shift()` from `nucleus_core.py`.
@@ -96,7 +167,22 @@ This is `nucleus_windows.measure()`, with `peaks()` and `best_shift()` from `nuc
 | Channel | Hematoxylin optical density from colour deconvolution (`skimage.color.rgb2hed`, channel 0) | The DAPI image itself |
 | Smoothing | Gaussian, σ = 1 µm (1.98 px) | Gaussian, σ = 1 µm (4.7 px) |
 | Threshold | Otsu threshold of the smoothed window, all pixels including glass | Otsu threshold of the smoothed, padded read area |
-| Peaks | `peak_local_max(min_distance=7 px)`: local maxima of the smoothed image above the threshold, kept at least 3.5 µm apart | Same, with `min_distance=18 px` (3.8 µm) |
+| Peaks | `peak_local_max(min_distance=7 px)`: pixels above the threshold that are the maximum of the (2·7+1)² px square around them. Two peaks both survive only if they are more than 7 px apart along row or column, i.e. ≥ 8 px = **4.03 µm** | Same rule, `min_distance=18 px`: ≥ 19 px = **4.04 µm** |
+
+Why the two columns differ:
+- **Peak spacing: they don't, in effect.** Both use `NUC_MIN_DIST_UM = 4.0`, converted to whole
+  pixels with `int()`: 7.94 → 7 H&E px and 18.8 → 18 DAPI px. Because a peak must beat every pixel
+  within that many px, survivors are ≥ 8 px (4.03 µm) and ≥ 19 px (4.04 µm) apart. Only the pixel
+  grid differs.
+- **Area read: the DAPI side is the search area.** The H&E window is the pattern being looked for.
+  The DAPI read must hold every place it could be, so it adds the ±150 µm search range on each side.
+  - The side effect is a DAPI threshold taken over about 9× the area.
+  - `diag_detection.py --threshold-area` reran the accounting with the DAPI threshold taken from the
+    window alone (`qc/detection/threshold_area.tsv`). That threshold is 0.5–12% higher (sample
+    medians).
+  - DAPI peak counts change by −2.0% to +0.3%, the H&E/DAPI ratio goes from 1.17–1.57 to 1.17–1.60,
+    and the H&E paired share moves by ≤ 1 point. So the area difference does not explain the H&E
+    surplus.
 
 Then:
 - DAPI peaks are mapped into the H&E window through the map under test.
@@ -144,7 +230,7 @@ How to read the columns:
       mostly hematoxylin staining with little DNA.
     - In the dense CL/CN sections it is 0.58–0.77, and many look like nuclei in the H&E. The DAPI there
       is dim or diffuse, so no separate peak is called. Plausible causes: nuclei dim or out of focus in
-      the single 2D DAPI image, or neighbours merged by the 1 µm smoothing and ~3.8 µm peak spacing.
+      the single 2D DAPI image, or neighbours merged by the 1 µm smoothing and 4 µm peak spacing.
       This is not resolved.
   - These extra peaks lower the match share but not the shift, because the shift is the best overlay
     of the whole point pattern.
@@ -164,6 +250,31 @@ How to read the columns:
   - Lipidized cells: CL42112 57% (33%), CL67068 71% (29%), CL87352 75% (20%).
   - CN51420 perivascular pseudorosettes: 24% kept.
   - CL67068 cerebellum molecular / granule layer: 7% / 13% kept.
+
+### Why the new map ends right, and how reproducible it is
+
+- **The accuracy comes from the landmarks.** There are 20–49 per sample, each from the nucleus
+  pattern of a 150 µm window. The affine fitted to them alone is already 0.5–0.9 µm on held-out
+  pairs (3.6 µm in GG241670; table above). The old notebooks started from 4–6 hand landmarks that
+  were 80–373 µm off.
+- **The LDDMM is kept from drifting**, which the old one did even from exact landmarks:
+  - the affine is held fixed (epL = epT = 0);
+  - the step is small (epV 0.3, against 10);
+  - the landmark term is 40× tighter (σP 0.5 µm, against 20 µm), over 20–49 landmarks instead of 4–6;
+  - deformation is local (a = 150–200 µm, against about 880 µm);
+  - it runs 250 iterations, against 2000.
+- **Its image term still pulls a little.** In 10 of 11 samples, held-out medians are 0.90–1.41 µm
+  with LDDMM against 0.56–0.90 µm for the affine alone. This is the same tendency as the old pipeline,
+  held under 1 µm by the landmarks. GG241670 is the exception: LDDMM takes it from 2.25 to 1.00 µm.
+- **Reproducibility (PA320784 rerun from the committed code):**
+  - Same thread count (2): byte-identical meta (`qc/trial_repro/`).
+  - 1 thread instead of 2 (`qc/trial_repro_1thread/`): cell positions differ by at most 0.002 µm
+    (median 0.0004 µm), no label changes, identical validation. The md5 differs only through those
+    last digits.
+  - The old pipeline under the same test moved 26 µm.
+- **Code vs outputs.** `nucleus_core.py` and `nucleus_windows.py` were made self-contained (the
+  measurement code copied in verbatim) while the full run was in progress. The rerun from that
+  version gave a byte-identical meta.
 
 ### Known quirks
 
@@ -219,6 +330,9 @@ landmark term on.
   ends 26 µm apart, from identical inputs. Replays with the notebooks' own landmarks land 6–89 µm from
   030226, so the stored map is one draw from a wide spread.
 - **JPG resolution (1.76 µm/px) was not the cause.**
+- **Nor was a JPG/SVS mismatch.** The JPG is the SVS at level 0 / 7 to within 0.73 µm at 66 patches
+  across all 11 sections (`diag_jpg_frame.py`, `qc/frame/jpg_vs_svs.tsv`), so "exact" landmarks in
+  the replays are exact in the JPG the old pipeline registered.
 - **Not established:** why the image term's optimum is off. One hypothesis is that H&E darkness tracks
   cell density inconsistently across tissue types, plus edge and background handling, but it hasn't
   been tested.
