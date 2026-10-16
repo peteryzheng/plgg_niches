@@ -24,6 +24,7 @@
 #                       landmark vs held-out windows reported separately).
 # Usage  : python stalign_nucleus.py CL42112 [--threads 4]                    (affine + LDDMM; conda env spatial)
 #          python stalign_nucleus.py CL42112 --niter1 0 --niter2 0 --tag affine  (affine-only variant)
+#          python stalign_nucleus.py CL42112 --out-dir <empty dir>  (from-scratch rerun; nothing cached is reused)
 # Outputs: NEW_DIR/proseg_pathology_<s>_proseg_meta.csv; NEW_DIR/qc/{windows_before,windows_after}_<s>.tsv,
 #          transform_<s>.npz, summary_<s>.tsv, run_<s>.log
 import argparse, ast, json, re, sys, time
@@ -233,12 +234,16 @@ def main():
     ap.add_argument("--sigmaM", type=float, default=0.5); ap.add_argument("--sigmaP", type=float, default=0.5)
     ap.add_argument("--sigmaR", type=float, default=5e5)
     ap.add_argument("--tag", default="", help="suffix for a trial run (outputs go to qc/trial_<tag>/)")
+    # output root (default: the production folder). The old-map window table is cached in <out-dir>/qc, so an
+    # empty out-dir reruns everything from the raw inputs without touching the production files.
+    ap.add_argument("--out-dir", default=str(NEW_DIR))
     ap.add_argument("--threads", type=int, default=4, help="torch CPU threads (match the SGE slots per job)")
     args = ap.parse_args()
     s = args.sample
     torch.set_num_threads(args.threads)
-    qc = NEW_DIR / "qc" / (f"trial_{args.tag}" if args.tag else ""); qc.mkdir(parents=True, exist_ok=True)
-    out_meta = (qc if args.tag else NEW_DIR) / f"proseg_pathology_{s}_proseg_meta.csv"
+    root = Path(args.out_dir)
+    qc = root / "qc" / (f"trial_{args.tag}" if args.tag else ""); qc.mkdir(parents=True, exist_ok=True)
+    out_meta = (qc if args.tag else root) / f"proseg_pathology_{s}_proseg_meta.csv"
     logf = open(qc / f"run_{s}.log", "a")
     def log(m):
         print(m, flush=True); logf.write(m + "\n"); logf.flush()
@@ -247,7 +252,7 @@ def main():
     # 1. windows on the old map (cached: the same centres are reused for the after-measurement)
     mp_old = Mapping(meta_path(s))
     old = pd.read_csv(meta_path(s))
-    wb = NEW_DIR / "qc" / f"windows_before_{s}.tsv"
+    wb = root / "qc" / f"windows_before_{s}.tsv"
     if not wb.exists():
         c = draw_windows(mp_old, N_WIN, WIN_SPACING_UM)
         measure(s, mp_old, c, svs_for(s), DAPI(dapi_path(s))).to_csv(wb, sep="\t", index=False)

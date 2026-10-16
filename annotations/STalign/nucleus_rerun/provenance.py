@@ -6,12 +6,14 @@
 #                          script, software versions, fixed constants, and each sample's run arguments
 #                          (read back from its transform_<sample>.npz, i.e. what actually ran)
 #   provenance_files.tsv : role, sample, path, bytes, md5 for every input and output file
+#   environment_spatial.yml : `conda env export` of the env that ran it
 # Usage: python provenance.py          (conda env spatial; after run_all.sh, from a committed checkout)
+#        python provenance.py --compare <dir>   compare a rerun (run_all.sh with OUT_DIR=<dir>) with the
+#                                               production outputs; writes <dir>/compare_to_production.tsv
 # Assumes: inputs are those stalign_nucleus.py reads (old 030226 meta, SVS, GeoJSON + recode map from the
 #          sample notebook, Xenium DAPI, Xenium_PS.xlsx for the folder lookup); outputs in NEW_DIR(/qc).
-import hashlib, json, platform, subprocess, sys, time
+import hashlib, importlib, json, platform, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
-from importlib.metadata import version
 from pathlib import Path
 import numpy as np, pandas as pd
 
@@ -23,8 +25,14 @@ from nucleus_windows import DATA, GROUP, Z_CONF, MIN_CELLS, meta_path, dapi_path
 
 SCRIPTS = ["nucleus_core.py", "nucleus_windows.py", "stalign_nucleus.py", "run_all.sh", "label_impact.py", "cohort_figures.py",
            "overlay_before_after.py", "diag_detection.py", "diag_old_landmarks.py", "replay_old_stalign.py", "diag_jpg_frame.py",
-           "provenance.py"]
-PACKAGES = ["STalign", "torch", "numpy", "scipy", "scikit-image", "tifffile", "imagecodecs", "pandas", "geopandas", "shapely"]
+           "diag_image_term.py", "provenance.py"]
+# distribution name -> module name. Versions are read from the imported module: the env holds a stale pip
+# torch-2.0.0.dist-info next to the conda torch 2.10.0 that is actually imported, so package metadata misleads.
+PACKAGES = {"torch": "torch", "numpy": "numpy", "scipy": "scipy", "scikit-image": "skimage", "tifffile": "tifffile",
+            "imagecodecs": "imagecodecs", "pandas": "pandas", "geopandas": "geopandas", "shapely": "shapely", "Pillow": "PIL"}
+# STalign has no version of its own ("1.0"); it was installed from the GitHub main zip. Every installed package file
+# is identical (md5) to upstream main b2068ed (2023-12-11, still main on 2026-10-15); STalign.py last changed at 5837b03.
+STALIGN_REPO, STALIGN_COMMIT = "https://github.com/JEFworks-Lab/STalign", "b2068edc98974efa54537eca194736e177bbe11d"
 
 
 def md5(p, block=1 << 24):
@@ -39,8 +47,58 @@ def git(*a):
     return subprocess.run(["git", "-C", str(HERE), *a], capture_output=True, text=True).stdout.strip()
 
 
+def software():
+    """Versions of what is actually imported, the CPU path torch uses, and STalign's source identity."""
+    import torch, STalign.STalign as st
+    out = dict(python=sys.version.split()[0], platform=platform.platform(),
+               **{d: importlib.import_module(m).__version__ for d, m in PACKAGES.items()})
+    out.update(torch_cpu_capability=torch.backends.cpu.get_cpu_capability(), torch_threads_default=torch.get_num_threads(),
+               STalign=dict(installed="1.0, from the GitHub main zip", repo=STALIGN_REPO, commit=STALIGN_COMMIT,
+                            STalign_py_md5=md5(st.__file__)))
+    return out
+
+
+def export_env():
+    """`conda env export` of the running env (envs/<name>/bin/python -> <base>/bin/conda) to NEW_DIR."""
+    prefix = Path(sys.prefix)
+    r = subprocess.run([str(prefix.parents[1] / "bin/conda"), "env", "export", "-p", str(prefix)], capture_output=True, text=True)
+    (NEW_DIR / "environment_spatial.yml").write_text(r.stdout if r.returncode == 0 else f"# conda env export failed:\n# {r.stderr}")
+
+
+def compare(other):
+    """A rerun in `other` (same layout as NEW_DIR) against the production outputs, per sample: identical meta file?
+    largest cell displacement, label differences, and the largest differences in the window tables and the transform."""
+    rows = []
+    for s in GROUP:
+        a, b = other / f"proseg_pathology_{s}_proseg_meta.csv", NEW_DIR / f"proseg_pathology_{s}_proseg_meta.csv"
+        if not a.exists():
+            continue
+        r = dict(sample=s, meta_identical=md5(a) == md5(b))
+        ma, mb = pd.read_csv(a), pd.read_csv(b)
+        assert (ma.cell_id.values == mb.cell_id.values).all(), f"{s}: cell order differs"
+        d = np.hypot(ma.STAlign_x - mb.STAlign_x, ma.STAlign_y - mb.STAlign_y) * nucleus_core.JPG_TO_L0 * nucleus_core.MPP0
+        r.update(cell_shift_max_um=d.max(), cell_shift_median_um=d.median(),
+                 annotation_differs=int((ma.annotation.fillna("") != mb.annotation.fillna("")).sum()),
+                 region_id_differs=int((ma.region_id.astype(str) != mb.region_id.astype(str)).sum()))
+        for tab in ("windows_before", "windows_after"):
+            ta, tb = (pd.read_csv(x / "qc" / f"{tab}_{s}.tsv", sep="\t") for x in (other, NEW_DIR))
+            c = ["row_l0", "col_l0", "shift_row_um", "shift_col_um", "peak_z", "match_at_zero"]
+            r[f"{tab}_max_abs_diff"] = np.nanmax(np.abs(ta[c].values - tb[c].values)) if ta.shape == tb.shape else np.nan
+        ra = pd.read_csv(other / "qc" / f"windows_before_roles_{s}.tsv", sep="\t").role
+        r["roles_identical"] = (ra.values == pd.read_csv(NEW_DIR / "qc" / f"windows_before_roles_{s}.tsv", sep="\t").role.values).all()
+        za, zb = (np.load(x / "qc" / f"transform_{s}.npz") for x in (other, NEW_DIR))
+        r.update(transform_A_max_abs_diff=np.abs(za["A"] - zb["A"]).max(), transform_v_max_abs_diff_um=np.abs(za["v"] - zb["v"]).max())
+        rows.append(r)
+    t = pd.DataFrame(rows)
+    t.to_csv(other / "compare_to_production.tsv", sep="\t", index=False)
+    print(t.to_string(index=False))
+
+
 def main():
+    if sys.argv[1:2] == ["--compare"]:
+        return compare(Path(sys.argv[2]))
     qc = NEW_DIR / "qc"
+    export_env()
     # every file the pipeline read or wrote, per sample (shared inputs listed once per sample for clarity)
     files = []
     for s in GROUP:
@@ -63,8 +121,11 @@ def main():
     files += [("figure", "all", f) for f in sorted((NEW_DIR / "figures").glob("*.jpg")) + sorted((NEW_DIR / "figures").glob("*.png"))]
     # diagnostics of the old map and of the nucleus check (diag_detection.py, diag_old_landmarks.py, replay_old_stalign.py,
     # diag_jpg_frame.py) and the 1-thread rerun of PA320784 (determinism across thread counts)
-    for sub in ("detection", "landmarks", "replay_old", "frame", "trial_repro_1thread"):
+    for sub in ("detection", "landmarks", "replay_old", "frame", "trial_repro_1thread", "image_term"):
         files += [(f"diag_{sub}", "all", f) for f in sorted((qc / sub).glob("*")) if f.suffix in (".tsv", ".gz", ".png", ".jpg", ".npz", ".csv")]
+    # the from-scratch rerun's comparison with these outputs, and the environment snapshot
+    files += [("repro_from_scratch", "all", qc / "repro_from_scratch/compare_to_production.tsv"),
+              ("environment", "all", NEW_DIR / "environment_spatial.yml")]
     paths = sorted({p for _, _, p in files})
     missing = [str(p) for p in paths if not Path(p).exists()]
     with ThreadPoolExecutor(4) as ex:                       # ~9 GB of images: hash in parallel
@@ -95,10 +156,12 @@ def main():
                   "python annotations/STalign/nucleus_rerun/diag_old_landmarks.py",
                   "python annotations/STalign/nucleus_rerun/replay_old_stalign.py <sample> {original,true,true_grid} [--threads 1 --tag 1thread]",
                   "python annotations/STalign/nucleus_rerun/replay_old_stalign.py --figure",
+                  "python annotations/STalign/nucleus_rerun/diag_image_term.py <sample> [...]; python annotations/STalign/nucleus_rerun/diag_image_term.py --figure",
+                  "OUT_DIR=<NEW_DIR>/qc/repro_from_scratch bash annotations/STalign/nucleus_rerun/run_all.sh",
+                  "python annotations/STalign/nucleus_rerun/provenance.py --compare <NEW_DIR>/qc/repro_from_scratch",
                   "python annotations/STalign/nucleus_rerun/provenance.py"],
         new_dir=str(NEW_DIR),
-        software=dict(python=sys.version.split()[0], platform=platform.platform(),
-                      **{p: version(p) for p in PACKAGES}),
+        software=software(),
         constants=dict(N_WIN=N_WIN, WIN_SPACING_UM=WIN_SPACING_UM, MIN_CELLS=MIN_CELLS, Z_CONF=Z_CONF,
                        WIN_UM=nucleus_core.WIN_UM, SHIFT_UM=nucleus_core.SHIFT_UM, MATCH_UM=nucleus_core.MATCH_UM,
                        NUC_MIN_DIST_UM=nucleus_core.NUC_MIN_DIST_UM, MPP0=nucleus_core.MPP0, JPG_TO_L0=nucleus_core.JPG_TO_L0,

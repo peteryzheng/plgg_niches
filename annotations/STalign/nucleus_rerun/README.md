@@ -13,13 +13,90 @@
   after).
 - **Not done (user's call):** rerunning `annotations/STalign/add_annotations.R` on the new folder.
 - **Write-up with figures:** Notion page "stalign rerun".
+- **Original task brief (2026-10-13):** `handoff_2026-10-13.md`.
 - **Code:** the pipeline as run is commit `7de415f` on this branch. Later commits add checks and
   documentation only. `NEW_DIR/provenance.json` records the HEAD it was written from and the md5 of
   every script.
 
-### Reproduce
+### Old vs new pipeline
 
-Use the conda env `spatial`. `run_all.sh` calls its python directly. `NEW_DIR` is the folder above.
+| | Old (030226; the sample notebooks) | New (101326_nucleus; this folder) |
+|---|---|---|
+| H&E image (STalign source) | whole-slide JPG, RGB, 1.76 µm/px | SVS hematoxylin channel (colour deconvolution), about 4 then 2 µm/px, one section |
+| Xenium image (target) | cell-density map of the ProSeg cell centroids: 10 µm grid, each cell a Gaussian with sd 20 µm | DAPI `morphology_focus` image at the same resolution as the H&E |
+| Landmarks | 4–6 placed by hand; 80–373 µm off (per-sample medians) | 20–49 measured from the nucleus pattern of 150 µm windows; affine 0.5–0.9 µm on held-out pairs (GG241670 3.6) |
+| Landmark weight σP | 20 µm (STalign default) | 0.5 µm |
+| Affine during LDDMM | free (epL, epT at STalign defaults) | frozen (epL = epT = 0) |
+| Deformation step epV | 10 | 0.3 |
+| Smoothness a | 500 JPG px, about 880 µm | 200 then 150 µm |
+| Iterations | 2000 | 150 + 100 |
+| Pixel re-weighting | on (STalign always does it, from iteration 50) | on, the same |
+| Held-out nucleus error, median | 3.8–85 µm | 0.9–1.4 µm |
+
+- **Why the old map was off:** its step sizes were too large and the pixel re-weighting kicked or trapped
+  the map. Its blurred cell-density image would have limited it to about 5 µm in any case. See "Why the
+  old map was off".
+- **Why the new map is right:** its start is already accurate (nucleus landmarks), stiff landmarks hold
+  it there, steps are small with the affine frozen, and nucleus-level images pin it sharply. The
+  re-weighting still runs but has little room to move the map. See "Why the new map ends right".
+
+### Reproduce from scratch (for a new user)
+
+Starting from the raw H&E and Xenium data, a new user needs the inputs and software below and about
+3 h on 4 cores. `DATA = /mnt/storage/dept/medonc/beroukhim/youyun/plgg/data`; `NEW_DIR` is the
+folder above.
+
+**Inputs.** The md5 of each is in `NEW_DIR/provenance_files.tsv` (roles `input_*`).
+
+| Input | Path | Used for |
+|---|---|---|
+| H&E whole-slide images | `DATA/Xenium_annotations/images/230918_Xenium_CytAssist_{LGG1,LGG2}.svs` | H&E nuclei in each window; the hematoxylin image for LDDMM |
+| Xenium DAPI | `DATA/segmentation/proseg_run_121024/<folder>/<folder>_proseg/outs/morphology_focus/morphology_focus_0000.ome.tif` | DAPI nuclei in each window; the DAPI image for LDDMM |
+| Xenium folder lookup | `DATA/metadata/Xenium_PS.xlsx` | sample → `<folder>` |
+| Old registration (030226) | `DATA/Xenium_annotations/pathology_annotations_030226/proseg_pathology_<s>_proseg_meta.csv` | the cell table (cell ids, Xenium x/y, every column not recomputed) and the starting map (below) |
+| Pathology polygons | `DATA/Xenium_annotations/geojsons/<file named in the notebook>` | region labels |
+| Sample notebooks | `annotations/STalign/pathology_<s>_proseg.qmd` (this repo) | which GeoJSON each sample uses, and its colour → label `recode_map` |
+
+**The 030226 metas are a fixed input; don't regenerate them.**
+- The old notebooks don't reproduce at this scale: the same run ends 26 µm apart on 1 vs 2 CPU threads.
+- The pipeline uses the old map only as a lookup: where to read each window's DAPI, and how to turn a
+  measured offset into a Xenium point. Each landmark's offset is measured from nuclei, so the old map's
+  error does not carry over.
+- The result is checked against nuclei on held-out windows, which doesn't depend on the old map.
+
+**Software.** conda env `spatial`; the full export is `NEW_DIR/environment_spatial.yml`.
+- Versions that are actually imported (`provenance.json` → `software`): Python 3.10.19, torch 2.10.0
+  (conda-forge CPU build, MKL, AVX512 path), numpy 1.23.4, scipy 1.13.1, scikit-image 0.24.0, tifffile
+  2025.5.10, imagecodecs 2024.12.30, pandas 2.0.0, geopandas 1.1.2, shapely 2.0.7, Pillow 9.5.0.
+- STalign: `pip install git+https://github.com/JEFworks-Lab/STalign@b2068edc98974efa54537eca194736e177bbe11d`.
+  Every installed STalign file matches that commit by md5 (`STalign.py` ef918cea…).
+- `pip list` shows torch 2.0.0 because of a leftover pip metadata folder; the torch that loads is 2.10.0.
+  `provenance.json` files written before 2026-10-15 recorded 2.0.0 by mistake.
+
+**Paths.** The scripts use absolute paths on this cluster: `DATA` and `ROOT` in `nucleus_core.py`, and
+`PY` in `run_all.sh`. On another system, edit those three.
+
+**Run.** Use a 4-slot allocation, e.g. `qrsh -pe smp 4 -l h_rt=12:00:00,mem_free=32G` from argos-qsub1.
+```bash
+git checkout <commit>; conda activate spatial
+# registration from the raw inputs into an empty folder; nothing cached is reused (~3 h)
+OUT_DIR=<empty dir> bash annotations/STalign/nucleus_rerun/run_all.sh          # PARALLEL=2 THREADS=2
+# compare with the production outputs -> <empty dir>/compare_to_production.tsv
+python annotations/STalign/nucleus_rerun/provenance.py --compare <empty dir>
+```
+- Expect identical meta files with THREADS=2 on this hardware. With a different thread count, cell
+  positions differ by ≤ 0.002 µm (PA320784 test below). Other CPUs are untested.
+- Without `OUT_DIR`, `run_all.sh` writes to `NEW_DIR` itself and reuses the cached old-map window
+  tables there.
+- Each sample log prints one `ERROR 1: PROJ: proj_create_from_database` line, as the production logs do.
+  It comes from reading the GeoJSON; the polygons are in pixel units, so no projection is used.
+- **Verification (2026-10-15, done):** all 11 samples were rebuilt this way into
+  `NEW_DIR/qc/repro_from_scratch/` (about 3 h; two groups of PARALLEL=1 THREADS=2). All 11 metas are
+  byte-identical to production. So are the recomputed old-map window tables, the landmark/held-out
+  roles, the after-registration window tables and the transforms (`compare_to_production.tsv`: every
+  difference 0).
+
+### All commands (production outputs, figures, diagnostics)
 
 ```bash
 # 1. registration, all 11 samples (~2.3 h on 4 slots). Per sample: old-map window check (cached in
@@ -27,10 +104,10 @@ Use the conda env `spatial`. `run_all.sh` calls its python directly. `NEW_DIR` i
 bash annotations/STalign/nucleus_rerun/run_all.sh                 # PARALLEL=2 THREADS=2 by default
 #    affine-only reference variant (written to qc/trial_affine_all/)
 python annotations/STalign/nucleus_rerun/stalign_nucleus.py <sample> --niter1 0 --niter2 0 --tag affine_all
-# 2. label changes, figures, provenance manifest
+# 2. label changes, figures
 python annotations/STalign/nucleus_rerun/label_impact.py   $NEW_DIR $NEW_DIR/qc $NEW_DIR/qc/trial_affine_all
 python annotations/STalign/nucleus_rerun/cohort_figures.py $NEW_DIR $NEW_DIR/qc $NEW_DIR/figures $NEW_DIR/qc/trial_affine_all
-# 3. diagnostics behind the explanations (outputs in qc/detection, qc/landmarks, qc/replay_old, qc/frame)
+# 3. diagnostics behind the explanations (outputs in qc/detection, qc/landmarks, qc/replay_old, qc/frame, qc/image_term)
 python annotations/STalign/nucleus_rerun/diag_detection.py         # one-to-one H&E/DAPI peak accounting (~15 min)
 python annotations/STalign/nucleus_rerun/diag_detection.py --threshold-area   # DAPI threshold from the window only
 python annotations/STalign/nucleus_rerun/diag_jpg_frame.py         # JPG vs SVS, polygon outlines vs tissue edges
@@ -39,8 +116,25 @@ python annotations/STalign/nucleus_rerun/diag_old_landmarks.py     # the noteboo
 for s in PA320784 CL42112 GG240468; do for l in original true true_grid; do   # old pipeline replays, ~6-11 min each
     python annotations/STalign/nucleus_rerun/replay_old_stalign.py $s $l --threads 2; done; done
 python annotations/STalign/nucleus_rerun/replay_old_stalign.py PA320784 original --threads 1 --tag 1thread
+# step-size tests (1 thread each, OMP_NUM_THREADS=1): notebook steps with the affine recorded, affine frozen, 10x smaller
+for s in PA320784 CL42112; do
+    python annotations/STalign/nucleus_rerun/replay_old_stalign.py $s true --threads 1 --tag traj_1thread
+    for l in true original; do python annotations/STalign/nucleus_rerun/replay_old_stalign.py $s $l --threads 1 \
+        --epL 2e-9 --epT 2e-2 --epV 1 --tag smallstep_1thread
+        # the same with STalign's pixel re-weighting switched off
+        python annotations/STalign/nucleus_rerun/replay_old_stalign.py $s $l --threads 1 --epL 2e-9 --epT 2e-2 --epV 1 \
+            --reweight-start 100000 --tag smallstep_noreweight_1thread; done; done
+for s in PA320784 CL42112 GG240468; do
+    python annotations/STalign/nucleus_rerun/replay_old_stalign.py $s true --threads 1 --epL 0 --epT 0 --tag frozen_affine_1thread; done
 python annotations/STalign/nucleus_rerun/replay_old_stalign.py --figure
-python annotations/STalign/nucleus_rerun/provenance.py            # after committing; records HEAD + md5s
+python annotations/STalign/nucleus_rerun/replay_old_stalign.py --trajectory
+python annotations/STalign/nucleus_rerun/replay_old_stalign.py --conditions   # end error by start and setting
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python annotations/STalign/nucleus_rerun/diag_image_term.py <sample> [...]   # ~8 min per sample
+python annotations/STalign/nucleus_rerun/diag_image_term.py --figure
+# 4. from-scratch rerun and comparison (above), then the provenance manifest (after committing)
+OUT_DIR=$NEW_DIR/qc/repro_from_scratch bash annotations/STalign/nucleus_rerun/run_all.sh
+python annotations/STalign/nucleus_rerun/provenance.py --compare $NEW_DIR/qc/repro_from_scratch
+python annotations/STalign/nucleus_rerun/provenance.py            # records HEAD, md5s, versions, conda env export
 ```
 (GG240468 was replayed with `original` and `true` only.)
 
@@ -61,9 +155,10 @@ python annotations/STalign/nucleus_rerun/provenance.py            # after commit
 | `overlay_before_after.py` | Three held-out windows for one sample |
 | `diag_detection.py` | One-to-one accounting of H&E vs DAPI peaks, peak strength, cross-stain signal, example windows |
 | `diag_old_landmarks.py` | The original notebooks' hand landmarks vs their true positions; figures |
-| `replay_old_stalign.py` | Reruns the original notebook pipeline with hand, exact or grid-rounded landmarks |
+| `replay_old_stalign.py` | Reruns the original notebook pipeline with hand, exact or grid-rounded landmarks, optionally with other step sizes or the pixel re-weighting off; records the affine per iteration |
 | `diag_jpg_frame.py` | Checks that the JPG is the SVS at level 0 / 7, and the polygon outlines against tissue edges |
-| `provenance.py` | Provenance manifest |
+| `diag_image_term.py` | How sharply each H&E/Xenium image pair's match pins the map (R² of STAlign's contrast fit vs offset) |
+| `provenance.py` | Provenance manifest; `--compare` checks a rerun against the production outputs |
 
 ### Method (final)
 
@@ -106,6 +201,16 @@ No landmark is placed by hand. `stalign_nucleus.py` finds them in the tissue:
 4. Each landmark pairs the H&E window centre c with the Xenium point that truly lies under it: the
    old map's preimage of c + d. The old map only serves as a lookup between the two images, and its
    error there is exactly what d measures.
+   - **One window gives one landmark, not one per nucleus.** The landmark is a point pair at the
+     window centre. Its offset d comes from the whole nucleus pattern of the window: a median 78–203
+     H&E nuclei per landmark window (by sample; minimum 28), overlaid on the DAPI nuclei.
+   - **Why not individual nuclei.** Single-nucleus pairs are ambiguous: the stains call peaks
+     1.17–1.57× apart in number, and a mapped nucleus can sit closer to a neighbour than to itself. A
+     pattern of about 100 nuclei has one clear best overlay. That overlay is found to 0.25 µm, and its
+     z-score says whether it is real.
+   - **Assumption:** within a 150 µm window, the old map's error is a pure shift. After that shift, matched
+     nuclei sit a median 1.1–1.7 µm apart (per-sample medians of `residual_um` in landmark windows). That
+     bounds what the assumption plus nucleus-centre noise can cost.
 5. `robust_affine` fits L, T and drops pairs whose residual exceeds max(15 µm, median + 3 robust SD).
    Only GG241670 lost any (5).
 6. LDDMM keeps every remaining pair in its landmark term, with σP = 0.5 µm.
@@ -257,15 +362,20 @@ How to read the columns:
   pattern of a 150 µm window. The affine fitted to them alone is already 0.5–0.9 µm on held-out
   pairs (3.6 µm in GG241670; table above). The old notebooks started from 4–6 hand landmarks that
   were 80–373 µm off.
-- **The LDDMM is kept from drifting**, which the old one did even from exact landmarks:
+- **The LDDMM is kept from drifting**, which the old one did even from exact landmarks (see "Why the old
+  map was off"):
   - the affine is held fixed (epL = epT = 0);
   - the step is small (epV 0.3, against 10);
   - the landmark term is 40× tighter (σP 0.5 µm, against 20 µm), over 20–49 landmarks instead of 4–6;
   - deformation is local (a = 150–200 µm, against about 880 µm);
   - it runs 250 iterations, against 2000.
+- **The pixel re-weighting is not switched off here.** `stalign_nucleus.py` calls STalign's standard
+  LDDMM, which re-estimates the weights from iteration 50 of each stage. The stiff landmarks and the
+  accurate start leave it little room.
 - **Its image term still pulls a little.** In 10 of 11 samples, held-out medians are 0.90–1.41 µm
-  with LDDMM against 0.56–0.90 µm for the affine alone. This is the same tendency as the old pipeline,
-  held under 1 µm by the landmarks. GG241670 is the exception: LDDMM takes it from 2.25 to 1.00 µm.
+  with LDDMM against 0.56–0.90 µm for the affine alone. The landmarks hold this under 1 µm. Whether the
+  re-weighting causes this pull is untested. GG241670 is the exception: LDDMM takes it from 2.25 to
+  1.00 µm.
 - **Reproducibility (PA320784 rerun from the committed code):**
   - Same thread count (2): byte-identical meta (`qc/trial_repro/`).
   - 1 thread instead of 2 (`qc/trial_repro_1thread/`): cell positions differ by at most 0.002 µm
@@ -290,52 +400,139 @@ How to read the columns:
 - **GG240468** started at 3.8 µm and ends at 1.06 µm. As the no-change control it confirms the new
   pipeline keeps a near-correct map correct: only 0.2% of annotated cells change label.
 
-### Why the old map was off (verified 2026-10-14; corrects the handoff text below)
+### Why the old map was off (tested 2026-10-14 to 2026-10-16)
 
-**The hand landmarks were far off, and not because of the 50 grid** (`diag_old_landmarks.py`,
+**In short.** Two settings of the old LDDMM caused the tens of µm.
+- Its step sizes were so large that the map never settled.
+- STalign's pixel re-weighting, from iteration 50 on, kicks the map and can trap it in a wrong place.
+
+With both changed, the old images and even the old hand landmarks end 4.5–4.9 µm from the truth (2
+samples tested). The hand landmarks were far off but hardly mattered. The old images point to the right
+place, but they are too blurred to pin the map better than about 5 µm, so they hold it only weakly.
+
+**The old pipeline** (`annotations/STalign/pathology_<s>_proseg.qmd`; see "Old vs new pipeline" above):
+- H&E side (STalign's source): the whole-slide JPG, RGB, 1.76 µm/px.
+- Xenium side (target): a cell-density image of the ProSeg cell centroids (`cells.csv.gz`). Each centroid
+  is spread as a Gaussian with sd 20 µm on a 10 µm grid (`STalign.rasterize(dx=10)`). No DAPI is used.
+- Start: an affine from 4–6 hand-placed landmarks (`L_T_from_points`).
+- LDDMM settings:
+  - 2000 iterations; a = 500 JPG px (about 880 µm); sigmaM 0.15, sigmaB 0.10, sigmaA 0.11.
+  - Step sizes: epV 10, with epL / epT at STalign's defaults (2e-8 / 0.2, which LDDMM divides by 10).
+  - Landmark term on, with σP = 20 µm (default). Pixel re-weighting on (STalign always does it).
+
+**How it was tested.** `replay_old_stalign.py` reruns that pipeline exactly and changes one thing at a
+time, scoring each run by every cell's distance from the new map.
+- Landmarks: the notebook's hand landmarks, or "exact" ones (the same Xenium points, with their true H&E
+  positions from the new map).
+- Step sizes: notebook, affine frozen (epL = epT = 0), or all 10× smaller (epL 2e-9, epT 2e-2, epV 1).
+- Pixel re-weighting: on, or off (`--reweight-start 100000`, so every pixel keeps weight 0.5).
+
+Median cell error at the end, µm (`qc/replay_old/replay_summary.tsv`, `fig_replay_conditions.png`):
+
+| Sample | Start: affine from landmarks | Notebook step sizes | Affine frozen | All steps 10× smaller | 10× smaller, re-weighting off | Stored 030226 map |
+|---|---|---|---|---|---|---|
+| CL42112 | hand, 70 µm | 65.2 | | 4.2 | **4.9** | 76.8 |
+| CL42112 | exact, 0.8 µm | 78.1 (2 threads), 34.0 (1 thread) | 55.9 | 5.9 | **4.5** | |
+| PA320784 | hand, 243 µm | 10.4 (2 threads), 22.8 (1 thread) | | 124 | **4.5** | 25.3 |
+| PA320784 | exact, 0.2 µm | 32.1 (2 threads), 51.5 (1 thread) | 6.3 | 17.5 | **4.7** | |
+| GG240468 | hand, 115 µm | 5.4 | | | | 4.4 |
+| GG240468 | exact, 0.2 µm | 3.5 | 7.0 | | | |
+
+(Runs tagged `_1thread` used 1 CPU thread. Exact landmarks rounded to the notebooks' 50 grid: PA320784
+43.5 → 19.0 µm, CL42112 47.0 → 78.7 µm.)
+
+**1. The step sizes were too large, so the map never settles** (`fig_replay_trajectory.png`).
+- Each iteration, STalign moves each part of the map by step size × the slope of its energy: epT for
+  the shift, epL for rotation and stretch, epV for the deformation. The step sizes are unitless
+  multipliers. How far the map actually moves depends on how steep the energy is for these images, so
+  defaults tuned on other data need not fit.
+- From exact landmarks, the map jumps from the first iteration. The landmarks move a median 18–27 µm
+  per iteration in PA320784 and CL42112. The affine alone moves the PA320784 section a median 34 µm
+  per iteration, up to 134 µm.
+- Meanwhile the image term gets worse, rising 37% (PA320784) and 3× (CL42112) within 10 iterations. The
+  optimizer is overshooting, not finding a better fit.
+- It bounces like this for all 2000 iterations, so the final map is wherever iteration 2000 lands.
+  That is why the same run ends 26 µm apart on 1 vs 2 threads, and why exact landmarks end 32–78 µm off.
+- GG240468 bounces least (median 5.8 µm per iteration). That, not its landmarks, is why it came out
+  right.
+- Both parts of the map bounce. Freezing the affine takes PA320784 from 51.5 to 6.3 µm. But in CL42112
+  the deformation alone still moves the landmarks a median 12.6 µm per iteration and ends 56 µm off.
+
+**2. STalign's pixel re-weighting kicks the map and can trap it.**
+- *What it is.* STalign assumes some pixels of the target image should not be matched: background, and
+  artefacts with no counterpart in the other image. For each pixel it estimates the chance of being
+  matched tissue, artefact or background (WM / WA / WB). Only WM enters the image term.
+  - Until iteration 50 every pixel has WM = 0.5.
+  - From iteration 50 on, every 5 iterations, the weights are re-estimated from the current overlay.
+    Pixels the overlay explains badly are down-weighted.
+- *Tested by switching it off*, with 10× smaller steps. Off, the four runs (2 samples × hand / exact
+  landmarks) all end at 4.5–4.9 µm. On, they end at 4.2, 5.9, 17.5 and 124 µm.
+- *The kick.* With it on, the landmarks jump at the second re-estimate (iteration 55): PA320784 from 2.3
+  to 23 µm, CL42112 from 7.3 to 34 µm. With it off there is no jump (3.6 and 7.6 µm).
+- *The trap.* PA320784 starts from its hand landmarks 230 µm off. In the first 50 iterations the affine
+  brings the section to 120 µm off, either way.
+  - With the re-weighting on, it stays 126–129 µm off for the remaining 1950 iterations. Presumably the
+    pixels that don't fit are written off as artefact or background, so the wrong position stops being
+    penalised (the weights themselves were not inspected).
+  - With it off, the cells end 4.5 µm off.
+
+**3. Nothing held the map at the right place.**
+- *The landmarks are slack.* With σP = 20 µm and 4–5 landmarks, the landmark term is at most 1.3% of
+  the energy at any iteration of any replay.
+  - That was harmless for the hand landmarks, which were wrong anyway (below).
+  - Several of the notebooks' Xenium landmarks sit at the section edge (CL42112: 67 and 75 µm from the
+    nearest cell; PA320784: 81 µm). There nothing constrains the map. With the re-weighting off they
+    drift 13–36 µm while the cells end 4.5 µm off. So the landmark distance in
+    `fig_replay_trajectory.png` overstates the cell error of the small-step runs; the table is the cell
+    error.
+- *The old images point to the right place, but only weakly* (`diag_image_term.py`,
+  `fig_image_term.png`). The scan shifts the map rigidly off the true position and computes the R² of
+  STAlign's contrast fit over tissue pixels.
+  - The old pair's best match is 0–4.5 µm from the truth in all 11 samples, while the stored map is
+    3.5–89 µm off.
+  - But 5 µm off costs only 0.7–3.4% of the match (10 µm: 1.7–6.8%). For the new hematoxylin–DAPI
+    pair it costs 30–78%.
+  - A shallow bowl pulls back weakly, so it can't stop the bouncing or the re-weighting.
+- *The shallowness comes from the 20 µm blur, not from cell counts vs DAPI.* DAPI blurred the same way
+  is just as shallow (5 µm costs 0.6–2.2%). The same DAPI at 10 µm pixels without the blur loses 7–41%.
+- *So about 5 µm is the limit of the old images.* With the optimizer fixed they reach 4.5–4.9 µm
+  (p90 10–19 µm). About 1 µm needs nucleus-level images and many tight landmarks, as in the rerun.
+
+**4. The hand landmarks were far off, but not what set the final error** (`diag_old_landmarks.py`,
 `qc/landmarks/`).
 - There are 48 landmarks in total. Placed on the new map, they are off by a median 189 µm (29–630 µm).
   Per-sample medians are 80–373 µm.
-- In 9 of 11 notebooks every coordinate is a multiple of 50: JPG px on the H&E side (88 µm) and µm on
-  the Xenium side.
-- Rounding a perfectly placed pair to that grid moves it at most 97 µm, typically 37 µm (simulated).
-  Yet 77% of landmarks are off by more than 97 µm.
-- The grid point nearest each true position was only 4–56 µm away.
-- The two notebooks not on the grid (CL87352, GG240468) were as far off (187 and 178 µm).
-- So the landmarks were misidentified features, not rounded ones.
+- It isn't the 50 grid.
+  - In 9 of 11 notebooks every coordinate is a multiple of 50: JPG px on the H&E side (88 µm) and µm
+    on the Xenium side.
+  - Rounding a perfectly placed pair to that grid moves it at most 97 µm, typically 37 µm (simulated).
+    Yet 77% of landmarks are off by more than 97 µm.
+  - The grid point nearest each true position was only 4–56 µm away.
+  - The two notebooks not on the grid (CL87352, GG240468) were as far off (187 and 178 µm).
+  - So the landmarks were misidentified features, not rounded ones.
+- They set only the start. From exact landmarks the old pipeline still ends 32–78 µm off, and with the
+  optimizer fixed the hand landmarks end 4.5–4.9 µm off.
 
-**The landmarks didn't decide the final map either. The old LDDMM did, and it doesn't converge to the
-truth** (`replay_old_stalign.py`, `qc/replay_old/`). The original notebook pipeline was replayed:
-whole-slide JPG vs 10 µm cell-density raster, a = 500 JPG px, 2000 iterations, sigmaM 0.15, epV 10,
-landmark term on.
+**5. Ruled out.**
+- JPG resolution (1.76 µm/px).
+- A JPG/SVS mismatch. The JPG is the SVS at level 0 / 7 to within 0.73 µm at 66 patches across all 11
+  sections (`diag_jpg_frame.py`, `qc/frame/jpg_vs_svs.tsv`), so "exact" landmarks in the replays are
+  exact in the JPG the old pipeline registered.
 
-| Sample | Landmarks | Start (affine from landmarks) | End (after old LDDMM) | 030226 |
-|---|---|---|---|---|
-| PA320784 | hand | 243 µm | 10.4 µm (2 threads), 22.8 µm (1 thread) | 25.3 µm |
-| PA320784 | exact | 0.2 µm | 32.1 µm | |
-| PA320784 | exact, rounded to grid | 43.5 µm | 19.0 µm | |
-| CL42112 | hand | 70.3 µm | 65.2 µm | 76.8 µm |
-| CL42112 | exact | 0.8 µm | 78.1 µm | |
-| CL42112 | exact, rounded to grid | 47.0 µm | 78.7 µm | |
-| GG240468 | hand | 115 µm | 5.4 µm | 4.4 µm |
-| GG240468 | exact | 0.2 µm | 3.5 µm | |
-
-- **Exact landmarks don't help.** They give a near-perfect start (0.2–0.8 µm), and the old LDDMM
-  then pulls the map 32–78 µm away in PA320784 and CL42112. Its image term matches H&E colour to cell
-  counts per 10 µm pixel, and that match is not best at the true alignment.
-- **Each section has its own old-pipeline error, whatever the start:** about 4 µm in GG240468, 10–32
-  µm in PA320784, 65–79 µm in CL42112. That is why GG240468 came out right. It was the section, not
-  its landmarks.
-- **The old pipeline isn't reproducible at this scale.** The same PA320784 run on 1 vs 2 CPU threads
-  ends 26 µm apart, from identical inputs. Replays with the notebooks' own landmarks land 6–89 µm from
-  030226, so the stored map is one draw from a wide spread.
-- **JPG resolution (1.76 µm/px) was not the cause.**
-- **Nor was a JPG/SVS mismatch.** The JPG is the SVS at level 0 / 7 to within 0.73 µm at 66 patches
-  across all 11 sections (`diag_jpg_frame.py`, `qc/frame/jpg_vs_svs.tsv`), so "exact" landmarks in
-  the replays are exact in the JPG the old pipeline registered.
-- **Not established:** why the image term's optimum is off. One hypothesis is that H&E darkness tracks
-  cell density inconsistently across tissue types, plus edge and background handling, but it hasn't
-  been tested.
+**Corrections to earlier versions of this explanation.**
+- The 2026-10-13 brief (`handoff_2026-10-13.md`) said the old setup "can't resolve anything under
+  about 100 µm" and has "no nucleus-level features to lock onto". The second part is right. But the
+  old images do point to the truth; the optimizer settings caused the error.
+- Earlier versions said the old image match "is not best at the true alignment", and that each section
+  has its own old-pipeline error whatever the start. Both are wrong. The match peaks at the truth, and
+  the error changes from run to run (CL42112 from exact landmarks: 34 or 78 µm).
+- The 2026-10-15 version said small steps "can't cover a far start" and that the re-weighting "adds
+  6–18 µm". The re-weighting-off test (2026-10-16) shows that the far start (PA320784) was stuck because
+  of the re-weighting, not the step size.
+- Before 2026-10-16, landmark distances derived from the landmark energy were multiplied by 1.76, as if
+  σP were 20 JPG px (35 µm). LDDMM measures landmark distances in the Xenium frame, so σP is 20 µm.
+  The numbers were 1.76× too large (for example "31–48 µm per iteration", now 18–27).
+  `replay_old_stalign.py --trajectory` is fixed, and the figure and numbers above are corrected.
 
 ### Why the 5 µm target
 
@@ -345,156 +542,3 @@ landmark term on.
   here are often only 40–140 µm wide (CN51420 pseudorosettes 43 µm, CL42112 lipidized islands 135 µm,
   effective width).
 - The CL touching rule (3 µm) needs about 1–2 µm. The final maps reach that.
-
----
-
-## Original handoff brief (2026-10-13)
-
-This brief was written for the Claude session that ran this work. That work started in a different
-session (the CL lipid-map work, run from the main checkout `/mnt/storage/dept/medonc/beroukhim/youyun/plgg/code`).
-A session in this directory has a different project-memory folder, so everything needed is written
-here.
-
-## Problem (found 2026-10-13)
-
-The stored H&E↔Xenium registration is in `data/Xenium_annotations/pathology_annotations_030226/proseg_pathology_<sample>_proseg_meta.csv`.
-Its columns `STAlign_x` / `STAlign_y` are the per-cell H&E position in JPG pixels: row and column,
-JPG = SVS level 0 ÷ 7. This registration is off by tens of µm in 10 of 11 samples.
-
-**How it was measured.** The H&E is a post-Xenium stain of the same slide, so every H&E nucleus should
-land on a Xenium DAPI nucleus.
-- Each sample gets 30 windows of 150 µm.
-- H&E nuclei: peaks of the hematoxylin channel. DAPI nuclei: peaks of `morphology_focus`.
-- The DAPI points are mapped into the H&E through the stored coordinates.
-- The best shift per window comes from FFT cross-correlation (±150 µm), with a peak z-score.
-
-| Sample | Confident windows | Median offset (µm) | p90 (µm) | Spread (µm) | Annotated cells whose label changes |
-|---|---|---|---|---|---|
-| CL42112 | 26/29 | 75 | 94 | 21 | 41% |
-| CL67068 | 21/28 | 25 | 50 | 33 | 7% |
-| CL87352 | 24/30 | 26 | 44 | 31 | 13% |
-| CN51420 | 20/30 | 54 | 58 | 11 | 70% |
-| CN53398 | 13/30 | 38 | 44 | 17 | 32% |
-| GG240468 | 30/30 | **3** | 7 | 4 | 0% (positive control) |
-| GG241670 | 13/30 | 62 | 98 | 75 | 14% |
-| PA188570 | 29/30 | 34 | 42 | 10 | 18% |
-| PA258482 | 30/30 | 16 | 22 | 13 | 1% |
-| PA320784 | 30/30 | 26 | 32 | 6 | 9% |
-| PA328368 | 29/30 | 35 | 45 | 11 | 6% |
-
-- **Reading the table.** A small spread means a near-rigid offset (CL42112, CN51420, the PA samples).
-  A large spread means a local, non-rigid error (CL67068, CL87352, GG241670).
-- **"Label changes"** = the share of pathology-annotated cells whose region label changes when the
-  map moves by the median offset.
-- **Source tables:** `<main>/sc_integration/ENVI/2_spatial_imputation/CL/segmentation_qc/registration/`,
-  in `offsets_summary.tsv`, `annotation_impact.tsv` and `offsets_<sample>.tsv` (per window).
-- **Picture:** `R0_nuclei_before_after.jpg` in the same folder.
-
-**Why it happened.** The original notebooks (`annotations/STalign/pathology_<sample>_proseg.qmd`):
-- align the whole-slide **JPG at 1.76 µm/px**. LGG1 and LGG2 each hold several sections on one slide.
-- align it to a **10 µm cell-density raster** of ProSeg centroids (`STalign.rasterize(..., dx=10)`).
-- start from **4–6 hand-placed landmarks** via `L_T_from_points`.
-- run LDDMM with **default smoothness `a = 500`**, plus niter 2000, sigmaM 0.15, sigmaB 0.10,
-  sigmaA 0.11 and epV 10.
-
-That setup is fine at mm scale. It can't resolve anything under about 100 µm, and the cell-density
-raster has no nucleus-level features to lock onto. *(2026-10-14: corrected in "Why the old map was off" above. Replays show the old LDDMM ends 3.5–78 µm
-from the truth even from exact landmarks.)*
-
-**Why it matters.**
-- Cell-level pathology labels near region edges are affected.
-- So is everything in the CL lipid work below about 100 µm: the touching rule (nucleus within 3 µm
-  of a lipid pocket) and the rim profiles.
-- Treat the current labels as reliable at mm scale only.
-
-## Decision (user)
-
-Rerun STAlign itself rather than build a custom correction field. User: "I feel like this is what
-STAlign was meant to do. so we shouldn't reinvent the wheel here."
-
-## Pilot design (CL42112 first)
-
-1. **Images.** Both sides show nuclei.
-   - H&E: the hematoxylin channel (`skimage.color.rgb2hed(rgb)[..., 0]`) from the **SVS**, not the
-     JPG, at about 4 µm/px, then 2 µm/px. Crop to this sample's section.
-   - Xenium: the DAPI `morphology_focus` image at the same resolution.
-2. **Initial affine from nucleus-matched landmarks.**
-   - Use windows where nuclei match confidently (FFT shift, peak z-score ≥ about 5).
-   - Each gives a pair: H&E window centre ↔ that point mapped into Xenium µm with its measured
-     offset applied.
-   - Use **half** the windows for the fit; hold the other half out for scoring.
-   - Feed the pairs to `STalign.L_T_from_points`.
-3. **LDDMM, coarse to fine.**
-   - Smoothness `a` about 150–200 µm, in the image's units, instead of 500.
-   - Keep the landmark term (`pointsI` / `pointsJ`).
-   - First at 4 µm/px, then refine at 2 µm/px.
-4. **Output.**
-   - Write a new `_meta.csv` per sample, with the same columns as the 030226 files (`STAlign_x`,
-     `STAlign_y` in JPG px and the region labels), to a new folder such as
-     `data/Xenium_annotations/pathology_annotations_<date>_nucleus/`.
-   - **Never modify `pathology_annotations_030226`.** Record its md5s before you start and check them
-     at the end.
-5. **Validation.**
-   - Rerun the nucleus check against the new coordinates, on the **held-out** windows only.
-   - Target: median ≤ 5 µm. Report p90, the match fraction, and before vs after.
-   - Make an overlay picture: H&E with DAPI nuclei on top, before and after.
-6. **⛔ Gate.** Show the user the CL42112 result before running any other sample.
-   - After approval, run all 11 samples.
-   - GG240468 is the no-change control: it is already at 3 µm and must stay there.
-   - Then rerun `annotations/STalign/add_annotations.R` against the new folder. The user decides when.
-
-## Code to reuse
-
-**The nucleus check** is `<main>/sc_integration/ENVI/2_spatial_imputation/CL/segmentation_qc/registration_nuclei_check.py`.
-- It is **untracked** in the main checkout and absent from this branch. Import it by absolute path:
-  ```python
-  sys.path.insert(0, "/mnt/storage/dept/medonc/beroukhim/youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/CL/segmentation_qc")
-  from registration_nuclei_check import DAPI, peaks, raster, best_shift, folder, GROUP, DATA, DAPI_UM, MATCH_UM
-  from he_image import SVS, MPP0, JPG_TO_L0          # SVS(path).read_scaled(r0, c0, h, w, factor)
-  ```
-- Don't edit files in the main checkout; another session is working there.
-- `run()` / `run_cells()` hard-code the 030226 folder and, for CL samples, the lipid candidate masks.
-  Write your own window loop (copy `run_cells`, which needs no lipid data) with the metadata path as
-  a parameter.
-- Convention: `best_shift` returns d such that DAPI_mapped ≈ H&E + d, in µm, as (row, col).
-
-**STalign** (conda env `spatial`):
-- `LDDMM(xI, I, xJ, J, pointsI, pointsJ, L, T, a=500.0, niter=5000, ...)`
-- `L_T_from_points`
-- `transform_points_target_to_source`
-- `build_transform`, `rasterize`, `normalize`
-
-## Data paths (base `DATA = /mnt/storage/dept/medonc/beroukhim/youyun/plgg/data`)
-
-| What | Path |
-|---|---|
-| SVS (level 0 = 0.2522 µm/px) | `DATA/Xenium_annotations/images/230918_Xenium_CytAssist_{LGG1,LGG2}.svs`; the slide group per sample is `GROUP` in the check |
-| JPG (level 0 ÷ 7) | the same name with `.jpg` |
-| Pathology polygons | `DATA/Xenium_annotations/geojsons/230918_Xenium_CytAssist_{group}.geojson`, in level-0 px; the notebooks scale them by 1/7 to JPG |
-| Xenium DAPI (0.2125 µm/px, tiled JPEG2000) | `DATA/segmentation/proseg_run_121024/<folder>/<folder>_proseg/outs/morphology_focus/morphology_focus_0000.ome.tif`; `<folder>` comes from `folder(sample)` via `DATA/metadata/Xenium_PS.xlsx` |
-| ProSeg cells | `.../outs/cells.csv.gz` in the same folder |
-| Old registration (read-only) | `DATA/Xenium_annotations/pathology_annotations_030226/proseg_pathology_<sample>_proseg_meta.csv` |
-
-**Frames.**
-- Xenium `x_centroid` (µm) runs along H&E rows (`STAlign_x`).
-- `y_centroid` runs against H&E columns (`STAlign_y`): correlations +1.0 and −1.0 respectively.
-  Check this per sample.
-
-## Compute and standing rules
-
-- **Cluster.** This node (argos4) **cannot submit jobs.**
-  - Write an SGE script (`#$ -pe smp 4`; 4-slot jobs start sooner on the fragmented queue) for the
-    user to `qsub` from **argos-qsub1**.
-  - The pilot at 4 µm/px may fit in an interactive run.
-- **Python.** `python` is Python 2; activate `conda activate spatial` first.
-- **Rules:**
-  - Don't run `quarto render`; the user renders.
-  - Commit only when asked. When asked, commit just this folder's new files on this branch, e.g.
-    `annotations: nucleus-guided STAlign rerun`.
-  - Follow AGENTS.md style: snake_case, a header comment on every script, and comments on every
-    non-obvious step.
-  - Don't commit generated outputs.
-- **Patient H&E** images go to the user only via SendUserFile or Notion. Never publish them as an
-  Artifact or upload them to consumer cloud services.
-- **Explanations:** plain language, and reason through confounders, e.g. whether a window "improved"
-  only because it was a landmark window.
