@@ -90,19 +90,21 @@ source(paste0(workdir,'/youyun/plgg/code/helpers/enrichment_models.R'))
 
 The objects are here:
 
-RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds`
+RDS object with Leiden Clusters: `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus.rds`
 
-    -   `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_subset.rds`
+    -   `/data/beroukhim1/youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus_subset.rds`
 
 Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xenium/banksy/banksy_cell_cluster_annotation.tsv`  
 
 
 ```{r}
 # load the banksy embeddings
+# pathology labels from the nucleus-guided STAlign rerun (2026-10-16, annotations/STalign/nucleus_rerun/); the
+# object built from the old 030226 registration (..._pathology.rds) is kept for comparison
 banksy_embeddings <- readRDS(ifelse(
     !Sys.getenv("HOME") %in% c("/Users/youyun", "/Users/youyunzheng"), paste0(
-        workdir, "youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds"
-    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_subset.rds"
+        workdir, "youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus.rds"
+    ), "/Users/youyun/Documents/HMS/PhD/beroukhimlab/plgg/data/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus_subset.rds"
 ))
 colData(banksy_embeddings)$sample_id = factor(colData(banksy_embeddings)$sample_id)
 

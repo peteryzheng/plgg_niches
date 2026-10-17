@@ -7,6 +7,8 @@
 #                          (read back from its transform_<sample>.npz, i.e. what actually ran)
 #   provenance_files.tsv : role, sample, path, bytes, md5 for every input and output file
 #   environment_spatial.yml : `conda env export` of the env that ran it
+# It also records the downstream annotated BANKSY object (annotations/STalign/add_annotations.R) and its check
+# (check_annotated_object.R), when present.
 # Usage: python provenance.py          (conda env spatial; after run_all.sh, from a committed checkout)
 #        python provenance.py --compare <dir>   compare a rerun (run_all.sh with OUT_DIR=<dir>) with the
 #                                               production outputs; writes <dir>/compare_to_production.tsv
@@ -25,7 +27,7 @@ from nucleus_windows import DATA, GROUP, Z_CONF, MIN_CELLS, meta_path, dapi_path
 
 SCRIPTS = ["nucleus_core.py", "nucleus_windows.py", "stalign_nucleus.py", "run_all.sh", "label_impact.py", "cohort_figures.py",
            "overlay_before_after.py", "diag_detection.py", "diag_old_landmarks.py", "replay_old_stalign.py", "diag_jpg_frame.py",
-           "diag_image_term.py", "provenance.py"]
+           "diag_image_term.py", "check_annotated_object.R", "provenance.py"]
 # distribution name -> module name. Versions are read from the imported module: the env holds a stale pip
 # torch-2.0.0.dist-info next to the conda torch 2.10.0 that is actually imported, so package metadata misleads.
 PACKAGES = {"torch": "torch", "numpy": "numpy", "scipy": "scipy", "scikit-image": "skimage", "tifffile": "tifffile",
@@ -126,6 +128,13 @@ def main():
     # the from-scratch rerun's comparison with these outputs, and the environment snapshot
     files += [("repro_from_scratch", "all", qc / "repro_from_scratch/compare_to_production.tsv"),
               ("environment", "all", NEW_DIR / "environment_spatial.yml")]
+    # downstream: the BANKSY object labelled from these metas by add_annotations.R, its 5% subset, and the check
+    obj = DATA / "Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus"
+    if Path(str(obj) + ".rds").exists():                        # (the name has dots, so no with_suffix)
+        files += [("annotated_object", "all", Path(str(obj) + ".rds")),
+                  ("annotated_object_subset", "all", Path(str(obj) + "_subset.rds")),
+                  ("annotated_object_check", "all", qc / "annotated_object_check.tsv"),
+                  ("annotated_object_log", "all", qc / "add_annotations_20261016.log")]
     paths = sorted({p for _, _, p in files})
     missing = [str(p) for p in paths if not Path(p).exists()]
     with ThreadPoolExecutor(4) as ex:                       # ~9 GB of images: hash in parallel
@@ -159,6 +168,8 @@ def main():
                   "python annotations/STalign/nucleus_rerun/diag_image_term.py <sample> [...]; python annotations/STalign/nucleus_rerun/diag_image_term.py --figure",
                   "OUT_DIR=<NEW_DIR>/qc/repro_from_scratch bash annotations/STalign/nucleus_rerun/run_all.sh",
                   "python annotations/STalign/nucleus_rerun/provenance.py --compare <NEW_DIR>/qc/repro_from_scratch",
+                  "Rscript annotations/STalign/add_annotations.R   (annotated BANKSY object from these metas)",
+                  "Rscript annotations/STalign/nucleus_rerun/check_annotated_object.R",
                   "python annotations/STalign/nucleus_rerun/provenance.py"],
         new_dir=str(NEW_DIR),
         software=software(),

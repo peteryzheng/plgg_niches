@@ -1,3 +1,13 @@
+# Add the per-cell pathology region labels to the final BANKSY object.
+#
+# Inputs : the final BANKSY SpatialExperiment (banksy_rds_path) and one meta CSV per sample from the H&E <-> Xenium
+#          registration (annotation_input_dir; columns cell_id, annotation, region_id). Since 2026-10-16 that is the
+#          nucleus-guided rerun, pathology_annotations_101326_nucleus (annotations/STalign/nucleus_rerun/README.md);
+#          the earlier 030226 registration was off by tens of um.
+# Output : the object with colData pathology_annotation / region_id (annotated_rds_path) and a seeded 5% cell subset
+#          (annotated_subset_rds_path). The object built from 030226 (..._pathology.rds) is kept, not overwritten.
+# Assumes: every cell of the object has a row in its sample's meta (checked; the script stops otherwise).
+# Usage  : Rscript annotations/STalign/add_annotations.R   (conda env spatial)
 library(data.table)
 library(Banksy)
 library(SummarizedExperiment)
@@ -26,17 +36,17 @@ banksy_rds_path <- file.path(
 )
 annotation_input_dir <- file.path(
     workdir,
-    "youyun/plgg/data/Xenium_annotations/pathology_annotations_030226"
+    "youyun/plgg/data/Xenium_annotations/pathology_annotations_101326_nucleus"
 )
 annotated_rds_path <- file.path(
     workdir,
     "youyun/plgg/data/Xenium_annotations",
-    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds"
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus.rds"
 )
 annotated_subset_rds_path <- file.path(
     workdir,
     "youyun/plgg/data/Xenium_annotations",
-    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_subset.rds"
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus_subset.rds"
 )
 
 parse_sample_id <- function(path) {
@@ -172,6 +182,8 @@ colData(banksy_embeddings) <- new_metadata
 
 saveRDS(banksy_embeddings, file = annotated_rds_path)
 
+# 5% of cells for quick local work; seeded so the subset can be regenerated exactly (the 030226 subset was not)
+set.seed(1)
 subset_indices <- sample(1:ncol(banksy_embeddings), ncol(banksy_embeddings) * 0.05)
 banksy_embeddings_subset <- banksy_embeddings[, subset_indices]
 saveRDS(banksy_embeddings_subset, file = annotated_subset_rds_path)

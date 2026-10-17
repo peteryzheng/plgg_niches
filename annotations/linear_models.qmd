@@ -98,13 +98,15 @@ Cell type clusters annotation: `/xchip/beroukhimlab/coja/Spatial_PLGG/data/Xeniu
 
 
 ```{r}
+# pathology labels from the nucleus-guided STAlign rerun (2026-10-16, annotations/STalign/nucleus_rerun/); the
+# object built from the old 030226 registration (..._pathology.rds) is kept for comparison
 banksy_subset_rds_path = file.path(
     workdir, "youyun/plgg/data/Xenium_annotations",
-    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_subset.rds"
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus_subset.rds"
 )
 banksy_full_rds_path = file.path(
     workdir, "youyun/plgg/data/Xenium_annotations",
-    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds"
+    "banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus.rds"
 )
 banksy_rds_path = if (grepl('mount',workdir)) banksy_subset_rds_path else banksy_full_rds_path
 

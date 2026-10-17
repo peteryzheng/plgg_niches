@@ -11,7 +11,9 @@
   their H&E nuclei in every sample, with p90 ≤ 2.3 µm. The old map was 3.8–85 µm off.
 - **Old folder:** `pathology_annotations_030226` is unchanged (md5 of all 11 files checked before and
   after).
-- **Not done (user's call):** rerunning `annotations/STalign/add_annotations.R` on the new folder.
+- **Annotated BANKSY object (2026-10-16):** `add_annotations.R` now reads the new folder and writes
+  `..._20260826_115134_pathology_nucleus.rds` (+ `_subset.rds`); the 030226-based `..._pathology.rds` is kept.
+  See "Annotated BANKSY object" below for what was repointed and what still uses the old labels.
 - **Write-up with figures:** Notion page "stalign rerun".
 - **Original task brief (2026-10-13):** `handoff_2026-10-13.md`.
 - **Code:** the pipeline as run is commit `7de415f` on this branch. Later commits add checks and
@@ -96,6 +98,35 @@ python annotations/STalign/nucleus_rerun/provenance.py --compare <empty dir>
   roles, the after-registration window tables and the transforms (`compare_to_production.tsv`: every
   difference 0).
 
+### Annotated BANKSY object (2026-10-16)
+
+The new metas reach the analyses through one object. `annotations/STalign/add_annotations.R` copies each cell's
+`annotation` (recoded) and `region_id` from the per-sample metas into the colData of the final BANKSY
+SpatialExperiment (`banksy_param_search/.../..._20260826_115134.rds`). Only labels are copied, not coordinates.
+
+- **Now:** it reads `pathology_annotations_101326_nucleus` and writes, in `DATA/Xenium_annotations/`:
+  - `banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus.rds`
+    (md5 `9f0cfb6f…`, 1,802,005 cells);
+  - `..._pathology_nucleus_subset.rds` (md5 `05044d4f…`, 90,100 cells, `set.seed(1)`; the 030226 subset was
+    not seeded).
+  - The 030226-based `..._pathology.rds` and `_subset.rds` are kept, unchanged.
+- **Check** (`check_annotated_object.R` → `qc/annotated_object_check.tsv`): every cell's label in the object
+  equals its meta row, and the subset carries the same labels. Relabelled against the old object, per
+  sample: 0.1–16% of all cells, and 0.2–75% of the cells the old map put in an annotated region. That matches
+  `qc/label_impact.tsv`; the counts are a little lower because the object holds only QC-passing cells.
+- **Repointed to the new object** (not re-rendered): `annotations/linear_models.qmd`,
+  `annotations/linear_models_niches.qmd`, `niche/proseg_output_analysis/niche_interpretation_proseg.qmd`.
+  `linear_models_niches.qmd` reads the subset from a local Mac path when run on the Mac, so copy the new
+  subset there first.
+- **Still on the old labels or coordinates** (not in this branch; untracked or uncommitted in the main checkout):
+  - `sc_integration/ENVI/2_spatial_imputation/PA/export_new_object_cell_metadata.R`, which writes
+    `xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv` from the old object. The PA MAPK and
+    morphology notebooks read that TSV.
+  - The CL lipid / vacuole scripts under `sc_integration/ENVI/2_spatial_imputation/CL/`, which read
+    `STAlign_x/_y` from the 030226 metas directly.
+  - `XENIUM_RUNBOOK.md`, which still names the 030226 folder and `..._pathology.rds`.
+- **Not affected:** the ENVI training h5ads (`sce_2_anndata.qmd` reads the unlabelled BANKSY object).
+
 ### All commands (production outputs, figures, diagnostics)
 
 ```bash
@@ -131,9 +162,12 @@ python annotations/STalign/nucleus_rerun/replay_old_stalign.py --trajectory
 python annotations/STalign/nucleus_rerun/replay_old_stalign.py --conditions   # end error by start and setting
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python annotations/STalign/nucleus_rerun/diag_image_term.py <sample> [...]   # ~8 min per sample
 python annotations/STalign/nucleus_rerun/diag_image_term.py --figure
-# 4. from-scratch rerun and comparison (above), then the provenance manifest (after committing)
+# 4. from-scratch rerun and comparison (above)
 OUT_DIR=$NEW_DIR/qc/repro_from_scratch bash annotations/STalign/nucleus_rerun/run_all.sh
 python annotations/STalign/nucleus_rerun/provenance.py --compare $NEW_DIR/qc/repro_from_scratch
+# 5. the annotated BANKSY object from the new metas (~16 min, 14 GB RAM), its check, then the provenance manifest
+Rscript annotations/STalign/add_annotations.R
+Rscript annotations/STalign/nucleus_rerun/check_annotated_object.R
 python annotations/STalign/nucleus_rerun/provenance.py            # records HEAD, md5s, versions, conda env export
 ```
 (GG240468 was replayed with `original` and `true` only.)
@@ -158,6 +192,7 @@ python annotations/STalign/nucleus_rerun/provenance.py            # records HEAD
 | `replay_old_stalign.py` | Reruns the original notebook pipeline with hand, exact or grid-rounded landmarks, optionally with other step sizes or the pixel re-weighting off; records the affine per iteration |
 | `diag_jpg_frame.py` | Checks that the JPG is the SVS at level 0 / 7, and the polygon outlines against tissue edges |
 | `diag_image_term.py` | How sharply each H&E/Xenium image pair's match pins the map (R² of STAlign's contrast fit vs offset) |
+| `check_annotated_object.R` | Checks the annotated BANKSY object against the new metas; label changes vs the old object |
 | `provenance.py` | Provenance manifest; `--compare` checks a rerun against the production outputs |
 
 ### Method (final)
