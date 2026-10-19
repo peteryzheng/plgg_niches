@@ -97,6 +97,40 @@ if (anyDuplicated(design_dt$column_id)) {
     stop("Design contains duplicated column_id values.")
 }
 
+# ---- Expression filter + log transform (REQUIRED before limma) --------------
+# The pseudobulk matrix holds arithmetic means of ENVI-decoded expression on a
+# LINEAR scale (median ~3e-4). limma's eBayes(trend = TRUE) assumes LOG-scale data
+# with a modelled mean-variance trend, so fitting the raw matrix deflates every
+# statistic: the p-value distribution comes out humped in the middle instead of
+# uniform, and the deflated moderated-t propagates straight into the fgsea ranking.
+#
+# Two corrections, applied per cell type inside the loop below:
+#   1. drop genes with essentially no expression. Unexpressed genes are not
+#      independent -- they arrive in large correlated families (olfactory and
+#      vomeronasal receptors, keratins) whose near-random ranks cluster together and
+#      manufacture spurious enrichment. In preranked GSEA the ranked list defines the
+#      null background for EVERY set, so noise genes distort all of them, not just
+#      their own. The filter is deliberately permissive so genuinely low-but-real
+#      expression survives.
+#   2. log2 transform, so the trend model sees the scale it expects.
+MIN_MEAN_EXPR <- 0.01      # linear-scale floor, applied within each cell type
+LOG_EPS       <- 1e-6      # well below the expressed-gene median (~3e-4)
+
+filter_and_log <- function(mat) {
+    keep <- rowMeans(mat) >= MIN_MEAN_EXPR
+    log2(mat[keep, , drop = FALSE] + LOG_EPS)
+}
+
+# Ratio-to-uniform QC on a p-value vector: under a true null every entry is ~1.
+# A hump in the middle bins means the test is conservative (the bug we fixed); a
+# spike in the first bin beyond what the biology supports means anti-conservative.
+pval_qc <- function(p, label) {
+    br <- c(0, .05, .1, .2, .4, .6, .8, 1)
+    obs <- as.numeric(table(cut(p, br, include.lowest = TRUE))) / length(p)
+    data.table(label = label, bin = paste0("(", head(br, -1), ",", br[-1], "]"),
+               frac = obs, expected = diff(br), ratio_to_uniform = obs / diff(br))
+}
+
 # ---- Build the MSigDB pathway list once (shared across cell types) ----------
 msig_all <- as.data.table(msigdbr::msigdbr(species = "Homo sapiens"))
 collection_col <- if ("gs_collection" %in% names(msig_all)) "gs_collection" else "gs_cat"
@@ -164,7 +198,11 @@ set_theme <- function(set_name) {
 }
 
 run_fgsea <- function(stats_vec, contrast_label, ct_label) {
-    fg_res <- fgsea::fgseaMultilevel(pathways = pathways, stats = stats_vec, eps = 0)
+    # minSize/maxSize re-applied HERE, against the actual ranked vector: the global
+    # set_size_dt gate was computed on the unfiltered universe, so after the per-cell-type
+    # expression filter a set can fall below the floor in this particular ranking.
+    fg_res <- fgsea::fgseaMultilevel(pathways = pathways, stats = stats_vec, eps = 0,
+                                     minSize = min_set_size, maxSize = max_set_size)
     fg_dt <- as.data.table(fg_res)
     if (nrow(fg_dt) == 0L) {
         return(data.table())
@@ -186,6 +224,7 @@ run_fgsea <- function(stats_vec, contrast_label, ct_label) {
 cell_types <- unique(design_dt$cell_type)
 de_list <- list()
 gsea_list <- list()
+pqc_list <- list()
 
 for (ct in cell_types) {
     ct_design <- design_dt[cell_type == ct]
@@ -196,7 +235,9 @@ for (ct in cell_types) {
         next
     }
     ct_cols <- ct_design$column_id
-    ct_mat <- pb_mat[, ct_cols, drop = FALSE]
+    # filter + log2 within this cell type: a gene unexpressed in one lineage may be
+    # perfectly real in another, so the gate must not be applied cohort-wide.
+    ct_mat <- filter_and_log(pb_mat[, ct_cols, drop = FALSE])
 
     sample_factor <- factor(ct_design$sample)
     region_factor <- factor(ct_design$region, levels = c("compact", "loose"))  # compact = reference
@@ -216,13 +257,20 @@ for (ct in cell_types) {
     de_dt <- data.table(
         cell_type = ct,
         gene = toupper(rownames(tt)),
-        logFC_loose_vs_compact = as.numeric(tt$logFC),
+        log2FC_loose_vs_compact = as.numeric(tt$logFC),
         t_stat = as.numeric(tt$t),
         pvalue = as.numeric(tt$P.Value),
         fdr = as.numeric(tt$adj.P.Val)
     )
     de_dt <- unique(de_dt, by = "gene")
     de_list[[ct]] <- de_dt
+
+    # p-value distribution QC for this fit (acceptance test for the scale fix)
+    pq <- pval_qc(de_dt$pvalue, ct)
+    pq[, `:=`(n_genes_tested = nrow(de_dt), frac_p_lt_0.05 = mean(de_dt$pvalue < 0.05),
+              min_pvalue = min(de_dt$pvalue), min_fdr = min(de_dt$fdr))]
+    pqc_list[[ct]] <- pq
+
 
     # Preranked fgsea on the moderated t (both directions).
     stats_loose <- de_dt$t_stat
@@ -258,6 +306,8 @@ fwrite(shared_out, file.path(output_dir, "morphology_state_shared_universe.csv")
 fwrite(limma_out, file.path(output_dir, "morphology_state_limma_de.csv"))
 fwrite(geneset_out, file.path(output_dir, "morphology_state_gene_sets_filtered.csv"))
 fwrite(gsea_out, file.path(output_dir, "morphology_state_gsea_results.csv"))
+fwrite(rbindlist(pqc_list, fill = TRUE),
+       file.path(output_dir, "morphology_state_pvalue_qc.csv"))
 if (nrow(counts_dt) > 0L) {
     fwrite(counts_dt, file.path(output_dir, "morphology_state_cell_counts.csv"))
 }
@@ -269,6 +319,10 @@ metadata_lines <- c(
     paste0("cell_types_tested: ", paste(names(de_list), collapse = ", ")),
     paste0("n_samples_total: ", nrow(coverage_out)),
     paste0("shared_universe_n: ", length(shared_universe)),
+    paste0("expression_filter_min_mean: ", MIN_MEAN_EXPR),
+    paste0("transform: log2(x + ", LOG_EPS, ") applied per cell type after filtering"),
+    paste0("genes_tested_per_cell_type: ",
+           paste(vapply(de_list, nrow, integer(1)), collapse = ", ")),
     paste0("min_set_size: ", min_set_size),
     paste0("max_set_size: ", max_set_size),
     paste0("reference_region: compact"),

@@ -25,7 +25,7 @@ transcriptome when they sit in **loose (myxoid)** vs **compact (fibrillary)**
 pathology regions. Myxoid = a glycan-rich matrix, so *driver → glycan/secretory
 state → myxoid morphology* would close the biphasic-PA loop.
 
-The ENVI objects are here: `data/sc_integration/ENVI_results_022626`.
+The ENVI objects are here: `data/sc_integration/ENVI_results_091126`.
 
 **How to read the results:**
 
@@ -136,8 +136,8 @@ MIN_CELLS = 20  # must match morphology_state_prepare.py gating
 
 # Run (or reuse) the pseudobulk + limma/fgsea pipeline
 
-The heavy lifting lives in a self-contained sibling folder (mirrors
-`spatial_imputation_gsea/`): `morphology_state_prepare.py` builds sample × region
+The heavy lifting lives in a self-contained sibling folder (same pattern as
+`CL/morphology_state_gsea/`): `morphology_state_prepare.py` builds sample × region
 pseudobulk means per cell type, `morphology_state.R` runs limma (`~ sample + region`,
 compact = reference) + preranked fgsea over MSigDB. Cached: the pipeline re-runs only
 when its outputs are missing or `FORCE_PIPELINE = True`.
@@ -400,8 +400,7 @@ cell_meta = pd.read_csv(
 cell_meta["region"] = cell_meta["pathology_annotation"].map(REGION_MAP)
 
 data_root = None
-for cand in ["youyun/plgg/data/sc_integration/ENVI_results_022626",
-             "youyun/plgg/data/sc_integration/ENVI_results"]:
+for cand in ["youyun/plgg/data/sc_integration/ENVI_results_091126"]:
     if (Path(workdir) / cand).exists():
         data_root = Path(workdir) / cand
         break

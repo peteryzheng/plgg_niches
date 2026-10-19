@@ -9,7 +9,7 @@
 # inferential unit at the sample level (n = usable PA samples), not per-cell.
 #
 # Inputs
-#   - PA ENVI spatial h5ads: */ENVI_results_022626/*astrocytoma_spatial_envi.h5ad
+#   - PA ENVI spatial h5ads: */ENVI_results_091126/*astrocytoma_spatial_envi.h5ad
 #     imputed full transcriptome lives in obsm['imputation'], genes = var_names.
 #   - Phase-0 cell metadata TSV (single source of truth for finalized labels):
 #     data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv
@@ -68,8 +68,7 @@ def detect_workdir() -> str:
 
 def get_data_root(workdir: str) -> str:
     candidates = [
-        os.path.join(workdir, "youyun/plgg/data/sc_integration/ENVI_results_022626"),
-        os.path.join(workdir, "youyun/plgg/data/sc_integration/ENVI_results"),
+        os.path.join(workdir, "youyun/plgg/data/sc_integration/ENVI_results_091126"),
     ]
     for p in candidates:
         if os.path.exists(p):
