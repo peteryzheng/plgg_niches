@@ -16,6 +16,7 @@
 # Assumes: inputs are those stalign_nucleus.py reads (old 030226 meta, SVS, GeoJSON + recode map from the
 #          sample notebook, Xenium DAPI, Xenium_PS.xlsx for the folder lookup); outputs in NEW_DIR(/qc).
 import hashlib, importlib, json, platform, subprocess, sys, time
+sys.dont_write_bytecode = True   # importing the pipeline modules must not leave __pycache__ in the folder it checks
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import numpy as np, pandas as pd
