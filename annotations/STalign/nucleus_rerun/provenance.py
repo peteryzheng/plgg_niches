@@ -7,8 +7,9 @@
 #                          (read back from its transform_<sample>.npz, i.e. what actually ran)
 #   provenance_files.tsv : role, sample, path, bytes, md5 for every input and output file
 #   environment_spatial.yml : `conda env export` of the env that ran it
-# It also records the downstream annotated BANKSY object (annotations/STalign/add_annotations.R) and its check
-# (check_annotated_object.R), when present.
+# It also records, when present, the downstream annotated BANKSY object (annotations/STalign/add_annotations.R)
+# and its check (check_annotated_object.R), the per-cell metadata TSV exported from it, the PA pathology-enrichment
+# reruns on the new labels and their comparison with the old-label outputs (compare_pa_enrichment.R).
 # Usage: python provenance.py          (conda env spatial; after run_all.sh, from a committed checkout)
 #        python provenance.py --compare <dir>   compare a rerun (run_all.sh with OUT_DIR=<dir>) with the
 #                                               production outputs; writes <dir>/compare_to_production.tsv
@@ -27,7 +28,17 @@ from nucleus_windows import DATA, GROUP, Z_CONF, MIN_CELLS, meta_path, dapi_path
 
 SCRIPTS = ["nucleus_core.py", "nucleus_windows.py", "stalign_nucleus.py", "run_all.sh", "label_impact.py", "cohort_figures.py",
            "overlay_before_after.py", "diag_detection.py", "diag_old_landmarks.py", "replay_old_stalign.py", "diag_jpg_frame.py",
-           "diag_image_term.py", "check_annotated_object.R", "provenance.py"]
+           "diag_image_term.py", "check_annotated_object.R", "compare_pa_enrichment.R", "provenance.py"]
+# downstream scripts outside this folder that consume the new labels (repo-relative)
+DOWNSTREAM = ["annotations/STalign/add_annotations.R",
+              "sc_integration/ENVI/2_spatial_imputation/PA/export_new_object_cell_metadata.R",
+              "sc_integration/ENVI/2_spatial_imputation/PA/morphology_state_gsea/morphology_state_prepare.py",
+              "sc_integration/ENVI/2_spatial_imputation/PA/morphology_state_gsea/morphology_state.R",
+              "sc_integration/ENVI/2_spatial_imputation/measured_panel_qc/measured_panel_prepare.py",
+              "sc_integration/ENVI/2_spatial_imputation/measured_panel_qc/measured_panel_fit.R",
+              "sc_integration/ENVI/2_spatial_imputation/measured_panel_qc/compare_measured_imputed.py",
+              "annotations/STalign/plot_endothelial_vessel_registration.py"]
+REPO = HERE.parents[2]
 # distribution name -> module name. Versions are read from the imported module: the env holds a stale pip
 # torch-2.0.0.dist-info next to the conda torch 2.10.0 that is actually imported, so package metadata misleads.
 PACKAGES = {"torch": "torch", "numpy": "numpy", "scipy": "scipy", "scikit-image": "skimage", "tifffile": "tifffile",
@@ -135,6 +146,16 @@ def main():
                   ("annotated_object_subset", "all", Path(str(obj) + "_subset.rds")),
                   ("annotated_object_check", "all", qc / "annotated_object_check.tsv"),
                   ("annotated_object_log", "all", qc / "add_annotations_20261016.log")]
+    # downstream: the per-cell metadata TSV exported from that object, the old-label snapshot, the PA reruns, the comparison
+    tsv = DATA / "xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv"
+    if tsv.exists():
+        files += [("cell_metadata_tsv", "all", tsv), ("cell_metadata_tsv_log", "all", qc / "export_cell_metadata_20261019.log")]
+    files += [(role, "all", qc / name) for role, name in [
+        ("pa_old_label_snapshot", "pa_enrichment_old_labels/MANIFEST.md5"),
+        ("pa_morphology_rerun_log", "morphology_state_rerun_20261019.log"),
+        ("pa_measured_panel_rerun_log", "measured_panel_rerun_20261019.log"),
+        ("pa_enrichment_comparison", "pa_enrichment_old_vs_new.tsv"),
+        ("pa_enrichment_comparison_summary", "pa_enrichment_old_vs_new_summary.tsv")] if (qc / name).exists()]
     paths = sorted({p for _, _, p in files})
     missing = [str(p) for p in paths if not Path(p).exists()]
     with ThreadPoolExecutor(4) as ex:                       # ~9 GB of images: hash in parallel
@@ -154,7 +175,8 @@ def main():
         code=dict(repo_head=git("rev-parse", "HEAD"), branch=git("rev-parse", "--abbrev-ref", "HEAD"),
                   pipeline_folder_clean=git("status", "--porcelain", "--", ".") == "",
                   folder="annotations/STalign/nucleus_rerun",
-                  script_md5={f: md5(HERE / f) for f in SCRIPTS if (HERE / f).exists()}),
+                  script_md5={f: md5(HERE / f) for f in SCRIPTS if (HERE / f).exists()},
+                  downstream_script_md5={f: md5(REPO / f) for f in DOWNSTREAM if (REPO / f).exists()}),
         commands=["bash annotations/STalign/nucleus_rerun/run_all.sh   (PARALLEL=2 THREADS=2 by default)",
                   "python annotations/STalign/nucleus_rerun/label_impact.py <NEW_DIR> <NEW_DIR>/qc <NEW_DIR>/qc/trial_affine_all",
                   "python annotations/STalign/nucleus_rerun/cohort_figures.py <NEW_DIR> <NEW_DIR>/qc <NEW_DIR>/figures <NEW_DIR>/qc/trial_affine_all",
@@ -170,6 +192,12 @@ def main():
                   "python annotations/STalign/nucleus_rerun/provenance.py --compare <NEW_DIR>/qc/repro_from_scratch",
                   "Rscript annotations/STalign/add_annotations.R   (annotated BANKSY object from these metas)",
                   "Rscript annotations/STalign/nucleus_rerun/check_annotated_object.R",
+                  "Rscript sc_integration/ENVI/2_spatial_imputation/PA/export_new_object_cell_metadata.R   (per-cell TSV with the new labels)",
+                  "(in PA/morphology_state_gsea/) python morphology_state_prepare.py; Rscript morphology_state.R",
+                  "(in measured_panel_qc/) python measured_panel_prepare.py PA; Rscript measured_panel_fit.R PA; python compare_measured_imputed.py",
+                  "python annotations/STalign/plot_endothelial_vessel_registration.py",
+                  "quarto render annotations/linear_models.qmd, annotations/linear_models_niches.qmd, niche/proseg_output_analysis/niche_interpretation_proseg.qmd, sc_integration/ENVI/2_spatial_imputation/PA/4_PA_morphology_state.qmd   (by the user)",
+                  "Rscript annotations/STalign/nucleus_rerun/compare_pa_enrichment.R",
                   "python annotations/STalign/nucleus_rerun/provenance.py"],
         new_dir=str(NEW_DIR),
         software=software(),

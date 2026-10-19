@@ -14,6 +14,9 @@
 - **Annotated BANKSY object (2026-10-16):** `add_annotations.R` now reads the new folder and writes
   `..._20260826_115134_pathology_nucleus.rds` (+ `_subset.rds`); the 030226-based `..._pathology.rds` is kept.
   See "Annotated BANKSY object" below for what was repointed and what still uses the old labels.
+- **PA pathology analyses (2026-10-19):** moved to the new labels; mixed-model renders pending. Astrocyte
+  glycan/ECM enrichment in myxoid regions gets stronger, the myeloid one weaker (q 0.005 → 0.06). See "PA pathology
+  analyses on the new labels" below.
 - **Write-up with figures:** Notion page "stalign rerun".
 - **Original task brief (2026-10-13):** `handoff_2026-10-13.md`.
 - **Code:** the pipeline as run is commit `7de415f` on this branch. Later commits add checks and
@@ -118,14 +121,60 @@ SpatialExperiment (`banksy_param_search/.../..._20260826_115134.rds`). Only labe
   `annotations/linear_models_niches.qmd`, `niche/proseg_output_analysis/niche_interpretation_proseg.qmd`.
   `linear_models_niches.qmd` reads the subset from a local Mac path when run on the Mac, so copy the new
   subset there first.
-- **Still on the old labels or coordinates** (not in this branch; untracked or uncommitted in the main checkout):
-  - `sc_integration/ENVI/2_spatial_imputation/PA/export_new_object_cell_metadata.R`, which writes
-    `xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv` from the old object. The PA MAPK and
-    morphology notebooks read that TSV.
-  - The CL lipid / vacuole scripts under `sc_integration/ENVI/2_spatial_imputation/CL/`, which read
-    `STAlign_x/_y` from the 030226 metas directly.
-  - `XENIUM_RUNBOOK.md`, which still names the 030226 folder and `..._pathology.rds`.
+- **Still on the old labels or coordinates:**
+  - The CL lipid / vacuole scripts under `sc_integration/ENVI/2_spatial_imputation/CL/` (untracked, active
+    separate work), which read `STAlign_x/_y` from the 030226 metas directly.
+  - The CL arm of `measured_panel_qc/`, kept paired with the CL imputed morphology state, which is also on
+    the old labels.
+  - Readers of the old `cell_metadata_..._20260826.tsv` that use only cell type, niche and x/y
+    (`1_PA_MAPK_scores.qmd`, `2_MAPK_adj.qmd`, `PA_myeloid_mapk_neighborhood.qmd`, `glial_exposure_genes/`).
+    Those columns are identical in the new TSV, so their results do not depend on the change.
+  - The PA analyses were repointed on 2026-10-19; see "PA pathology analyses on the new labels" below.
 - **Not affected:** the ENVI training h5ads (`sce_2_anndata.qmd` reads the unlabelled BANKSY object).
+
+### PA pathology analyses on the new labels (2026-10-19)
+
+Branch `pa-pathology-nucleus` (`73578ed` for the repointing) moves every PA analysis that reads pathology labels
+to the new labels. The old outputs were copied first to `NEW_DIR/qc/pa_enrichment_old_labels/` (50 files,
+`MANIFEST.md5`). `compare_pa_enrichment.R` compares old vs new and writes `qc/pa_enrichment_old_vs_new.tsv`
+(one row per test) and `qc/pa_enrichment_old_vs_new_summary.tsv`.
+
+- **Per-cell TSV.** `sc_integration/ENVI/2_spatial_imputation/PA/export_new_object_cell_metadata.R` now reads
+  `..._pathology_nucleus.rds` and writes a new `xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv`
+  (1,802,005 rows, 6.5 min, 12 GB; log `qc/export_cell_metadata_20261019.log`). Every non-label column is
+  identical to the old TSV, row for row. Per sample, the share of relabelled cells and the annotated counts
+  equal `qc/annotated_object_check.tsv` exactly. The old TSV is kept.
+- **Morphology state** (`PA/4_PA_morphology_state.qmd` + `morphology_state_gsea/`, loose vs compact, limma
+  `~ sample + region` then fgsea). Rerun 2026-10-19 (log `qc/morphology_state_rerun_20261019.log`; 12 min
+  prepare, 30 GB peak; 3.5 min R). The old side is the 2026-09-20 run, which used the same 091126 export, the
+  same log2/filter fix and the same seed, so only the labels differ. The same 3 samples qualify (258482 has no
+  compact region), with 0–12% more compact cells per sample and cell type.
+  - Genome-wide the result is stable. limma log2FC correlates 0.95–0.98 old vs new; fgsea NES correlates
+    0.91–0.95; no gene passes FDR < 0.05 in either run except 13 myeloid genes under the old labels.
+  - **Astrocytes: the glycan/ECM enrichment in myxoid regions gets stronger.** REACTOME_ECM_PROTEOGLYCANS
+    q 0.0011 → 7e-5 (NES 2.0 → 2.3); REACTOME_EXTRACELLULAR_MATRIX_ORGANIZATION q 9e-4 → 2e-5; KEGG ECM
+    receptor interaction q 0.005 → 7e-4. This is what removing mislabelled border cells should do.
+  - **Myeloid: it gets weaker.** REACTOME_ECM_PROTEOGLYCANS q 0.005 → 0.061 (NES 2.1 → 1.7);
+    ECM organization q 0.005 → 0.055. The 34-gene panel's mean log2FC falls from 0.027 to 0.0006, with 20 of 27
+    genes still up. Per patient (panel mean, loose − compact): 188570 0.094 → 0.045, 320784 −0.02 → −0.11,
+    328368 0.073 → 0.098. The measured 266-gene panel agrees (myeloid genes at FDR < 0.25: 7 → 1), so this is
+    the labels, not imputation noise.
+  - **OPC:** unchanged; the curated glycan sets stay mostly non-significant.
+  - The deck's `fig_glycan_ecm.png` (2026-09-04) predates the 091126 export and the log2 fix as well as the
+    new labels; regenerate it from the new render.
+- **Measured-panel QC** (`measured_panel_qc/`, PA arm only: `measured_panel_prepare.py PA`,
+  `measured_panel_fit.R PA`, then `compare_measured_imputed.py`; log `qc/measured_panel_rerun_20261019.log`).
+  PA attenuation moves from 0.98–1.9× to 0.87–2.2×. The CL rows of `measured_vs_imputed_attenuation.tsv` are
+  byte-identical to before.
+- **Vessel control** (`annotations/STalign/plot_endothelial_vessel_registration.py`, deck
+  `presentation/assets/fig_endothelial_vessel.png`). Redrawn from the 101326_nucleus coordinates: the
+  endothelial cells still trace the PA258482 vessel wall, a little more tightly on its right side. The slide can
+  now cite the held-out ~1 µm accuracy. Patient H&E: SendUserFile / Notion only.
+- **To render (user):** `annotations/linear_models.qmd`, then `annotations/linear_models_niches.qmd`, then
+  `niche/proseg_output_analysis/niche_interpretation_proseg.qmd` (reads the niches results), and
+  `sc_integration/ENVI/2_spatial_imputation/PA/4_PA_morphology_state.qmd`. The morphology notebook reuses the
+  pipeline outputs above; its glycan-score caches are absent, so it recomputes them (two full reads per h5ad).
+  Then rerun `compare_pa_enrichment.R` to add the A/B/C rows.
 
 ### All commands (production outputs, figures, diagnostics)
 
@@ -168,8 +217,18 @@ python annotations/STalign/nucleus_rerun/provenance.py --compare $NEW_DIR/qc/rep
 # 5. the annotated BANKSY object from the new metas (~16 min, 14 GB RAM), its check, then the provenance manifest
 Rscript annotations/STalign/add_annotations.R
 Rscript annotations/STalign/nucleus_rerun/check_annotated_object.R
+# 6. PA pathology analyses on the new labels: snapshot the old outputs (qc/pa_enrichment_old_labels/), the per-cell TSV,
+#    the morphology-state pipeline, the measured-panel PA arm, the vessel figure; renders (user); the comparison
+Rscript sc_integration/ENVI/2_spatial_imputation/PA/export_new_object_cell_metadata.R
+(cd sc_integration/ENVI/2_spatial_imputation/PA/morphology_state_gsea && python morphology_state_prepare.py && Rscript morphology_state.R)
+(cd sc_integration/ENVI/2_spatial_imputation/measured_panel_qc && python measured_panel_prepare.py PA && Rscript measured_panel_fit.R PA && python compare_measured_imputed.py)
+python annotations/STalign/plot_endothelial_vessel_registration.py
+quarto render annotations/linear_models.qmd   # then linear_models_niches.qmd, niche_interpretation_proseg.qmd, 4_PA_morphology_state.qmd
+Rscript annotations/STalign/nucleus_rerun/compare_pa_enrichment.R
 python annotations/STalign/nucleus_rerun/provenance.py            # records HEAD, md5s, versions, conda env export
 ```
+Run step 6 from the main checkout: the morphology and measured-panel scripts write next to themselves, and
+`4_PA_morphology_state.qmd` reads them from `youyun/plgg/code/...`.
 (GG240468 was replayed with `original` and `true` only.)
 
 - `NEW_DIR/qc/transform_<s>.npz` stores the fitted transform: affine `A`, velocity field `v` on grid
@@ -193,6 +252,7 @@ python annotations/STalign/nucleus_rerun/provenance.py            # records HEAD
 | `diag_jpg_frame.py` | Checks that the JPG is the SVS at level 0 / 7, and the polygon outlines against tissue edges |
 | `diag_image_term.py` | How sharply each H&E/Xenium image pair's match pins the map (R² of STAlign's contrast fit vs offset) |
 | `check_annotated_object.R` | Checks the annotated BANKSY object against the new metas; label changes vs the old object |
+| `compare_pa_enrichment.R` | Old-label vs new-label PA pathology-enrichment results (mixed models, niche dictionary, morphology state, measured panel) |
 | `provenance.py` | Provenance manifest; `--compare` checks a rerun against the production outputs |
 
 ### Method (final)
