@@ -18,7 +18,7 @@
 # Outputs (per cohort, consumed by measured_panel_fit.R):
 #   measured_<COH>_pseudobulk_matrix.csv   gene x (sample__celltype__region), mean of X
 #   measured_<COH>_sample_design.csv       column_id, sample, cell_type, region
-import glob
+import glob, sys
 from pathlib import Path
 import numpy as np, pandas as pd, h5py
 
@@ -41,10 +41,14 @@ def _dec(a):
 
 def main():
     meta = pd.read_csv(
-        ROOT / "xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv",
+        # pathology labels from the nucleus STAlign rerun (pathology_annotations_101326_nucleus)
+        ROOT / "xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv",
         sep="\t", usecols=["cell_id", "cell_type", "pathology_annotation"]).set_index("cell_id")
 
-    for coh, cfg in COHORTS.items():
+    # optional cohort names on the command line (e.g. `PA`) rebuild only those cohorts; the
+    # other cohort's files stay as they are, so its measured/imputed pairing is unchanged.
+    cohorts = {k: COHORTS[k] for k in sys.argv[1:]} if len(sys.argv) > 1 else COHORTS
+    for coh, cfg in cohorts.items():
         cols, design = {}, []
         for f in sorted(glob.glob(str(ENVI / cfg["glob"]))):
             sid = Path(f).name.replace("_spatial_envi.h5ad", "")

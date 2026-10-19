@@ -393,8 +393,9 @@ means_cache = ms_dir / "morphology_state_glycan_score_means.tsv"
 gene_cache = ms_dir / "morphology_state_glycan_gene_means.tsv"
 
 # Metadata + h5ad list are cheap; only the h5ad *reads* are heavy and cache-gated.
+# pathology labels from the nucleus STAlign rerun (pathology_annotations_101326_nucleus)
 cell_meta = pd.read_csv(
-    workdir + "youyun/plgg/data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv",
+    workdir + "youyun/plgg/data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv",
     sep="\t", usecols=["cell_id", "cell_type", "pathology_annotation"]
 ).set_index("cell_id")
 cell_meta["region"] = cell_meta["pathology_annotation"].map(REGION_MAP)
@@ -510,13 +511,13 @@ for ct in CELL_TYPES:
     score_delta = deltas.loc[deltas["cell_type"] == ct, "delta_loose_minus_compact"].mean()
     d = limma_de[limma_de["cell_type"] == ct]
     gd = d[d["gene"].isin(GLYCAN_ECM_GENES)]
-    glymean = gd["logFC_loose_vs_compact"].mean()
-    pct = 100 * (d["logFC_loose_vs_compact"] < glymean).mean()
+    glymean = gd["log2FC_loose_vs_compact"].mean()
+    pct = 100 * (d["log2FC_loose_vs_compact"] < glymean).mean()
     eic.append({
         "cell_type": lineage_display[ct],
         "raw_panel_delta": round(raw_delta, 4),
         "score_delta": round(score_delta, 4),
-        "n_genes_up_of_34": int((gd["logFC_loose_vs_compact"] > 0).sum()),
+        "n_genes_up_of_34": int((gd["log2FC_loose_vs_compact"] > 0).sum()),
         "panel_logFC_genome_percentile": round(pct, 0),
     })
 pd.DataFrame(eic)

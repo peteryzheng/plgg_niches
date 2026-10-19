@@ -236,7 +236,8 @@ re-running BANKSY/Harmony/UMAP. Skip it only if you rebuilt from scratch via
   `banksy_param_search/k1_15_..._resct_0.5,1_kni_50_resni_0.5,1/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134.rds`
   (the dir name still carries the base run's `0.5,1` sweep suffix; the file
   itself is at the final `resct_0.2/resni_0.5`). Its pathology-merged copy
-  (§3f) is `..._20260826_115134_pathology.rds`.
+  (§3f) is `..._20260826_115134_pathology_nucleus.rds` (nucleus STAlign labels);
+  the older `..._pathology.rds` carries the superseded 030226 labels.
 
 ### 2d. Cluster annotation + spatial visualization
 All under `niche/proseg_output_analysis/`.
@@ -307,9 +308,17 @@ Aligns pathologist GeoJSON polygons (drawn on H&E in QuPath) onto Xenium
 space, writes per-cell pathology labels, merges them back into the
 BANKSY object, then runs pathology × cell-type / niche enrichment.
 
-### 3a. Per-sample STalign QMDs
+**Current registration: the nucleus-guided rerun (2026-10-14).**
+`annotations/STalign/nucleus_rerun/` (`bash annotations/STalign/nucleus_rerun/run_all.sh`;
+commands, results and provenance in its `README.md`) writes
+`youyun/plgg/data/Xenium_annotations/pathology_annotations_101326_nucleus/proseg_pathology_<SAMPLE>_proseg_meta.csv`
+(held-out nucleus error ~1 µm). The per-sample QMDs in 3a–3c are the original
+pipeline; their `pathology_annotations_030226/` map is off by 4–85 µm and is kept
+only for comparison. Use the 101326_nucleus labels for anything new.
+
+### 3a. Per-sample STalign QMDs (superseded)
 `annotations/STalign/pathology_<SAMPLE>_proseg.qmd` — 11 files, one per
-cohort sample. These are the source of truth (edits go here).
+cohort sample, writing the old 030226 map.
 
 ### 3b. Convert QMD → IPYNB (needed for the cluster step)
 The cluster runs `.ipynb` via `jupyter nbconvert`, so convert first:
@@ -339,8 +348,9 @@ qsub annotations/STalign/stalign_qmd_array_qsub.sh
     `youyun/plgg/data/segmentation/proseg_run_121024/<file>/<file>_proseg/outs/`.
   - Sample-id → file mapping: `youyun/plgg/data/metadata/Xenium_PS.xlsx`.
 - **Outputs (per sample)**:
-  `youyun/plgg/data/Xenium_annotations/pathology_annotations_030226/proseg_pathology_<SAMPLE>_proseg_meta.csv`
-  with columns `cell_id, annotation, region_id`.
+  `youyun/plgg/data/Xenium_annotations/pathology_annotations_101326_nucleus/proseg_pathology_<SAMPLE>_proseg_meta.csv`
+  (nucleus rerun; the 3a–3c QMDs wrote the same columns to `pathology_annotations_030226/`)
+  with columns `cell_id, annotation, region_id` and the H&E coordinates `STAlign_x/_y`.
 
 ### 3e. Optional: rebuild the LGG1 merged GeoJSON
 `annotations/STalign/build_lgg1_merged_geojson.py` merges multiple
@@ -358,9 +368,8 @@ samples.
   by `(cell_id, sample_id)`, normalizes pathology labels (e.g. hex
   colors → human names), writes:
   - Annotated full RDS:
-    `youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_..._annotated.rds`
-  - Annotated 5% subset RDS (re-sampled fresh each run):
-    `..._connected_subset_..._annotated.rds`
+    `youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_..._20260826_115134_pathology_nucleus.rds`
+  - Annotated 5% subset RDS (`set.seed(1)`): `..._pathology_nucleus_subset.rds`
   - Adds `pathology_annotation` + `region_id` columns to `colData`.
 
 ### 3g. Pathology × cell-type / niche enrichment (`annotations/`)
@@ -523,8 +532,7 @@ of the Xenium critical path.
 2c. niche/banksy_workflow/{celltype_lowres_recluster,cluster_summary_stats,finalize_final_resolution}.R   (full-object re-tune + finalize -> production object; the fast-path that built the on-disk object)
 2d. niche/proseg_output_analysis/banksy_{cell_type,niche}_in_space_proseg.qmd   (spatial viz; NOT yet rewired to active object)
 2e. niche/proseg_output_analysis/celltype_niche_histology_enrichment.qmd + niche_interpretation_proseg.qmd   (enrichment + niche dictionary, active object)
-3a-c. annotations/STalign/convert_qmd_to_ipynb_local.sh             (local)
-      annotations/STalign/stalign_qmd_array_qsub.sh                 (qsub array)
+3.    annotations/STalign/nucleus_rerun/run_all.sh                  (4-slot qrsh; replaces the 3a-c QMDs)
 3f.   annotations/STalign/add_annotations.R                         (Rscript)
 3g.   annotations/linear_models{,_niches,_sample_level}.qmd         (quarto render)
 4a. sc_integration/ENVI/1_training_data/{sce_2_anndata,seurat_2_anndata,h5ad_2_sample_h5ad}.qmd
@@ -540,7 +548,7 @@ of the Xenium critical path.
 - BANKSY object identity travels through the pipeline by the suffix
   `k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134`.
   Files with this suffix in `banksy_param_search/` (`…_annotated.rds`) and
-  `Xenium_annotations/` (`…_pathology.rds`, §3f) are the same **active** cohort
+  `Xenium_annotations/` (`…_pathology_nucleus.rds`, §3f) are the same **active** cohort
   run; do not mix with other timestamps. The older
   `…res_0.75_1_20241230_232215` suffix is the **superseded** 2024-12-30 run —
   the not-yet-rewired `*_in_space_proseg.qmd` notebooks (§2d) still point at it.

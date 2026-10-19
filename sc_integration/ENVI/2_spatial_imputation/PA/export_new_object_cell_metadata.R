@@ -9,7 +9,11 @@
 # is stale and its cluster numbers do not map onto this object (joining it
 # scrambles every label). See memory reference_new_banksy_object_columns.
 #
-# Output (large; gitignored): data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv
+# Output (large; gitignored): data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv
+# Pathology labels come from the nucleus STAlign rerun (pathology_annotations_101326_nucleus,
+# via the _pathology_nucleus object). The old 030226-based cell_metadata_..._20260826.tsv is kept:
+# its cell type / niche / x / y are identical, and annotations/STalign/nucleus_rerun/
+# check_annotated_object.R reads its labels as the 'old' side.
 
 suppressMessages({library(SummarizedExperiment); library(SpatialExperiment); library(data.table)})
 
@@ -20,8 +24,8 @@ workdir = if (home %in% c('/Users/youyun','/Users/youyunzheng')) file.path(home,
           if (home == '/PHShome/yz762') '/data/beroukhim1' else '/xchip/beroukhimlab'
 workdir = paste0(workdir, '/')
 
-obj_path = paste0(workdir, 'youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology.rds')
-out_path = paste0(workdir, 'youyun/plgg/data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv')
+obj_path = paste0(workdir, 'youyun/plgg/data/Xenium_annotations/banksy_clusters_connected_annotated_k_geom_15_30_pc_20_lam_0.2_0.8_kct_50_resct_0.2_kni_50_resni_0.5_20260826_115134_pathology_nucleus.rds')
+out_path = paste0(workdir, 'youyun/plgg/data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv')
 
 cat('Reading object:', obj_path, '\n'); flush.console()
 o = readRDS(obj_path)

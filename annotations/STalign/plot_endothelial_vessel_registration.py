@@ -15,9 +15,10 @@ columns in the pathology CSV ARE the cell centroids in H&E jpg PIXEL space
 
 Inputs (canonical, under WORKDIR = detect_workdir()/youyun/plgg/data):
   - Xenium_annotations/images/230918_Xenium_CytAssist_LGG1.jpg      (co-registered H&E)
-  - Xenium_annotations/pathology_annotations_030226/proseg_pathology_PA258482_proseg_meta.csv
-        (per-cell STAlign_x/STAlign_y + centroids, from the STalign pathology qmd)
-  - xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv  (per-cell cell_type;
+  - Xenium_annotations/pathology_annotations_101326_nucleus/proseg_pathology_PA258482_proseg_meta.csv
+        (per-cell STAlign_x/STAlign_y + centroids, from the nucleus STAlign rerun in
+        annotations/STalign/nucleus_rerun/; the deck's first version used the old 030226 map)
+  - xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv  (per-cell cell_type;
         cell_id is suffixed `<base>__<sample_id>`, sample_id is numeric)
 
 Output:
@@ -66,9 +67,10 @@ CR, CC, HALF = 4992, 7405, 110  # ROI center in jpg px (row=STAlign_x, col=STAli
 CELL_COLOR = "#1f6feb"         # blue hollow rings so the H&E shows through each marker
 
 JPG = DATA / "Xenium_annotations/images" / f"230918_Xenium_CytAssist_{IMAGE_GROUP}.jpg"
-STALIGN_CSV = (DATA / "Xenium_annotations/pathology_annotations_030226"
+# H&E coordinates from the nucleus STAlign rerun (held-out nucleus error ~1 µm)
+STALIGN_CSV = (DATA / "Xenium_annotations/pathology_annotations_101326_nucleus"
                / f"proseg_pathology_PA{SAMPLE_NUM}_proseg_meta.csv")
-META_TSV = DATA / "xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv"
+META_TSV = DATA / "xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv"
 
 # --- load H&E + per-cell STalign coords ---
 V = np.asarray(Image.open(JPG).convert("RGB"))

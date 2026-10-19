@@ -21,6 +21,7 @@ EXPR_QUANTILE <- 0.10   # drop the bottom decile of expression within each cell 
 LOG_EPS       <- 1e-6
 
 COH <- list(CL = c("nonlipid", "lipid"), PA = c("compact", "loose"))
+if (length(args) > 0) COH <- COH[args]   # optional cohort names, as in measured_panel_prepare.py
 
 for (coh in names(COH)) {
     ref <- COH[[coh]][1]; alt <- COH[[coh]][2]

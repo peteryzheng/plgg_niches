@@ -12,7 +12,8 @@
 #   - PA ENVI spatial h5ads: */ENVI_results_091126/*astrocytoma_spatial_envi.h5ad
 #     imputed full transcriptome lives in obsm['imputation'], genes = var_names.
 #   - Phase-0 cell metadata TSV (single source of truth for finalized labels):
-#     data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv
+#     data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv
+#     (pathology labels from the nucleus STAlign rerun (pathology_annotations_101326_nucleus))
 #     joined on cell_id (== h5ad obs_names == "barcode-1__sampleID").
 #
 # Outputs (handoff CSVs written next to this script, consumed by morphology_state.R)
@@ -80,7 +81,7 @@ def load_cell_meta(workdir: str) -> pd.DataFrame:
     # One row per cell in the finalized BANKSY object; index by cell_id so we can
     # map h5ad obs_names -> cell_type + region. pathology_annotation -> region.
     meta_path = os.path.join(
-        workdir, "youyun/plgg/data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826.tsv"
+        workdir, "youyun/plgg/data/xenium_cell_types/cell_metadata_resct0.2_resni0.5_20260826_pathology_nucleus.tsv"
     )
     meta = pd.read_csv(
         meta_path, sep="\t", usecols=["cell_id", "cell_type", "pathology_annotation"]
