@@ -157,6 +157,7 @@ def main():
         ("pa_measured_panel_rerun_log", "measured_panel_rerun_20261019.log"),
         ("pa_enrichment_comparison", "pa_enrichment_old_vs_new.tsv"),
         ("pa_enrichment_comparison_summary", "pa_enrichment_old_vs_new_summary.tsv")] if (qc / name).exists()]
+    files += [(f"pa_render_log_{f.stem.split('_20261019')[0][len('render_'):]}", "all", f) for f in sorted(qc.glob("render_*_20261019.log"))]
     paths = sorted({p for _, _, p in files})
     missing = [str(p) for p in paths if not Path(p).exists()]
     with ThreadPoolExecutor(4) as ex:                       # ~9 GB of images: hash in parallel
