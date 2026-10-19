@@ -190,9 +190,10 @@ to the new labels. The old outputs were copied first to `NEW_DIR/qc/pa_enrichmen
   - **Niche dictionary:** cell-type columns and `niche_celltype_composition.tsv` are byte-identical. In
     `top_pathology`, niche 1 loses "Lipidized cells", niche 10 gains "Neuropil zone", niche 4 Neuropil logOR
     0.9 → 1.8; niches 9 and 12 keep Blood.
-- **Deck:** `fig_niche_pa_morphology.png` and `fig_glycan_ecm.png` still show the old results; regenerate them
-  from the new renders once the slide text is settled (talk_script L193 for the niche null, L210 for the glycan
-  claim).
+- **Deck (2026-10-19):** the glycan slide now uses the new heatmap (`fig_glycan_ecm.png` = figure 2 of the new
+  `4_PA_morphology_state.html`, via `presentation/src/extract_figs.py`) and says the state is clearest in astrocytes;
+  the vessel slide uses the SVS overlay; `plgg_xenium_deck.pptx` rebuilt with pptxgenjs 4.0.1. Not changed yet, by
+  choice: `fig_niche_pa_morphology.png` and `talk_script.md` (L186–193 registration and niche null, L210 glycan).
 
 ### All commands (production outputs, figures, diagnostics)
 

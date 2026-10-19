@@ -352,11 +352,14 @@ function cStalign(s,ax,ay,aw,ah){
 })();
 
 // ============================================================ 18. Q3 — result: glycan-ECM state
-(()=>{const s=pres.addSlide(); head(s,"Q3 · does state shape morphology?","Myxoid morphology carries a glycan-ECM state");
-  // ~1.5:1 heatmap enlarged on the left; one concise point in a narrow right column
+// Figure: curated-set heatmap from 4_PA_morphology_state.html on the nucleus STAlign labels (2026-10-19).
+// Astrocytes carry the signal (12/12 synthesis sets up, 8 at q<0.05); OPC and myeloid only 1 set each at q<0.05.
+(()=>{const s=pres.addSlide(); head(s,"Q3 · does state shape morphology?","Myxoid morphology carries an astrocyte glycan-ECM state");
+  // ~1.5:1 heatmap enlarged on the left; two concise points in a narrow right column
   imgFit(s,"fig_glycan_ecm.png",3252,2171,0.3,1.75,7.9,5.3);
   bullets(s,[
-    "Across OPC, astrocytes, and myeloid, myxoid regions turn up GAG / proteoglycan synthesis and down its breakdown — a coordinated matrix-accumulation state.",
+    "Astrocytes in myxoid regions turn up GAG / proteoglycan synthesis and ECM structure: all 12 curated sets up, 8 at q < 0.05, in all 3 patients.",
+    "OPC and myeloid lean the same way, but weakly (1 set each at q < 0.05).",
   ],8.45,3.1,4.35,3.0,17);
   foot(s);
 })();
