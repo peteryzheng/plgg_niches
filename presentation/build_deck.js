@@ -320,8 +320,8 @@ function cStalign(s,ax,ay,aw,ah){
     "The alignment checks out: endothelial cells land squarely on H&E blood vessels (right).",
     "So we can ask directly — do BANKSY niches line up with compact-fibrillary vs. loose-myxoid regions?",
   ],0.6,2.15,6.6,4.4,19);
-  imgFit(s,"fig_endothelial_vessel.png",990,1121,7.6,2.2,4.0,4.3);
-  s.addText("Registration control · PA258482 H&E",{x:7.6,y:6.55,w:4.0,h:0.3,fontFace:SANS,fontSize:11,italic:true,color:MUTED,align:"center",margin:0});
+  imgFit(s,"fig_endothelial_vessel.png",1544,1627,7.6,2.2,4.0,4.3);
+  s.addText("PA258482 H&E · original → nucleus-guided map",{x:7.6,y:6.55,w:4.0,h:0.3,fontFace:SANS,fontSize:11,italic:true,color:MUTED,align:"center",margin:0});
   foot(s);
 })();
 

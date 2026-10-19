@@ -167,9 +167,11 @@ to the new labels. The old outputs were copied first to `NEW_DIR/qc/pa_enrichmen
   PA attenuation moves from 0.98–1.9× to 0.87–2.2×. The CL rows of `measured_vs_imputed_attenuation.tsv` are
   byte-identical to before.
 - **Vessel control** (`annotations/STalign/plot_endothelial_vessel_registration.py`, deck
-  `presentation/assets/fig_endothelial_vessel.png`). Redrawn from the 101326_nucleus coordinates: the
-  endothelial cells still trace the PA258482 vessel wall, a little more tightly on its right side. The slide can
-  now cite the held-out ~1 µm accuracy. Patient H&E: SendUserFile / Notion only.
+  `presentation/assets/fig_endothelial_vessel.png`). Now one panel on a level-0 SVS crop (0.25 µm/px; the
+  first version used the 1.77 µm/px JPG): the same endothelial cells on the old and the nucleus map, with an
+  arrow from each old position to its new one. Every cell moves ~22 µm up-left (median; 15 µm across the
+  sample), yet both maps put the cells on the vessel, so this figure illustrates the shift but cannot by itself
+  show accuracy; the held-out nucleus check does. Patient H&E: SendUserFile / Notion only.
 - **To render (user):** `annotations/linear_models.qmd`, then `annotations/linear_models_niches.qmd`, then
   `niche/proseg_output_analysis/niche_interpretation_proseg.qmd` (reads the niches results), and
   `sc_integration/ENVI/2_spatial_imputation/PA/4_PA_morphology_state.qmd`. The morphology notebook reuses the
