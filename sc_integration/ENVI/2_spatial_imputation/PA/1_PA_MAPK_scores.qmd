@@ -23,7 +23,7 @@ Then we will see if the same trends are observed in the imputed MAPK scores in t
 
 The MAPK scores are here: `/data/beroukhim1/youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/MAPK_signatures.csv`
 
-The ENVI objects are here: `/data/beroukhim1/youyun/plgg/data/sc_integration/ENVI_results`
+The ENVI objects are here: `/data/beroukhim1/youyun/plgg/data/sc_integration/ENVI_results_091126`
 
 ```{python}
 import os
@@ -83,8 +83,8 @@ myeloid_gene_list = pd.read_csv(
 
 ```{python}
 # List all files matching the pattern
-sn_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results/*astrocytoma_sn_envi.h5ad"))
-spatial_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results/*astrocytoma_spatial_envi.h5ad"))
+sn_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results_091126/*astrocytoma_sn_envi.h5ad"))
+spatial_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results_091126/*astrocytoma_spatial_envi.h5ad"))
 ```
 
 # Looking at all MAPK scores

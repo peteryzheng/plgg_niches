@@ -423,7 +423,7 @@ quarto render sc_integration/ENVI/1_training_data/h5ad_2_sample_h5ad.qmd
 ### 4b. ENVI training (external)
 The ENVI training run itself (writing `*_sn_envi.h5ad` and
 `*_spatial_envi.h5ad` to
-`youyun/plgg/data/sc_integration/ENVI_results_022626/`) lives outside
+`youyun/plgg/data/sc_integration/ENVI_results_091126/`) lives outside
 this repo. Downstream notebooks consume those h5ads.
 
 ### 4c. PA-specific downstream — `sc_integration/ENVI/2_spatial_imputation/PA/`
@@ -431,26 +431,36 @@ this repo. Downstream notebooks consume those h5ads.
   spatial-imputed PA samples. Uses
   `sc_integration/ENVI/2_spatial_imputation/MAPK_signatures.csv`.
 - `2_MAPK_adj.qmd` — MAPK adjacency analysis.
-- `3_PA_myeloids.qmd` — Myeloid 1 vs Myeloid 2 pathway analysis. Triggers
-  two parallel GSEA tracks (see `README_myeloid_gsea.md`).
+- `4_PA_morphology_state.qmd` — compact vs myxoid cell state (glycan-ECM).
+  Driver: `PA/morphology_state_gsea/` (`morphology_state_prepare.py` →
+  `morphology_state.R`).
+- `PA_myeloid_mapk_neighborhood.qmd` — myeloid–glial neighborhood analysis.
+  Driver: `PA/glial_exposure_genes/run_pipeline.sh`.
 
-#### 4c-i. Spatial-imputation GSEA track
-`PA/spatial_imputation_gsea/` — pathway analysis on the ENVI-imputed
-matrix.
-- Driver: `myeloid_spatial_imputation_prepare.py` (build pseudobulks) →
-  `myeloid_spatial_imputation.R` (limma + GSEA).
-- Outputs: `myeloid_spatial_imputation_*` CSVs in the same folder.
+#### 4c-i. Retired: Myeloid 1 vs Myeloid 2 GSEA
+`3_PA_myeloids.qmd`, `PA/spatial_imputation_gsea/` and
+`PA/sn_label_transfer_gsea/` were **retired in the 2026-09-11 export
+migration**. Their contrast was Myeloid 1 vs Myeloid 2, a sub-myeloid split
+that existed only in the old objects' `Fine.Cell.Type.UMAP` obs column. That
+column is gone from the current export, and the finalized annotation resolves
+myeloid as a single lineage (cluster 7), so the contrast is no longer
+definable. Recover from git history if the fine labels are ever regenerated.
 
-#### 4c-ii. SN label-transfer GSEA track
-`PA/sn_label_transfer_gsea/` — pathway analysis on SN observed counts
-after spatial→SN label transfer in `latent_umap`.
-- Same `_prepare.py` + `.R` pattern.
-- Co-embedding PNGs in `PA/sn_label_transfer_gsea/coembedding/`.
+#### 4c-ii. Cell-type vocabulary
+The canonical spatial cell-type column is
+`cell_type_clust_Harmony_BANKSY_lam0.2_k50_res0.2` (10 labels), exported to
+`data/xenium_cell_types/cell_metadata_*.tsv` as `cell_type` by
+`PA/export_new_object_cell_metadata.R`. Map to publishable names through
+`helpers/cell_type_display.R::lineage_display` (and `sn_lineage_display` for
+single-nucleus). Note the h5ads also carry a coarser 6-category `cell_type`
+obs column with an `other` bucket — do NOT use it; it does not map through
+`lineage_display`.
 
 #### 4c-iii. Gene-universe audit
-`PA/PA_imputation_gene_audit_022626.md` documents the canonical
-gene-universe extraction logic for ENVI h5ads — read it if any
-imputation gene set looks off.
+`sc_integration/ENVI/2_spatial_imputation/ENVI_gene_audit_091126.md`
+documents the canonical gene-universe extraction logic for ENVI h5ads — read
+it if any imputation gene set looks off. (`PA/PA_imputation_gene_audit_022626.md`
+is the superseded audit of the retired export.)
 
 ### 4d. Other histologies — single-gene imputation checks
 - `sc_integration/ENVI/2_spatial_imputation/GG/GG_CD34.qmd`
@@ -459,7 +469,8 @@ imputation gene set looks off.
 Render each:
 ```bash
 conda activate spatial
-quarto render sc_integration/ENVI/2_spatial_imputation/PA/3_PA_myeloids.qmd
+quarto render sc_integration/ENVI/2_spatial_imputation/GG/GG_CD34.qmd
+quarto render sc_integration/ENVI/2_spatial_imputation/CN/CN_NKX2-1.qmd
 ```
 
 ---
@@ -517,7 +528,7 @@ of the Xenium critical path.
 3f.   annotations/STalign/add_annotations.R                         (Rscript)
 3g.   annotations/linear_models{,_niches,_sample_level}.qmd         (quarto render)
 4a. sc_integration/ENVI/1_training_data/{sce_2_anndata,seurat_2_anndata,h5ad_2_sample_h5ad}.qmd
-4b. (external) ENVI training -> ENVI_results_022626/*_envi.h5ad
+4b. (external) ENVI training -> ENVI_results_091126/*_envi.h5ad
 4c. sc_integration/ENVI/2_spatial_imputation/PA/{1,2,3}*.qmd        (+ GSEA scripts)
 5.  cohort_metadata/cohort_description.qmd, sample_comparisons/single_nuc_samples.qmd
 ```

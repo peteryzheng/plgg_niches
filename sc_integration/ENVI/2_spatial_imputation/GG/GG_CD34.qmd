@@ -21,7 +21,7 @@ This notebook is intended to visualize the expression of CD34 Expression in GG.
 
 Then we will see if the same trends are observed in the imputed CD34 expression in the spatial dataset. If there are any spatially segregated niches by MAPK. 
 
-The ENVI objects are here: `/data/beroukhim1/youyun/plgg/data/sc_integration/ENVI_results`
+The ENVI objects are here: `/data/beroukhim1/youyun/plgg/data/sc_integration/ENVI_results_091126`
 
 ```{python}
 import os
@@ -51,14 +51,40 @@ else:
 
 ```{python}
 # List all files matching the pattern
-sn_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results/*ganglioglioma_sn_envi.h5ad"))
-spatial_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results/*ganglioglioma_spatial_envi.h5ad"))
+sn_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results_091126/*ganglioglioma_sn_envi.h5ad"))
+spatial_data = sorted(glob.glob(workdir + "youyun/plgg/data/sc_integration/ENVI_results_091126/*ganglioglioma_spatial_envi.h5ad"))
 ```
 
 ## Load the MAPK scores
 
 ```{python}
 gene_list = pd.read_csv(workdir+"youyun/plgg/code/sc_integration/ENVI/2_spatial_imputation/MAPK_signatures.csv")
+```
+
+```{python}
+# Finalized spatial cell-type vocabulary. The 2026-09-11 ENVI export dropped the old
+# `Fine.Cell.Type.UMAP` obs column; the canonical replacement is the 10-label finalized
+# call below (the same column export_new_object_cell_metadata.R writes to the phase-0
+# metadata TSV as `cell_type`). NB the h5ads ALSO carry a coarser 6-category `cell_type`
+# obs column with an `other` bucket -- do not use it, it has no display mapping.
+CELL_TYPE_COL = "cell_type_clust_Harmony_BANKSY_lam0.2_k50_res0.2"
+
+# Mirrors helpers/cell_type_display.R::lineage_display so spatial panels here use the
+# same publishable labels as every other figure in the repo.
+lineage_display = {
+    "astro_glial": "Astrocytes", "radial_glia": "Radial glia", "opc": "OPC",
+    "oligo_mature": "Oligodendrocytes", "neuronal": "Neuronal", "myeloid": "Myeloid",
+    "t_cell": "T cells", "endothelial": "Endothelial",
+    "proliferation": "Proliferating", "undetermined": "Undetermined",
+}
+
+def add_display_cell_type(adata, col=CELL_TYPE_COL, out="cell_type_display"):
+    """Attach publishable cell-type labels for grouping/plotting."""
+    if col not in adata.obs.columns:
+        raise KeyError(f"Missing {col} in obs -- check the ENVI export vintage.")
+    adata.obs[out] = (adata.obs[col].astype(str).map(lineage_display)
+                      .fillna(adata.obs[col].astype(str)).astype("category"))
+    return adata
 ```
 
 # CD34 scores
@@ -70,6 +96,7 @@ for i in range(len(sn_data)):
     sn_adata = sc.read(sn_data[i])
     spatial_adata = sc.read(spatial_data[i])
     spatial_adata.obs['CD34'] = spatial_adata.obsm['imputation']['CD34']
+    add_display_cell_type(spatial_adata)
 
     # plot the scores 
     with plt.rc_context({"figure.figsize": (6,3), "figure.dpi": (200)}):
@@ -95,7 +122,7 @@ for i in range(len(sn_data)):
 
     with plt.rc_context({"figure.figsize": (10,3), "figure.dpi": (100)}):
         ax = sc.pl.violin(
-            spatial_adata, keys=['CD34'], groupby='Fine.Cell.Type.UMAP', 
+            spatial_adata, keys=['CD34'], groupby='cell_type_display', 
             rotation=90, show = False
         )
         plt.gca().get_legend().remove()
