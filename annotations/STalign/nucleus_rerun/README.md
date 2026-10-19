@@ -14,7 +14,7 @@
 - **Annotated BANKSY object (2026-10-16):** `add_annotations.R` now reads the new folder and writes
   `..._20260826_115134_pathology_nucleus.rds` (+ `_subset.rds`); the 030226-based `..._pathology.rds` is kept.
   See "Annotated BANKSY object" below for what was repointed and what still uses the old labels.
-- **PA pathology analyses (2026-10-19):** moved to the new labels; mixed-model renders pending. Astrocyte
+- **PA pathology analyses (2026-10-19):** moved to the new labels and rendered. Mixed models barely move. Astrocyte
   glycan/ECM enrichment in myxoid regions gets stronger, the myeloid one weaker (q 0.005 → 0.06). See "PA pathology
   analyses on the new labels" below.
 - **Write-up with figures:** Notion page "stalign rerun".
@@ -172,11 +172,27 @@ to the new labels. The old outputs were copied first to `NEW_DIR/qc/pa_enrichmen
   arrow from each old position to its new one. Every cell moves ~22 µm up-left (median; 15 µm across the
   sample), yet both maps put the cells on the vessel, so this figure illustrates the shift but cannot by itself
   show accuracy; the held-out nucleus check does. Patient H&E: SendUserFile / Notion only.
-- **To render (user):** `annotations/linear_models.qmd`, then `annotations/linear_models_niches.qmd`, then
-  `niche/proseg_output_analysis/niche_interpretation_proseg.qmd` (reads the niches results), and
-  `sc_integration/ENVI/2_spatial_imputation/PA/4_PA_morphology_state.qmd`. The morphology notebook reuses the
-  pipeline outputs above; its glycan-score caches are absent, so it recomputes them (two full reads per h5ad).
-  Then rerun `compare_pa_enrichment.R` to add the A/B/C rows.
+- **Mixed models and niche dictionary** (rendered 2026-10-19 on argos, logs `qc/render_*_20261019.log`; each HTML
+  names `_pathology_nucleus.rds`).
+  - **PA barely moves.** Estimates old vs new correlate 0.987 (`linear_models.qmd`, cell types), 0.97
+    (its per-polygon niche model, leaving out one non-converged −19 log-odds estimate under the old labels) and 0.999 (`linear_models_niches.qmd`). No PA
+    cell-type call changes. Three PA niche calls cross q < 0.25 with the same effect size, as their standard
+    errors shrink:
+    - niche 6 (proliferating / radial glia) in loose-myxoid, `linear_models_niches` (the deck panel): log-odds
+      −0.45 → −0.46, q 0.37 → 0.15, now depleted;
+    - niche 6 in Blood, same model: q 0.35 → 0.25 (−1.80 → −1.45);
+    - niche 10 (endothelial / myeloid) in loose-myxoid, per-polygon model: −1.07 → −1.10, q 0.27 → 0.16.
+    So the deck's "no enriched or depleted niches in compact vs myxoid" now has one weak exception (niche 6
+    depleted in myxoid, OR ≈ 0.63).
+  - **CN and CLN move more,** as their labels did (CN51420 75%, CL42112 43% of annotated cells relabelled). CN
+    Neuropil zone: 4 cell-type and 5 niche calls change. CLN `unannotated`: cell-type estimates no longer
+    correlate (r ≈ 0); endothelial depletion (q 0.01) is gone and four niche calls change.
+  - **Niche dictionary:** cell-type columns and `niche_celltype_composition.tsv` are byte-identical. In
+    `top_pathology`, niche 1 loses "Lipidized cells", niche 10 gains "Neuropil zone", niche 4 Neuropil logOR
+    0.9 → 1.8; niches 9 and 12 keep Blood.
+- **Deck:** `fig_niche_pa_morphology.png` and `fig_glycan_ecm.png` still show the old results; regenerate them
+  from the new renders once the slide text is settled (talk_script L193 for the niche null, L210 for the glycan
+  claim).
 
 ### All commands (production outputs, figures, diagnostics)
 
