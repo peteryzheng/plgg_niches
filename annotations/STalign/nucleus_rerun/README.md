@@ -18,8 +18,12 @@
   glycan/ECM enrichment in myxoid regions gets stronger, the myeloid one weaker (q 0.005 → 0.06). See "PA pathology
   analyses on the new labels" below.
 - **Write-up with figures:** Notion page "stalign rerun".
+- **Commit ids changed on 2026-10-20.** Before the first push to the public GitHub repo, the unpushed commits
+  were rewritten to leave out patient H&E images and the deck (`git filter-branch`, trees otherwise identical).
+  Logs and manifests written before that cite the old ids; `NEW_DIR/git_sha_map_20261020.tsv` maps old → new,
+  and the old history is kept locally on branch `backup/main-pre-he-rewrite-20261020`.
 - **Original task brief (2026-10-13):** `handoff_2026-10-13.md`.
-- **Code:** the pipeline as run is commit `7de415f` on this branch. Later commits add checks and
+- **Code:** the pipeline as run is commit `f4e622a` (was `7de415f`, see below). Later commits add checks and
   documentation only. `NEW_DIR/provenance.json` records the HEAD it was written from and the md5 of
   every script.
 
@@ -134,7 +138,7 @@ SpatialExperiment (`banksy_param_search/.../..._20260826_115134.rds`). Only labe
 
 ### PA pathology analyses on the new labels (2026-10-19)
 
-Branch `pa-pathology-nucleus` (`73578ed` for the repointing) moves every PA analysis that reads pathology labels
+Branch `pa-pathology-nucleus` (`b910768` for the repointing) moves every PA analysis that reads pathology labels
 to the new labels. The old outputs were copied first to `NEW_DIR/qc/pa_enrichment_old_labels/` (50 files,
 `MANIFEST.md5`). `compare_pa_enrichment.R` compares old vs new and writes `qc/pa_enrichment_old_vs_new.tsv`
 (one row per test) and `qc/pa_enrichment_old_vs_new_summary.tsv`.

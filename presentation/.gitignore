@@ -15,3 +15,8 @@ src/__pycache__/
 *.sb-*
 # stray legacy scaffold (not part of the deck build)
 plgg_xenium_skeleton.pptx
+# patient H&E images, and the deck that embeds them, stay local: the GitHub repo is public (2026-10-20)
+plgg_xenium_deck.pptx
+assets/fig_endothelial_vessel*.png
+assets/thumb_*.jpg
+assets/pa_biphasic_slide_annot.jpg

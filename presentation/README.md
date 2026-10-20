@@ -11,6 +11,13 @@ NODE_PATH="$(npm root -g)" node build_deck.js   # -> plgg_xenium_deck.pptx
 Requires Node + a global `pptxgenjs` (`npm i -g pptxgenjs`). `build_deck.js` resolves
 `assets/` relative to itself and writes the `.pptx` next to itself.
 
+**Not in git (2026-10-20):** the repo is public, so files that contain patient H&E stay local and are
+gitignored: `plgg_xenium_deck.pptx` (rebuild with `build_deck.js`), `assets/fig_endothelial_vessel*.png`
+(`annotations/STalign/plot_endothelial_vessel_registration.py`), `assets/thumb_*.jpg` and
+`assets/pa_biphasic_slide_annot.jpg` (`src/assets_he.py`, `src/crop_he.py`). Copies live in the shared
+`plgg/code` checkout; older versions of the thumbnails, the biphasic image and the deck are in the public
+history from before this date.
+
 ## Contents
 - `build_deck.js` — deck generator: slides, layout, and the drawn pipeline cartoons
   (ProSeg / BANKSY / ENVI / STalign) as vector shapes.
