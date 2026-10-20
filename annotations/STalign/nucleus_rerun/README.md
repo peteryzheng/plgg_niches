@@ -1,6 +1,7 @@
 # Nucleus-guided STAlign rerun (H&E ↔ Xenium)
 
-**Branch:** `stalign-nucleus-rerun`, in the worktree `/mnt/storage/dept/medonc/beroukhim/youyun/plgg/code_stalign`.
+**Branch:** `main` (pushed to GitHub). Developed on branch `stalign-nucleus-rerun` in a separate worktree, then
+merged; the branch and the worktree were removed on 2026-10-20.
 
 ## Status (2026-10-14): done for all 11 samples
 
@@ -138,7 +139,7 @@ SpatialExperiment (`banksy_param_search/.../..._20260826_115134.rds`). Only labe
 
 ### PA pathology analyses on the new labels (2026-10-19)
 
-Branch `pa-pathology-nucleus` (`b910768` for the repointing) moves every PA analysis that reads pathology labels
+Branch `pa-pathology-nucleus`, now merged (`b910768` for the repointing) moves every PA analysis that reads pathology labels
 to the new labels. The old outputs were copied first to `NEW_DIR/qc/pa_enrichment_old_labels/` (50 files,
 `MANIFEST.md5`). `compare_pa_enrichment.R` compares old vs new and writes `qc/pa_enrichment_old_vs_new.tsv`
 (one row per test) and `qc/pa_enrichment_old_vs_new_summary.tsv`.
